@@ -1,0 +1,134 @@
+// 自定义频谱图组件
+
+import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/material.dart' as material;
+
+class SpectrumChart extends material.StatelessWidget {
+  final List<FlSpot> data;
+  final double minFreq;
+  final double maxFreq;
+  final double minDbm;
+  final double maxDbm;
+  final double scalePerGrid;
+  final String startFreqStr;
+  final String stopFreqStr;
+  final String centerFreqStr;
+  final String spanStr;
+  final String sweepSpeedStr;
+
+  const SpectrumChart({
+    super.key,
+    required this.data,
+    required this.minFreq,
+    required this.maxFreq,
+    required this.minDbm,
+    required this.maxDbm,
+    required this.scalePerGrid,
+    required this.startFreqStr,
+    required this.stopFreqStr,
+    required this.centerFreqStr,
+    required this.spanStr,
+    required this.sweepSpeedStr,
+  });
+
+  @override
+  material.Widget build(material.BuildContext context) {
+    if (data.isEmpty) {
+      return const material.Center(child: material.Text('无数据', style: material.TextStyle(color: material.Colors.white)));
+    }
+
+    return material.Container(
+      height: double.infinity,
+      width: double.infinity,
+      padding: const material.EdgeInsets.all(16),
+      decoration: material.BoxDecoration(
+        color: const material.Color(0xFF1E1E2E),
+        borderRadius: material.BorderRadius.circular(8),
+      ),
+      child: material.Column(
+        children: [
+          material.Expanded(
+            child: LineChart(
+              LineChartData(
+                gridData: FlGridData(
+                  show: true,
+                  drawVerticalLine: true,
+                  drawHorizontalLine: true,
+                  verticalInterval: (maxFreq - minFreq) / 10,
+                  horizontalInterval: scalePerGrid,
+                  getDrawingHorizontalLine: (value) => FlLine(
+                    color: material.Colors.white.withOpacity(0.1),
+                    strokeWidth: 1,
+                    dashArray: [2, 2],
+                  ),
+                  getDrawingVerticalLine: (value) => FlLine(
+                    color: material.Colors.white.withOpacity(0.1),
+                    strokeWidth: 1,
+                    dashArray: [2, 2],
+                  ),
+                ),
+                titlesData: FlTitlesData(
+                  show: true,
+                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 60,
+                      interval: scalePerGrid * 1,
+                      getTitlesWidget: (value, meta) => material.Text(
+                        '${value.toInt()} dBm',
+                        style: const material.TextStyle(color: material.Colors.white, fontSize: 12),
+                      ),
+                    ),
+                  ),
+                  bottomTitles: const AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                ),
+                borderData: FlBorderData(
+                  show: false,
+                ),
+                minX: minFreq,
+                maxX: maxFreq,
+                minY: minDbm,
+                maxY: maxDbm,
+                lineBarsData: [
+                  LineChartBarData(
+                    spots: data,
+                    isCurved: false,
+                    color: material.Colors.yellow,
+                    barWidth: 2,
+                    dotData: const FlDotData(show: false),
+                    belowBarData: BarAreaData(
+                      show: true,
+                      gradient: material.LinearGradient(
+                        colors: [
+                          material.Colors.yellow.withOpacity(0.5),
+                          material.Colors.transparent,
+                        ],
+                        begin: material.Alignment.topCenter,
+                        end: material.Alignment.bottomCenter,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const material.SizedBox(height: 8),
+          material.Row(
+            mainAxisAlignment: material.MainAxisAlignment.spaceBetween,
+            children: [
+              material.Text('起始: $startFreqStr', style: const material.TextStyle(color: material.Colors.green, fontSize: 12)),
+              material.Text('中心: $centerFreqStr', style: const material.TextStyle(color: material.Colors.green, fontSize: 12)),
+              material.Text('扫宽: $spanStr', style: const material.TextStyle(color: material.Colors.green, fontSize: 12)),
+              material.Text('扫描速度: $sweepSpeedStr', style: const material.TextStyle(color: material.Colors.green, fontSize: 12)),
+              material.Text('终止: $stopFreqStr', style: const material.TextStyle(color: material.Colors.green, fontSize: 12)),
+            ],
+          )
+        ],
+      ),
+    );
+  }
+}

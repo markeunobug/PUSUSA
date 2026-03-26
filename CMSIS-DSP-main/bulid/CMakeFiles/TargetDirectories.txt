@@ -1,0 +1,3 @@
+C:/learning/pusu_V2/CMSIS-DSP-main/bulid/CMakeFiles/CMSISDSP.dir
+C:/learning/pusu_V2/CMSIS-DSP-main/bulid/CMakeFiles/edit_cache.dir
+C:/learning/pusu_V2/CMSIS-DSP-main/bulid/CMakeFiles/rebuild_cache.dir

@@ -1,0 +1,150 @@
+<mxfile host="app.diagrams.net" modified="2026-03-25T00:00:00.000Z" agent="Codex" version="24.7.17">
+  <diagram id="digital-signal-chain" name="Digital Signal Chain">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1920" pageHeight="1080" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="bg" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fffdf8;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="0" y="0" width="1900" height="1080" as="geometry"/>
+        </mxCell>
+        <mxCell id="title" value="窄带频谱仪数字信号处理链路（比赛版）" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#1f2937;" vertex="1" parent="1">
+          <mxGeometry x="60" y="30" width="540" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="note" value="假设末级 IF 固定为 50 MHz；若后续改为 60 MHz，仅需调整 NCO 频率与部分滤波参数，主结构不变。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;align=left;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="60" y="80" width="900" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="pl_lane" value="PL / FPGA 实时处理区" style="swimlane;html=1;startSize=34;rounded=1;horizontal=0;swimlaneFillColor=#d5e8d4;fillColor=#f8fff7;strokeColor=#82b366;fontStyle=1;fontSize=18;" vertex="1" parent="1">
+          <mxGeometry x="40" y="160" width="1420" height="360" as="geometry"/>
+        </mxCell>
+        <mxCell id="ps_lane" value="PS / ARM 控制与显示区" style="swimlane;html=1;startSize=34;rounded=1;horizontal=0;swimlaneFillColor=#dae8fc;fillColor=#f7fbff;strokeColor=#6c8ebf;fontStyle=1;fontSize=18;" vertex="1" parent="1">
+          <mxGeometry x="40" y="560" width="1420" height="260" as="geometry"/>
+        </mxCell>
+        <mxCell id="adc" value="ADC 采样&#xa;LTC2208&#xa;Fs ≈ 130 MSPS&#xa;输入: 固定 IF (50 MHz)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="80" y="250" width="150" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="align" value="ADC 接口与对齐&#xa;LVDS 解串/时序对齐&#xa;去直流偏置&#xa;溢出检测" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="270" y="250" width="160" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="fifo" value="采样缓冲&#xa;AXIS FIFO&#xa;跨时钟域/流控" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="470" y="250" width="140" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="ddc" value="数字下变频 DDC&#xa;NCO = 50 MHz&#xa;I/Q 正交混频&#xa;IF → 基带" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="650" y="250" width="170" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="cic" value="CIC 抽取&#xa;粗降采样&#xa;减轻后级计算量" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="860" y="250" width="150" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="fir" value="FIR 补偿 / 低通&#xa;修正 CIC 通带起伏&#xa;抑制抽取混叠" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="250" width="170" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="rbw" value="RBW 数字滤波器组&#xa;10k / 30k / 100k / 300k / 1M&#xa;可切换系数或多级抽取" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="1260" y="250" width="180" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="power" value="功率检测&#xa;I² + Q²&#xa;幅度/能量估计" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="1260" y="390" width="140" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="vbw" value="VBW / 平均 / 平滑&#xa;快扫/慢扫显示控制&#xa;降低抖动" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="390" width="140" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="dma" value="AXI DMA&#xa;结果上传 DDR / PS" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="890" y="390" width="140" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="fft_branch" value="可选调试支路&#xa;窗函数 + FFT + 功率谱&#xa;用于联调，不作为首版主链" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=15;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="650" y="390" width="190" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="cal" value="幅度校准引擎&#xa;ADC 码值 → dBFS → dBm&#xa;补偿衰减/LNA/VGA/通道误差" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="100" y="650" width="180" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="sweep" value="扫频控制&#xa;配置 LO、衰减器、LNA、VGA&#xa;管理频段切换与驻留时间" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="320" y="650" width="180" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="trace" value="扫频点缓存 / 轨迹处理&#xa;峰值保持&#xa;平均 / Max Hold / Clear-Write" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="560" y="650" width="180" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="ui" value="UI 显示&#xa;频谱曲线 / Marker / 瀑布图&#xa;RBW/VBW/参考电平显示" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="800" y="650" width="180" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="storage" value="参数与校准表&#xa;频段校准系数&#xa;幅度修正 / 本底修正" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="650" width="180" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="milestone" value="首版最小可运行链路&#xa;ADC → DDC → CIC → FIR → 100 kHz RBW → 功率检测 → DMA → 显示" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="80" y="860" width="760" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="risk" value="注意事项&#xa;1. 低频直通通道与变频通道需统一幅度标定&#xa;2. RBW 首版建议先实现 100 kHz，再扩展 10k/30k/300k/1M&#xa;3. IF 若改为 60 MHz，只需调整 DDC 和滤波参数，不必重画整条链" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14;align=left;" vertex="1" parent="1">
+          <mxGeometry x="880" y="850" width="580" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;strokeColor=#666666;" edge="1" parent="1" source="adc" target="align">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#666666;" edge="1" parent="1" source="align" target="fifo">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#666666;" edge="1" parent="1" source="fifo" target="ddc">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#82b366;" edge="1" parent="1" source="ddc" target="cic">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#82b366;" edge="1" parent="1" source="cic" target="fir">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#d79b00;" edge="1" parent="1" source="fir" target="rbw">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#d79b00;" edge="1" parent="1" source="rbw" target="power">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#d79b00;" edge="1" parent="1" source="power" target="vbw">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#6c8ebf;" edge="1" parent="1" source="vbw" target="dma">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=open;dashed=1;strokeWidth=2;strokeColor=#9673a6;" edge="1" parent="1" source="fir" target="fft_branch">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#6c8ebf;" edge="1" parent="1" source="dma" target="trace">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="960" y="580"/>
+              <mxPoint x="650" y="580"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#6c8ebf;" edge="1" parent="1" source="trace" target="ui">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=open;dashed=1;strokeWidth=2;strokeColor=#6c8ebf;" edge="1" parent="1" source="storage" target="cal">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=open;dashed=1;strokeWidth=2;strokeColor=#6c8ebf;" edge="1" parent="1" source="storage" target="sweep">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e15" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=open;dashed=1;strokeWidth=2;strokeColor=#6c8ebf;" edge="1" parent="1" source="cal" target="trace">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e16" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=open;dashed=1;strokeWidth=2;strokeColor=#6c8ebf;" edge="1" parent="1" source="sweep" target="trace">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e17" value="LO / 衰减 / 增益配置" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=open;dashed=1;strokeWidth=2;strokeColor=#6c8ebf;fontSize=13;" edge="1" parent="1" source="sweep" target="adc">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="410" y="610"/>
+              <mxPoint x="155" y="610"/>
+              <mxPoint x="155" y="350"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e18" value="RBW / VBW / Trace 参数下发" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=open;dashed=1;strokeWidth=2;strokeColor=#6c8ebf;fontSize=13;" edge="1" parent="1" source="sweep" target="rbw">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="410" y="610"/>
+              <mxPoint x="1350" y="610"/>
+              <mxPoint x="1350" y="350"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

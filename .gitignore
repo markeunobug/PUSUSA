@@ -1,0 +1,26 @@
+# Archives and large packaged artifacts
+*.zip
+*.rar
+*.7z
+
+# Flutter generated files
+.dart_tool/
+build/
+windows/flutter/ephemeral/
+
+# Common binary/debug artifacts
+*.pdb
+*.dll
+*.exe
+*.bin
+
+# Vivado/Vitis generated logs and temporary files
+**/Debug/
+**/.metadata/
+**/*.log
+**/*.jou
+**/*.str
+**/*.dmp
+
+# Temporary drawio files
+*.dtmp
