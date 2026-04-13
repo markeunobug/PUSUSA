@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="ASCII"?>
+<sdkproject:SdkProject xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:sdkproject="http://www.xilinx.com/sdkproject" name="pusu_20260409" location="C:/learning/pusu_V2/code/pusu_test/vitis_20260409/pusu_20260409" platform="C:/learning/pusu_V2/code/pusu_test/vitis_20260409/system_wrapper/export/system_wrapper/system_wrapper.xpfm" platformUID="xilinx:::0.0(custom)" systemProject="pusu_20260409_system" sysConfig="system_wrapper" runtime="cpp" cpu="standalone_ps7_cortexa9_0" cpuInstance="ps7_cortexa9_0" os="standalone" mssSignature="4aa6cd9f534edf29331487ef40c0de48">
+  <configuration name="Debug" id="xilinx.gnu.armv7.exe.debug.866097652">
+    <configBuildOptions xsi:type="sdkproject:SdkOptions"/>
+    <lastBuildOptions xsi:type="sdkproject:SdkOptions"/>
+  </configuration>
+  <configuration name="Release" id="xilinx.gnu.armv7.exe.release.236508442" dirty="true">
+    <configBuildOptions xsi:type="sdkproject:SdkOptions"/>
+  </configuration>
+  <template appTemplateName="empty_application"/>
+</sdkproject:SdkProject>

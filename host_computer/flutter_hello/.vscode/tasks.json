@@ -1,0 +1,18 @@
+﻿{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "运行上位机(Debug exe)",
+      "type": "shell",
+      "command": ".\\flutter_hello.exe",
+      "options": {
+        "cwd": "C:\\learning\\pusu_V2\\上位机\\flutter_hello\\build\\windows\\x64\\runner\\Debug"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

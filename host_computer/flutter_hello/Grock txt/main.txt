@@ -1,0 +1,690 @@
+// 文件: main.dart
+// 修改后的主文件，导入并使用SerialPortManager和SerialPortSelector
+// 串口按钮放置在顶部CommandBar中，状态指示圆点作为图标
+// 导入自定义频谱图组件
+
+import 'package:fluent_ui/fluent_ui.dart';
+import 'package:flutter/material.dart' as material;
+import 'dart:math' as math;
+import 'package:fl_chart/fl_chart.dart';
+
+// 导入串口相关（假设路径为lib/serial_port_manager.dart和lib/serial_port_selector.dart）
+import 'serial_port_manager.dart';
+import 'serial_port_selector.dart';
+
+// 导入自定义频谱图组件（假设路径为lib/spectrum_chart.dart）
+import 'spectrum_chart.dart';
+
+void main() {
+  runApp(const MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return FluentApp(
+      title: 'Spectrum Analyzer',
+      theme: FluentThemeData(
+        brightness: Brightness.dark,
+        accentColor: Colors.blue,
+      ),
+      home: const MyHomePage(),
+    );
+  }
+}
+
+class MyHomePage extends StatefulWidget {
+  const MyHomePage({super.key});
+
+  @override
+  State<MyHomePage> createState() => _MyHomePageState();
+}
+
+class _MyHomePageState extends State<MyHomePage> {
+  // 单位选项列表
+  final List<String> freqUnits = ['Hz', 'kHz', 'MHz', 'GHz'];
+
+  // Frequency 参数控制器和单位
+  final TextEditingController startFreqController = TextEditingController(text: '0');
+  final TextEditingController stopFreqController = TextEditingController(text: '10');
+  final TextEditingController centerFreqController = TextEditingController(text: '5');
+  final TextEditingController spanController = TextEditingController(text: '10');
+  final ValueNotifier<String> startFreqUnit = ValueNotifier<String>('GHz');
+  final ValueNotifier<String> stopFreqUnit = ValueNotifier<String>('GHz');
+  final ValueNotifier<String> centerFreqUnit = ValueNotifier<String>('GHz');
+  final ValueNotifier<String> spanUnit = ValueNotifier<String>('GHz');
+
+  // Amplitude 参数
+  final TextEditingController refLevelController = TextEditingController(text: '0');
+  final ValueNotifier<String> attenuatorValue = ValueNotifier<String>('自动');
+  final ValueNotifier<String> preAmpValue = ValueNotifier<String>('自动');
+
+  // BW 参数状态
+  final ValueNotifier<String> rbwMode = ValueNotifier<String>('自动');
+  final ValueNotifier<String> rbwUnit = ValueNotifier<String>('Hz');
+  final TextEditingController rbwController = TextEditingController(text: '0');
+  final ValueNotifier<String> vbwMode = ValueNotifier<String>('VBW=RBW');
+  final ValueNotifier<String> vbwUnit = ValueNotifier<String>('Hz');
+  final TextEditingController vbwController = TextEditingController(text: '0');
+
+  // Detect 参数状态
+  final ValueNotifier<String> detectMode = ValueNotifier<String>('平均');
+
+  // Graph 参数
+  final TextEditingController scalePerGridController = TextEditingController(text: '10');
+
+  // 扫描速度
+  final ValueNotifier<double> sweepSpeed = ValueNotifier<double>(30.0);
+
+  // 串口管理
+  late SerialPortManager _serialManager;
+  final FlyoutController _serialFlyoutController = FlyoutController();
+
+  @override
+  void initState() {
+    super.initState();
+    _serialManager = SerialPortManager()..init();
+  }
+
+  @override
+  void dispose() {
+    startFreqController.dispose();
+    stopFreqController.dispose();
+    centerFreqController.dispose();
+    spanController.dispose();
+    refLevelController.dispose();
+    rbwController.dispose();
+    vbwController.dispose();
+    scalePerGridController.dispose();
+    _serialManager.dispose();
+    _serialFlyoutController.dispose();
+    super.dispose();
+  }
+
+  // 单位换算系数
+  double _getUnitFactor(String unit) {
+    switch (unit) {
+      case 'kHz':
+        return 1e3;
+      case 'MHz':
+        return 1e6;
+      case 'GHz':
+        return 1e9;
+      default: // Hz
+        return 1.0;
+    }
+  }
+
+  // 解析频率值为Hz（考虑单位）
+  double? _parseFreq(String text, String unit) {
+    final double? value = double.tryParse(text);
+    if (value == null || value < 0) return null;
+    return value * _getUnitFactor(unit);
+  }
+
+  // 格式化频率值（自动选择最优单位并保留两位小数）
+  String _formatFreqAutoUnit(double freqHz, [int decimalPlaces = 2]) {
+    if (freqHz >= 1e9) {
+      return '${(freqHz / 1e9).toStringAsFixed(decimalPlaces)} GHz';
+    } else if (freqHz >= 1e6) {
+      return '${(freqHz / 1e6).toStringAsFixed(decimalPlaces)} MHz';
+    } else if (freqHz >= 1e3) {
+      return '${(freqHz / 1e3).toStringAsFixed(decimalPlaces)} kHz';
+    } else {
+      return '${freqHz.toStringAsFixed(decimalPlaces)} Hz';
+    }
+  }
+
+  // 格式化频率值（指定单位并保留两位小数）
+  String _formatFreq(double freqHz, String unit, [int decimalPlaces = 2]) {
+    final double factor = _getUnitFactor(unit);
+    return '${(freqHz / factor).toStringAsFixed(decimalPlaces)}';
+  }
+
+  // 弹窗提醒
+  void _showErrorDialog(String message) {
+    showDialog(
+      context: context,
+      builder: (context) => ContentDialog(
+        title: const Text('参数错误'),
+        content: Text(message),
+        actions: [
+          Button(
+            child: const Text('确定'),
+            onPressed: () => Navigator.pop(context),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 从起始/终止频率更新中心/跨度
+  void _updateFreqFromStartStop() {
+    final double? startHz = _parseFreq(startFreqController.text, startFreqUnit.value);
+    final double? stopHz = _parseFreq(stopFreqController.text, stopFreqUnit.value);
+
+    // 合法性校验
+    if (startHz == null || stopHz == null) {
+      _showErrorDialog('起始/终止频率输入无效，请输入数字');
+      return;
+    }
+    if (startHz >= stopHz) {
+      _showErrorDialog('起始频率不能大于等于终止频率');
+      return;
+    }
+
+    // 计算中心和跨度（Hz）
+    final double centerHz = (startHz + stopHz) / 2;
+    final double spanHz = stopHz - startHz;
+
+    // 更新控制器和单位（自动选择最优单位）
+    setState(() {
+      // 中心频率
+      centerFreqController.text = _formatFreq(centerHz, centerFreqUnit.value);
+      // 跨度
+      spanController.text = _formatFreq(spanHz, spanUnit.value);
+    });
+  }
+
+  // 从中心/跨度更新起始/终止频率
+  void _updateFreqFromCenterSpan() {
+    final double? centerHz = _parseFreq(centerFreqController.text, centerFreqUnit.value);
+    final double? spanHz = _parseFreq(spanController.text, spanUnit.value);
+
+    // 合法性校验
+    if (centerHz == null || spanHz == null) {
+      _showErrorDialog('中心频率/扫宽输入无效，请输入数字');
+      return;
+    }
+    if (spanHz <= 0) {
+      _showErrorDialog('扫宽必须大于0');
+      return;
+    }
+
+    // 计算起始/终止（Hz）
+    final double startHz = centerHz - spanHz / 2;
+    final double stopHz = centerHz + spanHz / 2;
+
+    // 校验起始频率非负
+    if (startHz < 0) {
+      _showErrorDialog('计算出的起始频率为负数，请调整中心频率或扫宽');
+      return;
+    }
+
+    // 更新控制器和单位
+    setState(() {
+      startFreqController.text = _formatFreq(startHz, startFreqUnit.value);
+      stopFreqController.text = _formatFreq(stopHz, stopFreqUnit.value);
+    });
+  }
+
+  // 输入框失去焦点/回车触发的回调
+  void _onFreqFieldSubmitted(TextEditingController controller, VoidCallback calculateFunc) {
+    // 移除首尾空格
+    controller.text = controller.text.trim();
+    // 触发计算
+    calculateFunc();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 解析频率值（统一为Hz）
+    final double startFreq = _parseFreq(startFreqController.text, startFreqUnit.value) ?? 0;
+    final double stopFreq = _parseFreq(stopFreqController.text, stopFreqUnit.value) ?? 10e9;
+    final double centerFreq = _parseFreq(centerFreqController.text, centerFreqUnit.value) ?? 5e9;
+    final double span = _parseFreq(spanController.text, spanUnit.value) ?? 10e9;
+
+    // 生成示例数据
+    final List<FlSpot> spectrumData = generateSpectrumData(
+      pointCount: 100,
+      minFreq: startFreq,
+      maxFreq: stopFreq,
+      minDbm: -110,
+      maxDbm: -90,
+    );
+
+    // 解析参考电平和刻度
+    final double refLevel = double.tryParse(refLevelController.text) ?? 0;
+    final double scalePerGrid = double.tryParse(scalePerGridController.text) ?? 10;
+
+    // 计算数据实际 min/max dBm
+    final double actualMinDbm = spectrumData.map((e) => e.y).reduce(math.min);
+    final double actualMaxDbm = spectrumData.map((e) => e.y).reduce(math.max);
+
+    // 自动调整显示刻度
+    var displayScale = scalePerGrid;
+    while ((actualMaxDbm - actualMinDbm) > 10 * displayScale) {
+      displayScale *= 2;
+    }
+
+    // 优先保证最低值显示全
+    final double minDbmDisplay = (actualMinDbm / displayScale).floor() * displayScale;
+    final double maxDbmDisplay = minDbmDisplay + 10 * displayScale;
+
+    return ScaffoldPage(
+      padding: const EdgeInsets.only(top: 0),
+      header: CommandBar(
+        overflowBehavior: CommandBarOverflowBehavior.wrap,
+        primaryItems: [
+          CommandBarButton(
+            icon: Image.asset('assets/imgs/logo6.png', width: 127, height: 35), // 替换为你的 logo 路径和大小
+            onPressed: null, // 或添加点击事件
+          ),
+          CommandBarButton(icon: const Icon(FluentIcons.document), label: const Text('文件'), onPressed: () {}),
+          CommandBarButton(icon: const Icon(FluentIcons.settings), label: const Text('模式'), onPressed: () {}),
+          CommandBarButton(icon: const Icon(FluentIcons.toolbox), label: const Text('系统'), onPressed: () {}),
+          CommandBarButton(icon: const Icon(FluentIcons.refresh), label: const Text('预设'), onPressed: () {}),
+          CommandBarButton(icon: const Icon(FluentIcons.play), label: const Text('单次'), onPressed: () {}),
+          CommandBarButton(icon: const Icon(FluentIcons.play_resume), label: const Text('连续'), onPressed: () {}),
+          CommandBarButton(icon: const Icon(FluentIcons.record2), label: const Text('记录'), onPressed: () {}),
+          CommandBarButton(icon: const Icon(FluentIcons.repeat_all), label: const Text('回放'), onPressed: () {}),
+          CommandBarButton(icon: const Icon(FluentIcons.camera), label: const Text('截图'), onPressed: () {}),
+          const CommandBarSeparator(),
+          // 添加串口按钮
+          CommandBarButton(
+            icon: FlyoutTarget(
+              controller: _serialFlyoutController,
+              child: ValueListenableBuilder<ConnectionStatus>(
+                valueListenable: _serialManager.connectionStatus,
+                builder: (context, status, child) {
+                  Color color;
+                  switch (status) {
+                    case ConnectionStatus.connected:
+                      color = material.Colors.green;
+                      break;
+                    case ConnectionStatus.disconnected:
+                      color = material.Colors.red;
+                      break;
+                    case ConnectionStatus.noPorts:
+                      color = material.Colors.grey;
+                      break;
+                  }
+                  return Container(
+                    width: 12,
+                    height: 12,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: color,
+                    ),
+                  );
+                },
+              ),
+            ),
+            label: const Text('Serial Port'),
+            onPressed: () {
+              _serialFlyoutController.showFlyout(
+                builder: (context) => SerialPortSelector(manager: _serialManager),
+              );
+            },
+          ),
+        ],
+      ),
+      content: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Acrylic(
+              tint: material.Colors.black.withOpacity(0.8),
+              child: SpectrumChart(
+                data: spectrumData,
+                minFreq: startFreq,
+                maxFreq: stopFreq,
+                minDbm: minDbmDisplay,
+                maxDbm: maxDbmDisplay,
+                scalePerGrid: displayScale,
+                startFreqStr: _formatFreqAutoUnit(startFreq),
+                stopFreqStr: _formatFreqAutoUnit(stopFreq),
+                centerFreqStr: _formatFreqAutoUnit(centerFreq),
+                spanStr: _formatFreqAutoUnit(span),
+                sweepSpeedStr: '${sweepSpeed.value.toStringAsFixed(1)} 帧/秒',
+              ),
+            ),
+          ),
+          Container(
+            width: 300,
+            color: const Color.fromARGB(255, 66, 66, 66),
+            padding: const EdgeInsets.all(8),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expander(
+                    header: const Text('Frequency'),
+                    content: Column(
+                      children: [
+                        // 起始频率
+                        _buildInputRow(
+                          label: '起始频率：',
+                          controller: startFreqController,
+                          unitNotifier: startFreqUnit,
+                          units: freqUnits,
+                          onSubmitted: () => _updateFreqFromStartStop(),
+                        ),
+                        const SizedBox(height: 8),
+                        // 终止频率
+                        _buildInputRow(
+                          label: '终止频率：',
+                          controller: stopFreqController,
+                          unitNotifier: stopFreqUnit,
+                          units: freqUnits,
+                          onSubmitted: () => _updateFreqFromStartStop(),
+                        ),
+                        const SizedBox(height: 8),
+                        // 中心频率
+                        _buildInputRow(
+                          label: '中心频率：',
+                          controller: centerFreqController,
+                          unitNotifier: centerFreqUnit,
+                          units: freqUnits,
+                          onSubmitted: () => _updateFreqFromCenterSpan(),
+                        ),
+                        const SizedBox(height: 8),
+                        // 扫描带宽
+                        _buildInputRow(
+                          label: '扫描带宽：',
+                          controller: spanController,
+                          unitNotifier: spanUnit,
+                          units: freqUnits,
+                          onSubmitted: () => _updateFreqFromCenterSpan(),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expander(
+                    header: const Text('Amplitude'),
+                    content: Column(
+                      children: [
+                        Row(
+                          children: [
+                            const SizedBox(
+                              width: 100,
+                              child: Text('参考电平 (dBm)：', style: TextStyle(color: material.Colors.white)),
+                            ),
+                            Expanded(
+                              child: TextBox(
+                                controller: refLevelController,
+                                onChanged: (value) => setState(() {}),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            const SizedBox(
+                              width: 100,
+                              child: Text('衰减器：', style: TextStyle(color: material.Colors.white)),
+                            ),
+                            Expanded(
+                              child: ValueListenableBuilder<String>(
+                                valueListenable: attenuatorValue,
+                                builder: (context, value, child) {
+                                  return ComboBox<String>(
+                                    value: value,
+                                    isExpanded: true,
+                                    items: ['自动', '0dB', '0.25dB', '0.5dB', '1dB', '2dB', '4dB', '8dB', '16dB', '31.75dB']
+                                        .map((option) => ComboBoxItem<String>(value: option, child: Text(option)))
+                                        .toList(),
+                                    onChanged: (newValue) {
+                                      if (newValue != null) {
+                                        attenuatorValue.value = newValue;
+                                      }
+                                    },
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            const SizedBox(
+                              width: 100,
+                              child: Text('预放：', style: TextStyle(color: material.Colors.white)),
+                            ),
+                            Expanded(
+                              child: ValueListenableBuilder<String>(
+                                valueListenable: preAmpValue,
+                                builder: (context, value, child) {
+                                  return ComboBox<String>(
+                                    value: value,
+                                    isExpanded: true,
+                                    items: ['使能', '关闭', '自动']
+                                        .map((option) => ComboBoxItem<String>(value: option, child: Text(option)))
+                                        .toList(),
+                                    onChanged: (newValue) {
+                                      if (newValue != null) {
+                                        preAmpValue.value = newValue;
+                                      }
+                                    },
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expander(
+                    header: const Text('BW'),
+                    content: Column(
+                      children: [
+                        Row(
+                          children: [
+                            const SizedBox(
+                              width: 100,
+                              child: Text('RBW模式：', style: TextStyle(color: material.Colors.white)),
+                            ),
+                            Expanded(
+                              child: ValueListenableBuilder<String>(
+                                valueListenable: rbwMode,
+                                builder: (context, value, child) {
+                                  return ComboBox<String>(
+                                    value: value,
+                                    isExpanded: true,
+                                    items: ['手动', '自动', '0.001*Span', '0.01*Span']
+                                        .map((option) => ComboBoxItem<String>(value: option, child: Text(option)))
+                                        .toList(),
+                                    onChanged: (newValue) {
+                                      if (newValue != null) {
+                                        rbwMode.value = newValue;
+                                      }
+                                    },
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        _buildInputRow(
+                          label: 'RBW：',
+                          controller: rbwController,
+                          unitNotifier: rbwUnit,
+                          units: freqUnits,
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            const SizedBox(
+                              width: 100,
+                              child: Text('VBW模式：', style: TextStyle(color: material.Colors.white)),
+                            ),
+                            Expanded(
+                              child: ValueListenableBuilder<String>(
+                                valueListenable: vbwMode,
+                                builder: (context, value, child) {
+                                  return ComboBox<String>(
+                                    value: value,
+                                    isExpanded: true,
+                                    items: ['手动', 'VBW=RBW', 'VBW=0.1*RBW', 'VBW=0.01*RBW', 'VBW=10*RBW']
+                                        .map((option) => ComboBoxItem<String>(value: option, child: Text(option)))
+                                        .toList(),
+                                    onChanged: (newValue) {
+                                      if (newValue != null) {
+                                        vbwMode.value = newValue;
+                                      }
+                                    },
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        _buildInputRow(
+                          label: 'VBW：',
+                          controller: vbwController,
+                          unitNotifier: vbwUnit,
+                          units: freqUnits,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expander(
+                    header: const Text('Detect'),
+                    content: Column(
+                      children: [
+                        Row(
+                          children: [
+                            const SizedBox(
+                              width: 100,
+                              child: Text('检波方式：', style: TextStyle(color: material.Colors.white)),
+                            ),
+                            Expanded(
+                              child: ValueListenableBuilder<String>(
+                                valueListenable: detectMode,
+                                builder: (context, value, child) {
+                                  return ComboBox<String>(
+                                    value: value,
+                                    isExpanded: true,
+                                    items: ['取样', '平均', '正峰值', '负峰值', '最大功率', '均方根值']
+                                        .map((option) => ComboBoxItem<String>(value: option, child: Text(option)))
+                                        .toList(),
+                                    onChanged: (newValue) {
+                                      if (newValue != null) {
+                                        detectMode.value = newValue;
+                                      }
+                                    },
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Expander(header: Text('Measure'), content: Placeholder()),
+                  const Expander(header: Text('System'), content: Placeholder()),
+                  Expander(
+                    header: const Text('Graph'),
+                    content: Column(
+                      children: [
+                        Row(
+                          children: [
+                            const SizedBox(
+                              width: 100,
+                              child: Text('刻度/格：', style: TextStyle(color: material.Colors.white)),
+                            ),
+                            Expanded(
+                              child: TextBox(
+                                controller: scalePerGridController,
+                                onChanged: (value) => setState(() {}),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Text('dB', style: TextStyle(color: material.Colors.white)),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+      bottomBar: Container(
+        height: 30,
+        color: material.Colors.grey[900],
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.start,
+          children: [
+            SizedBox(width: 16),
+            Text('当前状态：正在扫描', style: TextStyle(color: material.Colors.white)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 构建带单位下拉的输入行（支持回车触发计算）
+  Widget _buildInputRow({
+    required String label,
+    required TextEditingController controller,
+    required ValueNotifier<String> unitNotifier,
+    required List<String> units,
+    VoidCallback? onSubmitted,
+  }) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 100,
+          child: Text(label, style: const TextStyle(color: material.Colors.white)),
+        ),
+        Expanded(
+          child: TextBox(
+            controller: controller,
+            // 回车时触发
+            onSubmitted: (value) => onSubmitted?.call(),
+          ),
+        ),
+        const SizedBox(width: 8),
+        SizedBox(
+          width: 80,
+          child: ValueListenableBuilder<String>(
+            valueListenable: unitNotifier,
+            builder: (context, value, child) {
+              return ComboBox<String>(
+                value: value,
+                items: units.map((unit) => ComboBoxItem<String>(value: unit, child: Text(unit))).toList(),
+                onChanged: (newValue) {
+                  if (newValue != null) {
+                    unitNotifier.value = newValue;
+                    // 单位切换时触发计算
+                    if (onSubmitted != null) {
+                      onSubmitted();
+                    }
+                  }
+                },
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  // 生成频谱示例数据
+  static List<FlSpot> generateSpectrumData({
+    required int pointCount,
+    required double minFreq,
+    required double maxFreq,
+    required double minDbm,
+    required double maxDbm,
+  }) {
+    final math.Random random = math.Random();
+    final double freqStep = (maxFreq - minFreq) / (pointCount - 1);
+    return List.generate(pointCount, (index) {
+      final double freq = minFreq + index * freqStep;
+      final double dbm = minDbm + random.nextDouble() * (maxDbm - minDbm);
+      return FlSpot(freq, dbm);
+    });
+  }
+}

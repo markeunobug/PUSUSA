@@ -1,0 +1,14 @@
+﻿{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "启动上位机(Debug exe)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "C:\\learning\\pusu_V2\\上位机\\flutter_hello\\build\\windows\\x64\\runner\\Debug\\flutter_hello.exe",
+      "cwd": "C:\\learning\\pusu_V2\\上位机\\flutter_hello\\build\\windows\\x64\\runner\\Debug",
+      "console": "integratedTerminal",
+      "stopAtEntry": false
+    }
+  ]
+}
