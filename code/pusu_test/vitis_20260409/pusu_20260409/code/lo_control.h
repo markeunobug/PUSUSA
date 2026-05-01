@@ -22,5 +22,6 @@ uint64_t lo_control_calculate_lo1_hz(uint64_t rf_hz);
 int lo_control_set_lo1_for_rf_hz(uint64_t rf_hz);
 int lo_control_set_lo2_fixed(void);
 int lo_control_wait_lock(uint8_t device_index, uint32_t timeout_loops);
+int lo_control_is_locked(uint8_t device_index);
 
 #endif

@@ -122,6 +122,7 @@ class _MyHomePageState extends State<MyHomePage> {
   Timer? _serialInitTimer;
   bool _spectrumRequestInFlight = false;
   bool _isContinuousSweepRunning = false;
+  bool _acceptSpectrumData = true;
   bool _deviceResponsive = false;
   int _startupSyncAttempts = 0;
   int? _activeSweepTimestamp;
@@ -164,6 +165,7 @@ class _MyHomePageState extends State<MyHomePage> {
     rbwMode.addListener(() {
       _updateRbwField();
       _updateVbwField();
+      _clearSpectrumDisplay();
       _sendBwConfig();
     });
     vbwMode.addListener(() {
@@ -327,10 +329,15 @@ class _MyHomePageState extends State<MyHomePage> {
   void _handleSpectrumData(SpectrumSegment segment) {
     _deviceResponsive = true;
     _startupSyncTimer?.cancel();
+    if (!_acceptSpectrumData) {
+      return;
+    }
     if (segment.spots.isEmpty) {
       setState(() {});
       return;
     }
+
+    _scanCount += segment.spots.length;
 
     if (_activeSweepTimestamp != segment.timestamp) {
       _activeSweepTimestamp = segment.timestamp;
@@ -386,8 +393,6 @@ class _MyHomePageState extends State<MyHomePage> {
           .toList()
         ..sort((a, b) => a.x.compareTo(b.x));
 
-      _scanCount++;
-
       if (autoPeakEnabled.value) {
         var enabledMarkers = _markers.where((m) => m.enabled).toList()
           ..sort((a, b) => a.id.compareTo(b.id));
@@ -416,6 +421,16 @@ class _MyHomePageState extends State<MyHomePage> {
   void _handleStatusData(Map<String, dynamic> status) {
     _deviceResponsive = true;
     _startupSyncTimer?.cancel();
+  }
+
+  void _clearSpectrumDisplay() {
+    _sweepAssembleTimer?.cancel();
+    _activeSweepTimestamp = null;
+    _pendingSweepPoints.clear();
+    _displaySweepPoints.clear();
+    setState(() {
+      _spectrumData = [];
+    });
   }
 
   double _getCurrentStartFreq() {
@@ -617,6 +632,31 @@ class _MyHomePageState extends State<MyHomePage> {
     _protocol.setDetect(_mapDetectStringToInt(detectMode.value));
   }
 
+  int _estimateInternalSweepPointCount() {
+    final startHz = _getCurrentStartFreq();
+    final stopHz = _getCurrentStopFreq();
+    final rbwHz = _getSelectedRbwHz();
+    if (stopHz <= startHz || rbwHz <= 0) {
+      return _getCurrentPointCount();
+    }
+
+    final stepHz = rbwHz / 2.0;
+    final points = ((stopHz - startHz) / stepHz).floor() + 1;
+    if (points < 2) {
+      return 2;
+    }
+    if (points > 4096) {
+      return 4096;
+    }
+    return points;
+  }
+
+  Duration _getSpectrumRequestTimeout() {
+    final estimatedPoints = _estimateInternalSweepPointCount();
+    final timeoutMs = estimatedPoints * 80 + 5000;
+    return Duration(milliseconds: timeoutMs.clamp(10000, 180000));
+  }
+
   int _getCurrentPointCount() {
     final parsed = int.tryParse(pointCountController.text.trim()) ??
         _defaultSpectrumPointCount;
@@ -778,14 +818,14 @@ class _MyHomePageState extends State<MyHomePage> {
       _syncCurrentDeviceConfig();
     }
 
+    _acceptSpectrumData = true;
     _spectrumRequestInFlight = true;
     _activeSweepTimestamp = null;
     _pendingSweepPoints.clear();
     _protocol.getSpectrum(_getCurrentPointCount());
 
     _spectrumRequestTimeoutTimer?.cancel();
-    _spectrumRequestTimeoutTimer =
-        Timer(const Duration(milliseconds: 4000), () {
+    _spectrumRequestTimeoutTimer = Timer(_getSpectrumRequestTimeout(), () {
       _spectrumRequestInFlight = false;
       _activeSweepTimestamp = null;
       _pendingSweepPoints.clear();
@@ -801,6 +841,7 @@ class _MyHomePageState extends State<MyHomePage> {
   void _startContinuousSweep() {
     _continuousSweepTimer?.cancel();
     _syncCurrentDeviceConfig();
+    _acceptSpectrumData = true;
     setState(() {
       _isContinuousSweepRunning = true;
     });
@@ -812,16 +853,18 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   void _stopContinuousSweep() {
+    if (_serialManager.isConnected) {
+      _protocol.stopSweep();
+    }
+    _acceptSpectrumData = false;
     _continuousSweepTimer?.cancel();
     _spectrumRequestTimeoutTimer?.cancel();
     _sweepAssembleTimer?.cancel();
     _spectrumRequestInFlight = false;
     _activeSweepTimestamp = null;
     _pendingSweepPoints.clear();
-    _displaySweepPoints.clear();
     if (_isContinuousSweepRunning) {
       setState(() {
-        _spectrumData = [];
         _isContinuousSweepRunning = false;
       });
     }
@@ -1044,7 +1087,7 @@ class _MyHomePageState extends State<MyHomePage> {
                 centerFreqStr: _formatFreqAutoUnit(centerFreq),
                 spanStr: _formatFreqAutoUnit(span),
                 sweepSpeedStr:
-                    '${_currentSweepSpeed.toStringAsFixed(1)} scans/s',
+                    '${_currentSweepSpeed.toStringAsFixed(1)} packets/s',
                 markers: _markers,
               ),
             ),
@@ -1522,7 +1565,7 @@ class _MyHomePageState extends State<MyHomePage> {
           children: [
             const SizedBox(width: 16),
             Text(
-              '模式：${_sweepMode == SweepMode.standard ? "标准" : "实时"}      扫描速度：${_currentSweepSpeed.toStringAsFixed(1)} 次/秒      当前状态：正在扫描      系统温度：35℃',
+              '模式：${_sweepMode == SweepMode.standard ? "标准" : "实时"}      数据包速率：${_currentSweepSpeed.toStringAsFixed(1)} 包/秒      当前状态：正在扫描      系统温度：35℃',
               style: const TextStyle(color: material.Colors.white),
             ),
           ],

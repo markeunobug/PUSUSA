@@ -70,6 +70,12 @@ typedef int (*device_protocol_spectrum_provider_t)(
     unsigned short *out_point_count);
 
 typedef int (*device_protocol_status_provider_t)(device_status_t *status);
+typedef int (*device_protocol_sweep_control_t)(
+    unsigned char action,
+    const device_control_config_t *config);
+
+#define DEVICE_PROTOCOL_SWEEP_START 1U
+#define DEVICE_PROTOCOL_SWEEP_STOP  2U
 
 int device_protocol_init(void);
 void device_protocol_poll(void);
@@ -77,6 +83,7 @@ void device_protocol_poll(void);
 const device_control_config_t *device_protocol_get_config(void);
 void device_protocol_set_spectrum_provider(device_protocol_spectrum_provider_t provider);
 void device_protocol_set_status_provider(device_protocol_status_provider_t provider);
+void device_protocol_set_sweep_control_handler(device_protocol_sweep_control_t handler);
 int device_protocol_stream_spectrum_point(uint32_t freq_hz, float amp_dbm);
 
 #endif

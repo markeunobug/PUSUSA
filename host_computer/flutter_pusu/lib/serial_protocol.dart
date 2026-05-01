@@ -242,6 +242,14 @@ class SerialProtocol {
     _manager.sendData(_buildFrame(0x06, data));
   }
 
+  void startSweep() {
+    _manager.sendData(_buildFrame(0x09, Uint8List(0)));
+  }
+
+  void stopSweep() {
+    _manager.sendData(_buildFrame(0x0A, Uint8List(0)));
+  }
+
   void getStatus() {
     _manager.sendData(_buildFrame(0x07, Uint8List(0)));
   }

@@ -18,6 +18,8 @@
 #define CMD_GET_SPECTRUM   0x06U
 #define CMD_GET_STATUS     0x07U
 #define CMD_RESET          0x08U
+#define CMD_START_SWEEP    0x09U
+#define CMD_STOP_SWEEP     0x0AU
 
 #define CMD_ACK            0x81U
 #define CMD_SPECTRUM_DATA  0x82U
@@ -45,6 +47,7 @@ typedef struct {
     device_control_config_t config;
     device_protocol_spectrum_provider_t spectrum_provider;
     device_protocol_status_provider_t status_provider;
+    device_protocol_sweep_control_t sweep_control;
     spectrum_point_t spectrum_points[MAX_POINT_COUNT];
     unsigned char tx_buffer[TX_FRAME_MAX_SIZE];
     unsigned int stream_timestamp;
@@ -60,6 +63,8 @@ static void send_frame_inplace(unsigned char cmd, unsigned short length);
 static void send_ack(unsigned char original_cmd, unsigned char success, unsigned char error_code);
 static void send_status(void);
 static void send_spectrum(void);
+static int start_sweep(void);
+static int stop_sweep(void);
 static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned short length);
 static void reset_default_config(void);
 static int fake_spectrum_provider(
@@ -180,6 +185,11 @@ void device_protocol_set_status_provider(device_protocol_status_provider_t provi
     g_protocol.status_provider = provider;
 }
 
+void device_protocol_set_sweep_control_handler(device_protocol_sweep_control_t handler)
+{
+    g_protocol.sweep_control = handler;
+}
+
 int device_protocol_stream_spectrum_point(uint32_t freq_hz, float amp_dbm)
 {
     unsigned short payload_length = 14U;
@@ -268,8 +278,16 @@ static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned 
             if (length == 2U) {
                 g_protocol.config.sweep.point_count = sanitize_point_count(read_u16_le(data));//扫描点数设置，这里最大512，是否不够用
             }
-            send_ack(cmd, ACK_OK, ERR_NONE);
-            send_spectrum();
+            if (g_protocol.sweep_control != 0) {
+                if (start_sweep() == 0) {
+                    send_ack(cmd, ACK_OK, ERR_NONE);
+                } else {
+                    send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+                }
+            } else {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+                send_spectrum();
+            }
         } else {
             send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
         }
@@ -288,6 +306,28 @@ static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned 
             g_protocol.rng_state = 0x12345678U;
             reset_default_config();
             send_ack(cmd, ACK_OK, ERR_NONE);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_START_SWEEP:
+        if (length == 0U) {
+            if (start_sweep() == 0) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_STOP_SWEEP:
+        if (length == 0U) {
+            if (stop_sweep() == 0) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
         } else {
             send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
         }
@@ -383,6 +423,28 @@ static void send_spectrum(void)
         send_ack(CMD_GET_SPECTRUM, ACK_FAIL, ERR_INTERNAL);
         return;
     }
+}
+
+static int start_sweep(void)
+{
+    g_protocol.timestamp++;
+    g_protocol.stream_timestamp = g_protocol.timestamp;
+    g_protocol.streamed_point_count = 0U;
+
+    if (g_protocol.sweep_control == 0) {
+        return -1;
+    }
+
+    return g_protocol.sweep_control(DEVICE_PROTOCOL_SWEEP_START, &g_protocol.config);
+}
+
+static int stop_sweep(void)
+{
+    if (g_protocol.sweep_control == 0) {
+        return -1;
+    }
+
+    return g_protocol.sweep_control(DEVICE_PROTOCOL_SWEEP_STOP, &g_protocol.config);
 }
 
 static int fake_status_provider(device_status_t *status)

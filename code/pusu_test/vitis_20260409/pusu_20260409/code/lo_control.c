@@ -60,3 +60,13 @@ int lo_control_wait_lock(uint8_t device_index, uint32_t timeout_loops)
     lock_indicator_set(0);
     return XST_FAILURE;
 }
+
+int lo_control_is_locked(uint8_t device_index)
+{
+    if (lmx2572_board_is_locked(device_index)) {
+        lock_indicator_set(1);
+        return XST_SUCCESS;
+    }
+
+    return XST_FAILURE;
+}
