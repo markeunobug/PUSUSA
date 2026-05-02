@@ -7,6 +7,8 @@
 #include "../code/app_config.h"
 #include "../code/sweep_plan.h"
 
+void ad8370_set_gain_code(unsigned char code);
+
 #define FRAME_START_BYTE 0xAAU
 #define FRAME_END_BYTE   0x55U
 
@@ -20,6 +22,7 @@
 #define CMD_RESET          0x08U
 #define CMD_START_SWEEP    0x09U
 #define CMD_STOP_SWEEP     0x0AU
+#define CMD_SET_VGA_GAIN   0x0BU
 
 #define CMD_ACK            0x81U
 #define CMD_SPECTRUM_DATA  0x82U
@@ -328,6 +331,14 @@ static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned 
             } else {
                 send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
             }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_SET_VGA_GAIN://设置VGA增益字
+        if (length == 1U) {
+            ad8370_set_gain_code(data[0]);
+            send_ack(cmd, ACK_OK, ERR_NONE);
         } else {
             send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
         }

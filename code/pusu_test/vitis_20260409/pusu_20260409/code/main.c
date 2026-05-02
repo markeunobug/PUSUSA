@@ -41,6 +41,9 @@ int main(void)
         cleanup_platform();
         return -1;
     }
+//    ad8370_set_gain_code(0x19U);//3dB
+//    ad8370_set_gain_code(0x39U);//10dB
+//    ad8370_set_gain_code(0x99U);//20dB
 
     status = lock_indicator_init();
     if (status != XST_SUCCESS) {
@@ -89,6 +92,8 @@ int main(void)
 
     while (1) {
         device_protocol_poll();
+
+//            ad8370_set_gain_code(0x39U);//10dB
 
         if (sweep_engine_is_active(&g_sweep_engine) != 0) {
             g_last_sweep_error = sweep_engine_poll(&g_sweep_engine);

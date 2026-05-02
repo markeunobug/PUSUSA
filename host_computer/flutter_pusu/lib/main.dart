@@ -79,6 +79,7 @@ class _MyHomePageState extends State<MyHomePage> {
       TextEditingController(text: '0');
   final ValueNotifier<String> attenuatorValue = ValueNotifier<String>('自动');
   final ValueNotifier<String> preAmpValue = ValueNotifier<String>('自动');
+  final ValueNotifier<String> vgaGainValue = ValueNotifier<String>('0 dB');
 
   // BW 鍙傛暟鐘舵€?
   final ValueNotifier<String> rbwMode = ValueNotifier<String>('1 MHz');
@@ -162,6 +163,7 @@ class _MyHomePageState extends State<MyHomePage> {
     sweepSpeed.addListener(_sendSweepConfig);
     attenuatorValue.addListener(_sendAmplitudeConfig);
     preAmpValue.addListener(_sendAmplitudeConfig);
+    vgaGainValue.addListener(_sendVgaGainConfig);
     rbwMode.addListener(() {
       _updateRbwField();
       _updateVbwField();
@@ -250,6 +252,7 @@ class _MyHomePageState extends State<MyHomePage> {
     sweepSpeed.removeListener(_sendSweepConfig);
     attenuatorValue.removeListener(_sendAmplitudeConfig);
     preAmpValue.removeListener(_sendAmplitudeConfig);
+    vgaGainValue.removeListener(_sendVgaGainConfig);
     rbwMode.removeListener(() {
       _updateRbwField();
       _updateVbwField();
@@ -620,6 +623,10 @@ class _MyHomePageState extends State<MyHomePage> {
     _protocol.setAmplitude(refLevel, attenuator, preamp);
   }
 
+  void _sendVgaGainConfig() {
+    _protocol.setVgaGainCode(_mapVgaGainStringToCode(vgaGainValue.value));
+  }
+
   void _sendBwConfig() {
     int rbwModeInt = _mapRbwModeStringToInt(rbwMode.value);
     double rbwHz = _getSelectedRbwHz();
@@ -707,6 +714,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
   void _syncCurrentDeviceConfig() {
     _protocol.applyControlConfig(_buildCurrentControlConfig());
+    _sendVgaGainConfig();
   }
 
   void _sendSweepConfig() {
@@ -752,6 +760,35 @@ class _MyHomePageState extends State<MyHomePage> {
         return 2;
       default:
         return 0;
+    }
+  }
+
+  int _mapVgaGainStringToCode(String value) {
+    switch (value) {
+      case '-11 dB':
+        return 0x05;
+      case '-10 dB':
+        return 0x06;
+      case '-6 dB':
+        return 0x09;
+      case '-3 dB':
+        return 0x0D;
+      case '0 dB':
+        return 0x12;
+      case '3 dB':
+        return 0x19;
+      case '6 dB':
+        return 0x24;
+      case '10 dB':
+        return 0x39;
+      case '20 dB':
+        return 0x99;
+      case '30 dB':
+        return 0xD0;
+      case '34 dB':
+        return 0xFF;
+      default:
+        return 0x12;
     }
   }
 
@@ -1211,6 +1248,45 @@ class _MyHomePageState extends State<MyHomePage> {
                                       .toList(),
                                   onChanged: (nv) => nv != null
                                       ? preAmpValue.value = nv
+                                      : null,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            const SizedBox(
+                                width: 100,
+                                child: Text('VGA：',
+                                    style: TextStyle(
+                                        color: material.Colors.white))),
+                            Expanded(
+                              child: ValueListenableBuilder<String>(
+                                valueListenable: vgaGainValue,
+                                builder: (context, value, child) =>
+                                    ComboBox<String>(
+                                  value: value,
+                                  isExpanded: true,
+                                  items: [
+                                    '-11 dB',
+                                    '-10 dB',
+                                    '-6 dB',
+                                    '-3 dB',
+                                    '0 dB',
+                                    '3 dB',
+                                    '6 dB',
+                                    '10 dB',
+                                    '20 dB',
+                                    '30 dB',
+                                    '34 dB'
+                                  ]
+                                      .map((o) => ComboBoxItem<String>(
+                                          value: o, child: Text(o)))
+                                      .toList(),
+                                  onChanged: (nv) => nv != null
+                                      ? vgaGainValue.value = nv
                                       : null,
                                 ),
                               ),

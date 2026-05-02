@@ -250,6 +250,10 @@ class SerialProtocol {
     _manager.sendData(_buildFrame(0x0A, Uint8List(0)));
   }
 
+  void setVgaGainCode(int code) {
+    _manager.sendData(_buildFrame(0x0B, Uint8List.fromList([code & 0xFF])));
+  }
+
   void getStatus() {
     _manager.sendData(_buildFrame(0x07, Uint8List(0)));
   }
