@@ -35,6 +35,7 @@ int main(void)
     rbw_mode_t applied_rbw_mode = RBW_MODE_100K;
 
     init_platform();
+    device_protocol_recover_uart_rx();
 
     status = ad8370_init();
     if (status != XST_SUCCESS) {
@@ -63,6 +64,7 @@ int main(void)
         cleanup_platform();
         return -1;
     }
+    device_protocol_recover_uart_rx();
 
     signal_processing_init();
     signal_processing_set_if_hz((float)LO_CONTROL_IF2_HZ);
@@ -245,6 +247,10 @@ static int protocol_status_provider(device_status_t *status)
     status->s2mm_dmasr = dma_diag.s2mm_dmasr;
     status->dma_irq_count = dma_diag.irq_count;
     status->dma_last_irq_status = dma_diag.last_irq_status;
+    status->uart_rx_bad_frame_count = 0U;
+    status->uart_rx_crc_error_count = 0U;
+    status->uart_rx_overrun_count = 0U;
+    status->uart_rx_resync_count = 0U;
     return 0;
 }
 

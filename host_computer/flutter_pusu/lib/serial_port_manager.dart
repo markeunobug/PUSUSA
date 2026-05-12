@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:isolate';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_libserialport/flutter_libserialport.dart';
@@ -79,7 +78,7 @@ class SerialPortManager extends ChangeNotifier {
     }
   }
 
-  void connect() {
+  Future<void> connect() async {
     if (selectedPort == null || isConnected) return;
     try {
       _serialPort = SerialPort(selectedPort!);
@@ -91,6 +90,8 @@ class SerialPortManager extends ChangeNotifier {
       _serialPort!.config = config;
 
       if (_serialPort!.openReadWrite()) {
+        clearInputBuffer();
+        await Future.delayed(const Duration(milliseconds: 150));
         clearInputBuffer();
         isConnected = true;
         _updateStatus();

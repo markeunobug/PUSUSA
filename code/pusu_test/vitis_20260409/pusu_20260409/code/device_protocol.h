@@ -61,6 +61,10 @@ typedef struct {
     unsigned int s2mm_dmasr;
     unsigned int dma_irq_count;
     unsigned int dma_last_irq_status;
+    unsigned int uart_rx_bad_frame_count;
+    unsigned int uart_rx_crc_error_count;
+    unsigned int uart_rx_overrun_count;
+    unsigned int uart_rx_resync_count;
 } device_status_t;
 
 typedef int (*device_protocol_spectrum_provider_t)(
@@ -79,6 +83,7 @@ typedef int (*device_protocol_sweep_control_t)(
 
 int device_protocol_init(void);
 void device_protocol_poll(void);
+void device_protocol_recover_uart_rx(void);
 
 const device_control_config_t *device_protocol_get_config(void);
 void device_protocol_set_spectrum_provider(device_protocol_spectrum_provider_t provider);

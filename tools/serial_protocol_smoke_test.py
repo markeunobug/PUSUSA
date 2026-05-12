@@ -123,6 +123,16 @@ def decode_status(payload: bytes) -> str:
             f", s2mm_dmacr=0x{s2mm_dmacr:08X}, s2mm_dmasr=0x{s2mm_dmasr:08X}, "
             f"dma_irq_count={dma_irq_count}, dma_last_irq=0x{dma_last_irq_status:08X}"
         )
+    if len(payload) >= 59:
+        rx_bad_frame = struct.unpack(">I", payload[43:47])[0]
+        rx_crc_error = struct.unpack(">I", payload[47:51])[0]
+        rx_overrun = struct.unpack(">I", payload[51:55])[0]
+        rx_resync = struct.unpack(">I", payload[55:59])[0]
+        text += (
+            f", uart_rx_bad_frame={rx_bad_frame}, "
+            f"uart_rx_crc_error={rx_crc_error}, "
+            f"uart_rx_overrun={rx_overrun}, uart_rx_resync={rx_resync}"
+        )
     return text
 
 

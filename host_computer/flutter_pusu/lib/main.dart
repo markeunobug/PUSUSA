@@ -125,7 +125,9 @@ class _MyHomePageState extends State<MyHomePage> {
   bool _isContinuousSweepRunning = false;
   bool _acceptSpectrumData = true;
   bool _deviceResponsive = false;
+  bool _startupHandshakeInFlight = false;
   int _startupSyncAttempts = 0;
+  int _startupSyncGeneration = 0;
   int? _activeSweepTimestamp;
   final Map<double, double> _displaySweepPoints = {};
   final Map<double, double> _pendingSweepPoints = {};
@@ -278,28 +280,38 @@ class _MyHomePageState extends State<MyHomePage> {
       _deviceResponsive = false;
       _startupSyncAttempts = 0;
       _startupSyncTimer?.cancel();
-      _startupSyncTimer =
-          Timer.periodic(const Duration(milliseconds: 300), (timer) {
-        if (!_serialManager.isConnected || _deviceResponsive) {
-          timer.cancel();
-          return;
-        }
-        _serialManager.clearInputBuffer();
-        _protocol.resetReceiveBuffer();
-        _startupSyncAttempts++;
-        _syncCurrentDeviceConfig();
-        _protocol.getStatus();
-        if (_startupSyncAttempts >= 8) {
-          timer.cancel();
-        }
-      });
+      _startupSyncGeneration++;
+      _runStartupHandshake(_startupSyncGeneration);
     }
 
     if (status != ConnectionStatus.connected) {
       _protocol.resetReceiveBuffer();
       _startupSyncTimer?.cancel();
+      _startupSyncGeneration++;
       _deviceResponsive = false;
+      _startupHandshakeInFlight = false;
       _stopContinuousSweep();
+    }
+  }
+
+  Future<void> _runStartupHandshake(int generation) async {
+    if (_startupHandshakeInFlight) {
+      return;
+    }
+    _startupHandshakeInFlight = true;
+    _startupSyncAttempts = 1;
+    final ok = await _protocol.statusHandshake(attempts: 8);
+    _startupHandshakeInFlight = false;
+    if (!mounted ||
+        generation != _startupSyncGeneration ||
+        !_serialManager.isConnected) {
+      return;
+    }
+
+    if (ok) {
+      _deviceResponsive = true;
+      _syncCurrentDeviceConfig();
+      _protocol.getStatus();
     }
   }
 
@@ -852,7 +864,9 @@ class _MyHomePageState extends State<MyHomePage> {
       return;
     }
     if (!_deviceResponsive) {
-      _syncCurrentDeviceConfig();
+      _startupSyncGeneration++;
+      _runStartupHandshake(_startupSyncGeneration);
+      return;
     }
 
     _acceptSpectrumData = true;

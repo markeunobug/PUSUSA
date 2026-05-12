@@ -38,9 +38,15 @@ void ad8370_set_gain_code(unsigned char code);
 
 #define RX_BUFFER_SIZE          2048U
 #define TX_FRAME_MAX_SIZE       16384U
+#define STATUS_PAYLOAD_SIZE     59U
+#define UART_RX_DRAIN_LIMIT     4096U
 #define DEFAULT_POINT_COUNT     256U
 #define MIN_POINT_COUNT         8U
 #define MAX_POINT_COUNT         SWEEP_PLAN_MAX_POINTS
+
+#define UART_RX_ERROR_MASK \
+    (XUARTPS_IXR_OVER | XUARTPS_IXR_FRAMING | XUARTPS_IXR_PARITY | \
+     XUARTPS_IXR_TOUT | XUARTPS_IXR_RBRK)
 
 typedef struct {
     unsigned char buffer[RX_BUFFER_SIZE];
@@ -55,6 +61,10 @@ typedef struct {
     unsigned char tx_buffer[TX_FRAME_MAX_SIZE];
     unsigned int stream_timestamp;
     unsigned short streamed_point_count;
+    unsigned int rx_bad_frame_count;
+    unsigned int rx_crc_error_count;
+    unsigned int rx_overrun_count;
+    unsigned int rx_resync_count;
 } device_protocol_state_t;
 
 static device_protocol_state_t g_protocol;
@@ -69,6 +79,9 @@ static void send_spectrum(void);
 static int start_sweep(void);
 static int stop_sweep(void);
 static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned short length);
+static unsigned int uart_check_error_status(void);
+static void uart_drain_rx_fifo(void);
+static void protocol_resync(void);
 static void reset_default_config(void);
 static int fake_spectrum_provider(
     const device_control_config_t *config,
@@ -93,15 +106,31 @@ int device_protocol_init(void)
 {
     memset(&g_protocol, 0, sizeof(g_protocol));
     g_protocol.rng_state = 0x12345678U;
+    device_protocol_recover_uart_rx();
     reset_default_config();
     g_protocol.spectrum_provider = fake_spectrum_provider;
     g_protocol.status_provider = fake_status_provider;
     return XST_SUCCESS;
 }
 
+void device_protocol_recover_uart_rx(void)
+{
+    uart_check_error_status();
+    uart_drain_rx_fifo();
+    XUartPs_WriteReg(UART_BASEADDR, XUARTPS_CR_OFFSET,
+                     XUARTPS_CR_RXRST);
+    XUartPs_WriteReg(UART_BASEADDR, XUARTPS_CR_OFFSET,
+                     XUARTPS_CR_RX_EN | XUARTPS_CR_TX_EN);
+    XUartPs_WriteReg(UART_BASEADDR, XUARTPS_ISR_OFFSET, XUARTPS_IXR_MASK);
+}
+
 //解包
 void device_protocol_poll(void)
 {
+    if (uart_check_error_status() != 0U) {
+        protocol_resync();
+    }
+
     while (XUartPs_IsReceiveData(UART_BASEADDR) != 0U) {	//把uart的fifo中缓冲数据读出来
         unsigned char ch = (unsigned char)(XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET) & 0xFFU);//提取单字节
 
@@ -112,7 +141,8 @@ void device_protocol_poll(void)
         if (g_protocol.length < RX_BUFFER_SIZE) {		//不超过最大接收字节
             g_protocol.buffer[g_protocol.length++] = ch;//存入缓冲
         } else {
-            g_protocol.length = 0U;
+            g_protocol.rx_bad_frame_count++;
+            protocol_resync();
             continue;
         }
 
@@ -136,7 +166,8 @@ void device_protocol_poll(void)
             frame_length = 1U + 2U + 1U + (unsigned int)payload_length + 2U + 1U;
 
             if (frame_length > RX_BUFFER_SIZE) {//超出后置零
-                g_protocol.length = 0U;
+                g_protocol.rx_bad_frame_count++;
+                protocol_resync();
                 break;
             }
 
@@ -145,6 +176,7 @@ void device_protocol_poll(void)
             }
 
             if (g_protocol.buffer[frame_length - 1U] != FRAME_END_BYTE) {	//看最后一帧是不是结束字
+                g_protocol.rx_bad_frame_count++;
                 memmove(&g_protocol.buffer[0], &g_protocol.buffer[1], g_protocol.length - 1U);//丢掉缓冲区第一个位置的数据
                 g_protocol.length--;
                 continue;
@@ -158,7 +190,10 @@ void device_protocol_poll(void)
 
             cmd = g_protocol.buffer[3];//接收当前串口控制模式
             if (calc_crc != rx_crc) {
+                g_protocol.rx_crc_error_count++;
                 send_ack(cmd, ACK_FAIL, ERR_BAD_CRC);
+                protocol_resync();
+                break;
             } else {
                 handle_frame(cmd, &g_protocol.buffer[4], payload_length);//接收无误，开始处理帧
             }
@@ -385,7 +420,7 @@ static void send_ack(unsigned char original_cmd, unsigned char success, unsigned
 static void send_status(void)
 {
     device_status_t status;
-    unsigned char payload[43];
+    unsigned char payload[STATUS_PAYLOAD_SIZE];
     int ok = 0;
 
     if (g_protocol.status_provider != 0) {
@@ -396,6 +431,11 @@ static void send_status(void)
         send_ack(CMD_GET_STATUS, ACK_FAIL, ERR_INTERNAL);
         return;
     }
+
+    status.uart_rx_bad_frame_count = g_protocol.rx_bad_frame_count;
+    status.uart_rx_crc_error_count = g_protocol.rx_crc_error_count;
+    status.uart_rx_overrun_count = g_protocol.rx_overrun_count;
+    status.uart_rx_resync_count = g_protocol.rx_resync_count;
 
     write_f64_le(&payload[0], status.temperature_c);
     payload[8] = status.battery_percent;
@@ -409,7 +449,11 @@ static void send_status(void)
     write_u32_be(&payload[31], status.s2mm_dmasr);
     write_u32_be(&payload[35], status.dma_irq_count);
     write_u32_be(&payload[39], status.dma_last_irq_status);
-    send_frame(CMD_STATUS_DATA, payload, 43U);
+    write_u32_be(&payload[43], status.uart_rx_bad_frame_count);
+    write_u32_be(&payload[47], status.uart_rx_crc_error_count);
+    write_u32_be(&payload[51], status.uart_rx_overrun_count);
+    write_u32_be(&payload[55], status.uart_rx_resync_count);
+    send_frame(CMD_STATUS_DATA, payload, STATUS_PAYLOAD_SIZE);
 }
 
 //发送频谱
@@ -458,11 +502,58 @@ static int stop_sweep(void)
     return g_protocol.sweep_control(DEVICE_PROTOCOL_SWEEP_STOP, &g_protocol.config);
 }
 
+static unsigned int uart_check_error_status(void)
+{
+    unsigned int isr = XUartPs_ReadReg(UART_BASEADDR, XUARTPS_ISR_OFFSET);
+    unsigned int error_bits = isr & UART_RX_ERROR_MASK;
+
+    if ((error_bits & XUARTPS_IXR_OVER) != 0U) {
+        g_protocol.rx_overrun_count++;
+    }
+
+    if (error_bits != 0U) {
+        XUartPs_WriteReg(UART_BASEADDR, XUARTPS_ISR_OFFSET, error_bits);
+    }
+
+    return error_bits;
+}
+
+static void uart_drain_rx_fifo(void)
+{
+    unsigned int drained = 0U;
+
+    while ((XUartPs_IsReceiveData(UART_BASEADDR) != 0U) &&
+           (drained < UART_RX_DRAIN_LIMIT)) {
+        (void)XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET);
+        drained++;
+    }
+}
+
+static void protocol_resync(void)
+{
+    g_protocol.length = 0U;
+    g_protocol.rx_resync_count++;
+    device_protocol_recover_uart_rx();
+}
+
 static int fake_status_provider(device_status_t *status)
 {
     status->temperature_c = 32.5;
     status->battery_percent = 85U;
     status->error_code = 0U;
+    status->dma_start_count = 0U;
+    status->dma_error_count = 0U;
+    status->frame_ready_count = 0U;
+    status->process_frame_count = 0U;
+    status->spectrum_valid = 0U;
+    status->s2mm_dmacr = 0U;
+    status->s2mm_dmasr = 0U;
+    status->dma_irq_count = 0U;
+    status->dma_last_irq_status = 0U;
+    status->uart_rx_bad_frame_count = g_protocol.rx_bad_frame_count;
+    status->uart_rx_crc_error_count = g_protocol.rx_crc_error_count;
+    status->uart_rx_overrun_count = g_protocol.rx_overrun_count;
+    status->uart_rx_resync_count = g_protocol.rx_resync_count;
     return 0;
 }
 

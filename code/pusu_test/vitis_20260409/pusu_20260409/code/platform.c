@@ -32,6 +32,7 @@
 
 #include "xparameters.h"
 #include "xil_cache.h"
+#include "xuartps_hw.h"
 
 #include "../code/platform_config.h"
 
@@ -48,6 +49,60 @@
 
  #define UART_BAUD 9600
 #endif
+
+#ifndef PROTOCOL_UART_BAUD_RATE
+#define PROTOCOL_UART_BAUD_RATE 921600U
+#endif
+
+static void configure_ps_uart_baud(void)
+{
+#ifdef STDOUT_IS_PS7_UART
+    u32 input_clk = XPAR_XUARTPS_0_UART_CLK_FREQ_HZ;
+    u32 mode_reg = XUartPs_ReadReg(XPAR_XUARTPS_0_BASEADDR, XUARTPS_MR_OFFSET);
+    u32 best_error = 0xFFFFFFFFU;
+    u32 best_brgr = 0U;
+    u32 best_bauddiv = 0U;
+    u32 bauddiv;
+
+    if ((mode_reg & XUARTPS_MR_CLKSEL) != 0U) {
+        input_clk /= 8U;
+    }
+
+    for (bauddiv = 4U; bauddiv < 255U; bauddiv++) {
+        u32 brgr = input_clk / (PROTOCOL_UART_BAUD_RATE * (bauddiv + 1U));
+        u32 calc_baud;
+        u32 error;
+
+        if (brgr == 0U) {
+            continue;
+        }
+
+        calc_baud = input_clk / (brgr * (bauddiv + 1U));
+        error = (calc_baud > PROTOCOL_UART_BAUD_RATE)
+                    ? (calc_baud - PROTOCOL_UART_BAUD_RATE)
+                    : (PROTOCOL_UART_BAUD_RATE - calc_baud);
+
+        if (error < best_error) {
+            best_error = error;
+            best_brgr = brgr;
+            best_bauddiv = bauddiv;
+        }
+    }
+
+    if (best_brgr == 0U) {
+        return;
+    }
+
+    XUartPs_WriteReg(XPAR_XUARTPS_0_BASEADDR, XUARTPS_CR_OFFSET,
+                     XUARTPS_CR_RX_DIS | XUARTPS_CR_TX_DIS);
+    XUartPs_WriteReg(XPAR_XUARTPS_0_BASEADDR, XUARTPS_BAUDGEN_OFFSET, best_brgr);
+    XUartPs_WriteReg(XPAR_XUARTPS_0_BASEADDR, XUARTPS_BAUDDIV_OFFSET, best_bauddiv);
+    XUartPs_WriteReg(XPAR_XUARTPS_0_BASEADDR, XUARTPS_CR_OFFSET,
+                     XUARTPS_CR_RXRST | XUARTPS_CR_TXRST);
+    XUartPs_WriteReg(XPAR_XUARTPS_0_BASEADDR, XUARTPS_CR_OFFSET,
+                     XUARTPS_CR_RX_EN | XUARTPS_CR_TX_EN);
+#endif
+}
 
 void
 enable_caches()
@@ -85,7 +140,7 @@ init_uart()
     XUartNs550_SetBaud(STDOUT_BASEADDR, XPAR_XUARTNS550_CLOCK_HZ, UART_BAUD);
     XUartNs550_SetLineControlReg(STDOUT_BASEADDR, XUN_LCR_8_DATA_BITS);
 #endif
-    /* Bootrom/BSP configures PS7/PSU UART to 115200 bps */
+    configure_ps_uart_baud();
 }
 
 void

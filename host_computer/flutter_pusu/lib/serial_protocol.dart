@@ -17,12 +17,20 @@ class SpectrumSegment {
 }
 
 class SerialProtocol {
+  static const int _minFrameLength = 7;
+  static const int _maxPayloadLength = 16384;
+
   final SerialPortManager _manager;
   final StreamController<SpectrumSegment> _spectrumStream =
       StreamController.broadcast();
   final StreamController<Map<String, dynamic>> _statusStream =
       StreamController.broadcast();
   Uint8List _buffer = Uint8List(0);
+  Completer<bool>? _handshakeCompleter;
+  bool _handshakeStatusAcked = false;
+  int badFrameCount = 0;
+  int crcErrorCount = 0;
+  int resyncCount = 0;
 
   SerialProtocol(this._manager) {
     _manager.stream.listen(_parseIncomingData);
@@ -33,6 +41,29 @@ class SerialProtocol {
 
   void resetReceiveBuffer() {
     _buffer = Uint8List(0);
+  }
+
+  Future<bool> statusHandshake({
+    int attempts = 8,
+    Duration timeout = const Duration(milliseconds: 350),
+  }) async {
+    for (int attempt = 0; attempt < attempts; attempt++) {
+      resetReceiveBuffer();
+      _handshakeCompleter = Completer<bool>();
+      _handshakeStatusAcked = false;
+      getStatus();
+
+      final ok = await _handshakeCompleter!.future
+          .timeout(timeout, onTimeout: () => false);
+      _handshakeCompleter = null;
+      if (ok) {
+        return true;
+      }
+
+      await Future.delayed(const Duration(milliseconds: 150));
+    }
+
+    return false;
   }
 
   int _calculateCrc16Modbus(Uint8List data) {
@@ -62,13 +93,19 @@ class SerialProtocol {
 
   void _parseIncomingData(Uint8List newData) {
     _buffer = Uint8List.fromList(_buffer + newData);
-    while (_buffer.length >= 6) {
+    while (_buffer.length >= _minFrameLength) {
       if (_buffer[0] != 0xAA) {
-        _buffer = _buffer.sublist(1);
+        _dropUntilNextStart();
         continue;
       }
 
       final len = _buffer.buffer.asByteData(1).getUint16(0, Endian.big);
+      if (len > _maxPayloadLength) {
+        badFrameCount++;
+        _dropUntilNextStart(skipFirst: true);
+        continue;
+      }
+
       final frameLen = 1 + 2 + 1 + len + 2 + 1;
       if (_buffer.length < frameLen) {
         break;
@@ -77,11 +114,20 @@ class SerialProtocol {
       final frame = _buffer.sublist(0, frameLen);
       _buffer = _buffer.sublist(frameLen);
 
+      if (frame.last != 0x55) {
+        badFrameCount++;
+        _buffer = Uint8List.fromList(frame.sublist(1) + _buffer);
+        _dropUntilNextStart();
+        continue;
+      }
+
       final payload = frame.sublist(1, 1 + 2 + 1 + len);
       final calcCrc = _calculateCrc16Modbus(Uint8List.fromList(payload));
       final rxCrc =
           frame.buffer.asByteData(1 + 2 + 1 + len).getUint16(0, Endian.big);
-      if (calcCrc != rxCrc || frame.last != 0x55) {
+      if (calcCrc != rxCrc) {
+        crcErrorCount++;
+        _dropUntilNextStart();
         continue;
       }
 
@@ -91,17 +137,50 @@ class SerialProtocol {
     }
   }
 
+  void _dropUntilNextStart({bool skipFirst = false}) {
+    final start = skipFirst ? 1 : 0;
+    int next = -1;
+    for (int i = start; i < _buffer.length; i++) {
+      if (_buffer[i] == 0xAA) {
+        next = i;
+        break;
+      }
+    }
+
+    if (next < 0) {
+      _buffer = Uint8List(0);
+    } else if (next > 0) {
+      _buffer = _buffer.sublist(next);
+    }
+    resyncCount++;
+  }
+
   void _handleResponse(int cmd, Uint8List data) {
     final byteData = data.buffer.asByteData();
     switch (cmd) {
       case 0x81:
         if (data.length >= 3) {
           print('ACK: cmd=${data[0]}, success=${data[1]}, error=${data[2]}');
+          if (_handshakeCompleter != null && data[0] == 0x07) {
+            if (data[1] == 1) {
+              _handshakeStatusAcked = true;
+            } else if (!_handshakeCompleter!.isCompleted) {
+              _handshakeCompleter!.complete(false);
+            }
+          }
         }
         break;
       case 0x82:
+        if (data.length < 6) {
+          badFrameCount++;
+          break;
+        }
         final pointCount = byteData.getUint16(0, Endian.big);
         final timestamp = byteData.getUint32(2, Endian.big);
+        if (data.length < 6 + pointCount * 8) {
+          badFrameCount++;
+          break;
+        }
         final spots = <FlSpot>[];
         for (int i = 0; i < pointCount; i++) {
           final offset = 6 + i * 8;
@@ -118,14 +197,32 @@ class SerialProtocol {
         print('Received spectrum: points=$pointCount timestamp=$timestamp');
         break;
       case 0x83:
+        if (data.length < 10) {
+          badFrameCount++;
+          break;
+        }
         final temp = byteData.getFloat64(0, Endian.little);
         final battery = data[8];
         final error = data[9];
-        _statusStream.add({
+        final status = <String, dynamic>{
           'temperatureC': temp,
           'batteryPercent': battery,
           'errorCode': error,
-        });
+        };
+        if (data.length >= 59) {
+          status.addAll({
+            'uartRxBadFrameCount': byteData.getUint32(43, Endian.big),
+            'uartRxCrcErrorCount': byteData.getUint32(47, Endian.big),
+            'uartRxOverrunCount': byteData.getUint32(51, Endian.big),
+            'uartRxResyncCount': byteData.getUint32(55, Endian.big),
+          });
+        }
+        _statusStream.add(status);
+        if (_handshakeCompleter != null &&
+            _handshakeStatusAcked &&
+            !_handshakeCompleter!.isCompleted) {
+          _handshakeCompleter!.complete(true);
+        }
         print('Status: Temp=$temp C, Battery=$battery%, Error=$error');
         break;
       default:

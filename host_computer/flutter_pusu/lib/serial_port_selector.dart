@@ -103,10 +103,12 @@ class SerialPortSelector extends StatelessWidget {
                             if (connected) {
                               manager.disconnect();
                             } else {
-                              manager.connect();
+                              await manager.connect();
                             }
                           } catch (e) {
-                            _showError(context, '$e');
+                            if (context.mounted) {
+                              _showError(context, '$e');
+                            }
                           }
                         }
                       : null,
