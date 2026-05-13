@@ -66,12 +66,55 @@
 
 #define SIGNAL_PROCESSING_VERBOSE 0
 
+/* ADC full-scale reference: LTC2208 2.25 Vpp diff → 1:2 balun → 50Ω */
+#define ADC_INPUT_FULL_SCALE_DBM  8.02f
+
 #define RBW_10K_HZ          10000.0f
 #define RBW_30K_HZ          30000.0f
 #define RBW_100K_HZ         100000.0f
 #define RBW_300K_HZ         300000.0f
 #define RBW_1M_HZ           1000000.0f
 #define RBW_LPF_TAP_NUM     129U
+
+/* CIC decimation ratio per RBW mode */
+#define RBW_1M_CIC_R          13U
+#define RBW_1M_CIC_N          4U
+#define RBW_300K_CIC_R        43U
+#define RBW_300K_CIC_N        4U
+#define RBW_100K_CIC_R        130U
+#define RBW_100K_CIC_N        5U
+#define RBW_30K_CIC_R         433U
+#define RBW_30K_CIC_N         5U
+#define RBW_10K_CIC_R         1300U
+#define RBW_10K_CIC_N         5U
+
+/* Compensating FIR filter taps per RBW mode */
+#define RBW_1M_FIR_TAPS       64U
+#define RBW_300K_FIR_TAPS     128U
+#define RBW_100K_FIR_TAPS     128U
+#define RBW_30K_FIR_TAPS      256U
+#define RBW_10K_FIR_TAPS      256U
+
+/* Decimated output target per sweep point (post-CIC, post-FIR-transient).
+ * Chosen for ~0.6-1.0 dB power measurement accuracy (σ ≈ 4.34/√N_indep).
+ * Effective independent samples ≈ T_measure × RBW ≈ observe_pts × RBW/fs_out. */
+#define RBW_1M_OBSERVE_POINTS   384U
+#define RBW_300K_OBSERVE_POINTS 384U
+#define RBW_100K_OBSERVE_POINTS 384U
+#define RBW_30K_OBSERVE_POINTS  256U
+#define RBW_10K_OBSERVE_POINTS  256U
+
+/* FIR transient skip: ceil(fir_taps/2) per mode */
+#define RBW_1M_SKIP_POINTS      32U
+#define RBW_300K_SKIP_POINTS    64U
+#define RBW_100K_SKIP_POINTS    64U
+#define RBW_30K_SKIP_POINTS     128U
+#define RBW_10K_SKIP_POINTS     128U
+
+/* Accumulation buffer: holds decimated CIC output across DMA transfers.
+ * Max needed = observe + skip + fir_taps:
+ *   RBW_10K: 256 + 128 + 256 = 640 → 768 for margin */
+#define ACCUM_BUFFER_SIZE     768U
 
 typedef enum {
     RBW_MODE_10K = 0,

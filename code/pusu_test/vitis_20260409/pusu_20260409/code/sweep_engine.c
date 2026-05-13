@@ -156,6 +156,21 @@ int sweep_engine_poll(sweep_engine_t *engine)
         return SWEEP_ENGINE_OK;
 
     case SWEEP_ENGINE_STATE_ARM_DMA:
+        if (dma_capture_reset() != XST_SUCCESS) {
+            sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_FRAME_TIMEOUT);
+            return SWEEP_ENGINE_ERR_FRAME_TIMEOUT;
+        }
+
+        if (dma_capture_start() != XST_SUCCESS) {
+            sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_FRAME_TIMEOUT);
+            return SWEEP_ENGINE_ERR_FRAME_TIMEOUT;
+        }
+
+        engine->wait_counter = 0U;
+        engine->state = SWEEP_ENGINE_STATE_WAIT_FRAME;
+        return SWEEP_ENGINE_OK;
+
+    case SWEEP_ENGINE_STATE_REARM_DMA:
         if (dma_capture_start() != XST_SUCCESS) {
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_FRAME_TIMEOUT);
             return SWEEP_ENGINE_ERR_FRAME_TIMEOUT;
@@ -172,7 +187,13 @@ int sweep_engine_poll(sweep_engine_t *engine)
         }
 
         if (dma_capture_frame_ready() != 0) {
-            engine->state = SWEEP_ENGINE_STATE_MEASURE;
+            signal_processing_accumulate_dma(dma_capture_get_rx_buffer());
+
+            if (signal_processing_accumulation_ready() != 0) {
+                engine->state = SWEEP_ENGINE_STATE_MEASURE;
+            } else {
+                engine->state = SWEEP_ENGINE_STATE_REARM_DMA;
+            }
             return SWEEP_ENGINE_OK;
         }
 
@@ -184,8 +205,8 @@ int sweep_engine_poll(sweep_engine_t *engine)
         return SWEEP_ENGINE_OK;
 
     case SWEEP_ENGINE_STATE_MEASURE:
-        if (signal_processing_measure_power_dbm(dma_capture_get_rx_buffer(),
-                                                &engine->current_power_dbm) != 0) {
+        if (signal_processing_measure_accumulated_power_dbm(
+                &engine->current_power_dbm) != 0) {
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_POWER_MEASURE);
             return SWEEP_ENGINE_ERR_POWER_MEASURE;
         }
@@ -215,6 +236,7 @@ int sweep_engine_poll(sweep_engine_t *engine)
             g_last_error = SWEEP_ENGINE_OK;
             engine->last_error = SWEEP_ENGINE_OK;
         } else {
+            signal_processing_reset_accumulation();
             engine->state = SWEEP_ENGINE_STATE_SET_LO1;
         }
         return SWEEP_ENGINE_OK;
@@ -235,6 +257,7 @@ int sweep_engine_is_active(const sweep_engine_t *engine)
            (engine->state == SWEEP_ENGINE_STATE_SET_LO1) ||
            (engine->state == SWEEP_ENGINE_STATE_WAIT_LO1_LOCK) ||
            (engine->state == SWEEP_ENGINE_STATE_ARM_DMA) ||
+           (engine->state == SWEEP_ENGINE_STATE_REARM_DMA) ||
            (engine->state == SWEEP_ENGINE_STATE_WAIT_FRAME) ||
            (engine->state == SWEEP_ENGINE_STATE_MEASURE) ||
            (engine->state == SWEEP_ENGINE_STATE_EMIT_POINT) ||

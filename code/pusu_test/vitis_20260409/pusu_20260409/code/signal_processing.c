@@ -1,12 +1,13 @@
 #include "../code/signal_processing.h"
+#include "../code/cic_decimator.h"
 
 #include <math.h>
+#include <string.h>
 #include "arm_const_structs.h"
 #include "arm_math.h"
 #include "xil_printf.h"
 
-#define ADC_INPUT_FULL_SCALE_DBM   (8.93f)
-
+/* ── FFT-path static buffers (unchanged) ─────────────────────────── */
 static float32_t time_domain_real[FFT_SIZE];
 static float32_t time_domain_imag[FFT_SIZE];
 static float32_t stage_real[FFT_SIZE];
@@ -16,11 +17,31 @@ static float32_t fft_mag[FFT_SIZE];
 static float32_t hann_window[FFT_SIZE];
 static float32_t rbw_lpf_coeffs[RBW_LPF_TAP_NUM];
 static float32_t latest_spectrum_dbfs[SPECTRUM_BINS];
+static float32_t fir_state[FFT_SIZE + RBW_LPF_TAP_NUM - 1];
+static arm_fir_instance_f32 fir_instance;
+
+/* ── Sweep-path accumulation state ───────────────────────────────── */
+static float32_t accum_i[ACCUM_BUFFER_SIZE];
+static float32_t accum_q[ACCUM_BUFFER_SIZE];
+static int       accum_count;
+static int       accum_target;
+
+static float32_t comp_fir_coeffs[RBW_10K_FIR_TAPS];
+static float32_t comp_fir_state[ACCUM_BUFFER_SIZE + RBW_10K_FIR_TAPS];
+static arm_fir_instance_f32 comp_fir_instance;
+static int       comp_fir_taps;
+static int       comp_fir_skip;
+
+/* ── NCO precomputed lookup table ─────────────────────────────────── */
+static float32_t nco_cos_table[FFT_SIZE];
+static float32_t nco_sin_table[FFT_SIZE];
+static float32_t nco_if_hz;
 
 static rbw_mode_t current_rbw_mode = RBW_MODE_100K;
 static int latest_spectrum_valid = 0;
 static float32_t current_if_hz = DDC_IF_HZ;
 
+/* ── Static forward declarations ─────────────────────────────────── */
 static void hann_init(void);
 static void spectral_prepare_input(volatile u16 *rx_buffer);
 static void ddc_process_block(volatile u16 *rx_buffer);
@@ -36,16 +57,33 @@ static void fft_postprocess(void);
 static void report_time_domain_power(void);
 static void fft_report_peak(void);
 
+/* Sweep-path internals */
+static void nco_table_build(float32_t if_hz);
+static void ddc_mix_to_time_domain(volatile u16 *rx_buffer);
+static void sweep_configure_for_rbw(rbw_mode_t mode);
+static void compensating_fir_init(float32_t cutoff_hz, int taps);
+static void apply_compensating_fir(void);
+static float32_t measure_power_dbfs_accumulated(void);
+
+/* ── Public API ──────────────────────────────────────────────────── */
+
 void signal_processing_init(void)
 {
     hann_init();
+    nco_table_build(DDC_IF_HZ);
     signal_processing_apply_rbw_mode(RBW_MODE_100K);
 }
 
 void signal_processing_apply_rbw_mode(rbw_mode_t mode)
 {
     current_rbw_mode = mode;
+
+    /* FFT-path legacy LPF for signal_processing_process_frame() */
     rbw_lpf_init(rbw_mode_cutoff_hz(mode));
+
+    /* Sweep-path CIC + compensating FIR */
+    sweep_configure_for_rbw(mode);
+
 #if SIGNAL_PROCESSING_VERBOSE
     xil_printf("RBW,%s\r\n", rbw_mode_name(current_rbw_mode));
 #endif
@@ -53,8 +91,9 @@ void signal_processing_apply_rbw_mode(rbw_mode_t mode)
 
 void signal_processing_set_if_hz(float if_hz)
 {
-    if (if_hz > 0.0f) {
+    if (if_hz > 0.0f && if_hz != current_if_hz) {
         current_if_hz = if_hz;
+        nco_table_build(if_hz);
     }
 }
 
@@ -62,6 +101,8 @@ float signal_processing_get_if_hz(void)
 {
     return current_if_hz;
 }
+
+/* ── FFT-path: full-spectrum processing (kept, not in sweep use) ─── */
 
 void signal_processing_process_frame(volatile u16 *rx_buffer)
 {
@@ -74,6 +115,9 @@ void signal_processing_process_frame(volatile u16 *rx_buffer)
 
 int signal_processing_measure_power_dbfs(volatile u16 *rx_buffer, float *out_power_dbfs)
 {
+    /* Legacy single-buffer power measurement through old DDC+LPF path.
+     * Sweep engine now uses accumulate_dma + measure_accumulated_power_dbm
+     * instead.  Kept for standalone use / smoke tests. */
     uint32_t i;
     float32_t power_sum = 0.0f;
     float32_t mean_power;
@@ -82,10 +126,6 @@ int signal_processing_measure_power_dbfs(volatile u16 *rx_buffer, float *out_pow
         return -1;
     }
 
-    /* Sweep mode should avoid FFT-heavy processing. We reuse the
-     * DDC + RBW path and then estimate channel power directly from
-     * time-domain complex samples.
-     */
     ddc_process_block(rx_buffer);
 
     for (i = 0; i < FFT_SIZE; i++) {
@@ -114,13 +154,52 @@ int signal_processing_measure_power_dbm(volatile u16 *rx_buffer, float *out_powe
         return -1;
     }
 
-    /* First-pass absolute power conversion:
-     * ADC full-scale is approximated as 2.5 Vpp differential across 100 ohm.
-     * This yields about +8.93 dBm for a full-scale sine at the ADC input.
-     */
     *out_power_dbm = power_dbfs + ADC_INPUT_FULL_SCALE_DBM;
     return 0;
 }
+
+/* ── Sweep-path: multi-DMA accumulation ──────────────────────────── */
+
+void signal_processing_accumulate_dma(volatile u16 *rx_buffer)
+{
+    int produced;
+
+    ddc_mix_to_time_domain(rx_buffer);
+
+    produced = cic_decimator_process(time_domain_real, time_domain_imag,
+                                     (int)FFT_SIZE,
+                                     accum_i + accum_count,
+                                     accum_q + accum_count,
+                                     (int)ACCUM_BUFFER_SIZE - accum_count);
+    accum_count += produced;
+}
+
+int signal_processing_accumulation_ready(void)
+{
+    return (accum_count >= accum_target) ? 1 : 0;
+}
+
+int signal_processing_measure_accumulated_power_dbm(float *out_power_dbm)
+{
+    float power_dbfs;
+
+    if ((out_power_dbm == 0) || (accum_count < 1)) {
+        return -1;
+    }
+
+    apply_compensating_fir();
+    power_dbfs = measure_power_dbfs_accumulated();
+    *out_power_dbm = power_dbfs + ADC_INPUT_FULL_SCALE_DBM;
+    return 0;
+}
+
+void signal_processing_reset_accumulation(void)
+{
+    accum_count = 0;
+    cic_decimator_reset();
+}
+
+/* ── Spectrum read-back (FFT path) ───────────────────────────────── */
 
 int signal_processing_get_latest_spectrum(float *out_mag_dbfs,
                                           unsigned short max_bins,
@@ -155,6 +234,201 @@ int signal_processing_has_latest_spectrum(void)
 {
     return latest_spectrum_valid;
 }
+
+/* ── Static: configuration ───────────────────────────────────────── */
+
+typedef struct {
+    int cic_r;
+    int cic_n;
+    int fir_taps;
+    float accum_target_obs;
+} rbw_mode_config_t;
+
+static const rbw_mode_config_t *get_rbw_config(rbw_mode_t mode)
+{
+    static const rbw_mode_config_t table[] = {
+        { RBW_10K_CIC_R,  RBW_10K_CIC_N,  RBW_10K_FIR_TAPS,  RBW_10K_OBSERVE_POINTS  },
+        { RBW_30K_CIC_R,  RBW_30K_CIC_N,  RBW_30K_FIR_TAPS,  RBW_30K_OBSERVE_POINTS  },
+        { RBW_100K_CIC_R, RBW_100K_CIC_N, RBW_100K_FIR_TAPS, RBW_100K_OBSERVE_POINTS },
+        { RBW_300K_CIC_R, RBW_300K_CIC_N, RBW_300K_FIR_TAPS, RBW_300K_OBSERVE_POINTS },
+        { RBW_1M_CIC_R,   RBW_1M_CIC_N,   RBW_1M_FIR_TAPS,   RBW_1M_OBSERVE_POINTS   },
+    };
+    return &table[(int)mode];
+}
+
+static int get_rbw_skip_points(rbw_mode_t mode)
+{
+    static const int table[] = {
+        RBW_10K_SKIP_POINTS,
+        RBW_30K_SKIP_POINTS,
+        RBW_100K_SKIP_POINTS,
+        RBW_300K_SKIP_POINTS,
+        RBW_1M_SKIP_POINTS,
+    };
+    return table[(int)mode];
+}
+
+/* ── Static: sweep-path configuration ────────────────────────────── */
+
+static void sweep_configure_for_rbw(rbw_mode_t mode)
+{
+    const rbw_mode_config_t *cfg = get_rbw_config(mode);
+
+    cic_decimator_init(cfg->cic_n, cfg->cic_r);
+
+    /* Compensating FIR: RBW lowpass at the decimated rate.
+     * fs_out = ADC_SAMPLE_RATE_HZ / cfg->cic_r */
+    compensating_fir_init(rbw_mode_cutoff_hz(mode), cfg->fir_taps);
+
+    comp_fir_skip = get_rbw_skip_points(mode);
+
+    /* Accumulation target: observe_points + skip + fir_taps margin */
+    accum_target = (int)cfg->accum_target_obs + comp_fir_skip + cfg->fir_taps;
+    if (accum_target > (int)ACCUM_BUFFER_SIZE) {
+        accum_target = (int)ACCUM_BUFFER_SIZE;
+    }
+}
+
+/* ── Static: compensating FIR design ─────────────────────────────── */
+
+static void compensating_fir_init(float32_t cutoff_hz, int taps)
+{
+    int n;
+    const rbw_mode_config_t *cfg = get_rbw_config(current_rbw_mode);
+    const float32_t fs_out = ADC_SAMPLE_RATE_HZ / (float32_t)cfg->cic_r;
+    const float32_t fc_norm = cutoff_hz / fs_out;
+    const int mid = taps / 2;
+    float32_t coeff_sum = 0.0f;
+
+    for (n = 0; n < taps; n++) {
+        int k = n - mid;
+        float32_t sinc_val;
+        float32_t window;
+
+        if (k == 0) {
+            sinc_val = 2.0f * fc_norm;
+        } else {
+            float32_t x = 2.0f * PI * fc_norm * (float32_t)k;
+            sinc_val = arm_sin_f32(x) / (PI * (float32_t)k);
+        }
+
+        window = 0.54f - 0.46f * arm_cos_f32(2.0f * PI * (float32_t)n
+                                              / (float32_t)(taps - 1));
+        comp_fir_coeffs[n] = sinc_val * window;
+        coeff_sum += comp_fir_coeffs[n];
+    }
+
+    if (fabsf(coeff_sum) > EPSILON) {
+        for (n = 0; n < taps; n++) {
+            comp_fir_coeffs[n] /= coeff_sum;
+        }
+    }
+
+    comp_fir_taps = taps;
+}
+
+/* ── Static: apply compensating FIR to accumulated data ──────────── */
+
+static void apply_compensating_fir(void)
+{
+    int fir_out_len = accum_count - comp_fir_taps + 1;
+    int i;
+
+    if (fir_out_len <= 0 || accum_count == 0) {
+        return;
+    }
+
+    /* Process I channel */
+    {
+        arm_fir_instance_f32 inst;
+        memset(comp_fir_state, 0,
+               (size_t)(comp_fir_taps + accum_count - 1) * sizeof(float32_t));
+        arm_fir_init_f32(&inst, comp_fir_taps, comp_fir_coeffs,
+                         comp_fir_state, (uint32_t)accum_count);
+        arm_fir_f32(&inst, accum_i, stage_real, (uint32_t)accum_count);
+
+        for (i = comp_fir_skip; i < fir_out_len && (i - comp_fir_skip) < accum_count; i++) {
+            accum_i[i - comp_fir_skip] = stage_real[i];
+        }
+    }
+
+    /* Process Q channel (fresh state to avoid I-channel residue) */
+    {
+        arm_fir_instance_f32 inst;
+        memset(comp_fir_state, 0,
+               (size_t)(comp_fir_taps + accum_count - 1) * sizeof(float32_t));
+        arm_fir_init_f32(&inst, comp_fir_taps, comp_fir_coeffs,
+                         comp_fir_state, (uint32_t)accum_count);
+        arm_fir_f32(&inst, accum_q, stage_imag, (uint32_t)accum_count);
+
+        for (i = comp_fir_skip; i < fir_out_len && (i - comp_fir_skip) < accum_count; i++) {
+            accum_q[i - comp_fir_skip] = stage_imag[i];
+        }
+    }
+
+    accum_count = fir_out_len - comp_fir_skip;
+    if (accum_count < 0) {
+        accum_count = 0;
+    }
+}
+
+/* ── Static: power measurement on accumulated (FIR-filtered) data ── */
+
+static float32_t measure_power_dbfs_accumulated(void)
+{
+    uint32_t i;
+    float32_t power_sum = 0.0f;
+    float32_t mean_power;
+
+    if (accum_count < 1) {
+        return -120.0f;
+    }
+
+    for (i = 0; i < (uint32_t)accum_count; i++) {
+        power_sum += accum_i[i] * accum_i[i];
+        power_sum += accum_q[i] * accum_q[i];
+    }
+
+    mean_power = power_sum / (float32_t)accum_count;
+    if (mean_power < EPSILON) {
+        mean_power = EPSILON;
+    }
+
+    return 10.0f * log10f(mean_power / FULL_SCALE_COMPLEX_POWER);
+}
+
+/* ── Static: NCO lookup table (precomputed, ~32 KB) ───────────────── */
+
+static void nco_table_build(float32_t if_hz)
+{
+    uint32_t i;
+    const float32_t phase_step = 2.0f * PI * if_hz / ADC_SAMPLE_RATE_HZ;
+
+    for (i = 0; i < FFT_SIZE; i++) {
+        float32_t phase = phase_step * (float32_t)i;
+        nco_cos_table[i] =  arm_cos_f32(phase);
+        nco_sin_table[i] = -arm_sin_f32(phase);
+    }
+    nco_if_hz = if_hz;
+}
+
+/* ── Static: DDC mix (no LPF) – used by sweep accumulation path ──── */
+
+static void ddc_mix_to_time_domain(volatile u16 *rx_buffer)
+{
+    uint32_t i;
+
+    for (i = 0; i < FFT_SIZE; i++) {
+        float32_t norm = (float32_t)(int16_t)rx_buffer[i] / 32768.0f;
+
+        time_domain_real[i] = norm * nco_cos_table[i];
+        time_domain_imag[i] = norm * nco_sin_table[i];
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Below: FFT-path static implementations (unchanged from original)
+ * ═══════════════════════════════════════════════════════════════════ */
 
 static void hann_init(void)
 {
@@ -198,43 +472,21 @@ static void rbw_lpf_init(float32_t cutoff_hz)
 
 static const char *rbw_mode_name(rbw_mode_t mode)
 {
-    if (mode == RBW_MODE_10K) {
-        return "10K";
-    }
-    if (mode == RBW_MODE_30K) {
-        return "30K";
-    }
-    if (mode == RBW_MODE_100K) {
-        return "100K";
-    }
-    if (mode == RBW_MODE_300K) {
-        return "300K";
-    }
-    if (mode == RBW_MODE_1M) {
-        return "1M";
-    }
-
+    if (mode == RBW_MODE_10K)  return "10K";
+    if (mode == RBW_MODE_30K)  return "30K";
+    if (mode == RBW_MODE_100K) return "100K";
+    if (mode == RBW_MODE_300K) return "300K";
+    if (mode == RBW_MODE_1M)   return "1M";
     return "UNKNOWN";
 }
 
 static float32_t rbw_mode_cutoff_hz(rbw_mode_t mode)
 {
-    if (mode == RBW_MODE_10K) {
-        return RBW_10K_HZ;
-    }
-    if (mode == RBW_MODE_30K) {
-        return RBW_30K_HZ;
-    }
-    if (mode == RBW_MODE_100K) {
-        return RBW_100K_HZ;
-    }
-    if (mode == RBW_MODE_300K) {
-        return RBW_300K_HZ;
-    }
-    if (mode == RBW_MODE_1M) {
-        return RBW_1M_HZ;
-    }
-
+    if (mode == RBW_MODE_10K)  return RBW_10K_HZ;
+    if (mode == RBW_MODE_30K)  return RBW_30K_HZ;
+    if (mode == RBW_MODE_100K) return RBW_100K_HZ;
+    if (mode == RBW_MODE_300K) return RBW_300K_HZ;
+    if (mode == RBW_MODE_1M)   return RBW_1M_HZ;
     return RBW_100K_HZ;
 }
 
@@ -253,43 +505,20 @@ static void ddc_bypass_copy(volatile u16 *rx_buffer)
 
 static void ddc_mix_to_baseband(volatile u16 *rx_buffer)
 {
-    uint32_t i;
-    const float32_t phase_step = 2.0f * PI * current_if_hz / ADC_SAMPLE_RATE_HZ;
-
-    for (i = 0; i < FFT_SIZE; i++) {
-        int16_t adc_value = (int16_t)rx_buffer[i];
-        float32_t norm = (float32_t)adc_value / 32768.0f;
-        float32_t phase = phase_step * (float32_t)i;
-        float32_t lo_i = arm_cos_f32(phase);
-        float32_t lo_q = -arm_sin_f32(phase);
-
-        time_domain_real[i] = norm * lo_i;
-        time_domain_imag[i] = norm * lo_q;
-    }
+    ddc_mix_to_time_domain(rx_buffer);
 }
 
 static void rbw_lpf_apply_complex(void)
 {
     uint32_t i;
-    uint32_t k;
-    const uint32_t half = RBW_LPF_TAP_NUM / 2U;
 
-    for (i = 0; i < FFT_SIZE; i++) {
-        float32_t acc_real = 0.0f;
-        float32_t acc_imag = 0.0f;
+    arm_fir_init_f32(&fir_instance, RBW_LPF_TAP_NUM,
+                     rbw_lpf_coeffs, fir_state, FFT_SIZE);
+    arm_fir_f32(&fir_instance, time_domain_real, stage_real, FFT_SIZE);
 
-        for (k = 0; k < RBW_LPF_TAP_NUM; k++) {
-            int32_t idx = (int32_t)i + (int32_t)k - (int32_t)half;
-
-            if (idx >= 0 && idx < (int32_t)FFT_SIZE) {
-                acc_real += time_domain_real[idx] * rbw_lpf_coeffs[k];
-                acc_imag += time_domain_imag[idx] * rbw_lpf_coeffs[k];
-            }
-        }
-
-        stage_real[i] = acc_real;
-        stage_imag[i] = acc_imag;
-    }
+    arm_fir_init_f32(&fir_instance, RBW_LPF_TAP_NUM,
+                     rbw_lpf_coeffs, fir_state, FFT_SIZE);
+    arm_fir_f32(&fir_instance, time_domain_imag, stage_imag, FFT_SIZE);
 
     for (i = 0; i < FFT_SIZE; i++) {
         time_domain_real[i] = stage_real[i];
@@ -299,9 +528,7 @@ static void rbw_lpf_apply_complex(void)
 
 static void remove_dc_offset(void)
 {
-    /* Keep the hook in place, but do not modify the spectrum while
-     * we inspect the true low-frequency content.
-     */
+    /* Keep the hook; no modification while inspecting low-frequency content. */
 }
 
 static void ddc_process_block(volatile u16 *rx_buffer)
@@ -322,7 +549,7 @@ static void spectral_prepare_input(volatile u16 *rx_buffer)
     ddc_process_block(rx_buffer);
 
     for (i = 0; i < FFT_SIZE; i++) {
-        fft_input[2U * i] = time_domain_real[i] * hann_window[i];
+        fft_input[2U * i]     = time_domain_real[i] * hann_window[i];
         fft_input[2U * i + 1U] = time_domain_imag[i] * hann_window[i];
     }
 }
