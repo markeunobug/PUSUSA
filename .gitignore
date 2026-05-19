@@ -9,18 +9,47 @@ build/
 windows/flutter/ephemeral/
 
 # Common binary/debug artifacts
+*.o
+*.d
 *.pdb
 *.dll
 *.exe
 *.bin
+*.elf
+*.bit
+*.dcp
+*.rpt
+*.rpx
+*.pb
 
 # Vivado/Vitis generated logs and temporary files
 **/Debug/
+**/Release/
 **/.metadata/
+**/.settings/
+**/.Xil/
+**/RemoteSystemsTempFiles/
+**/.analytics
+**/*.cache/
+**/*.gen/
+**/*.runs/
+**/*.ip_user_files/
+**/*.sim/
+**/*.hw/
 **/*.log
 **/*.jou
 **/*.str
 **/*.dmp
+
+# Local assistant/editor state
+.claude/
+.vscode/
+**/.claude/
+**/.vscode/
+
+# Python generated files
+__pycache__/
+**/__pycache__/
 
 # Temporary drawio files
 *.dtmp

@@ -1,4 +1,4 @@
-// spectrum_chart.dart
+﻿// spectrum_chart.dart
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart' as material;
 
@@ -23,6 +23,9 @@ class SpectrumChart extends material.StatelessWidget {
   final String spanStr;
   final String sweepSpeedStr;
   final List<Marker> markers;
+  final bool isZeroSpan;
+  final String zeroSpanFreqStr;
+  final String zeroSpanElapsedStr;
 
   const SpectrumChart({
     super.key,
@@ -38,6 +41,9 @@ class SpectrumChart extends material.StatelessWidget {
     required this.spanStr,
     required this.sweepSpeedStr,
     this.markers = const [],
+    this.isZeroSpan = false,
+    this.zeroSpanFreqStr = '',
+    this.zeroSpanElapsedStr = '',
   });
 
   /// 根据频点 x 值，获取最接近的幅度值（dBm）。
@@ -66,6 +72,7 @@ class SpectrumChart extends material.StatelessWidget {
   }
 
   material.Widget _buildMarkerInfoRow() {
+    if (isZeroSpan) return const material.SizedBox.shrink();
     final enabledMarkers = markers.where((m) => m.enabled).toList();
 
     return material.Container(
@@ -93,13 +100,17 @@ class SpectrumChart extends material.StatelessWidget {
   }
 
   List<VerticalLine> _buildMarkerVerticalLines() {
+    if (isZeroSpan) return [];
     final enabledMarkers = markers.where((m) => m.enabled).toList();
     return enabledMarkers
         .where((m) => m.freqHz >= minFreq && m.freqHz <= maxFreq)
         .map((m) {
       final capturedM = m;
       final yValue = _getYAt(m.freqHz);
-      final verticalOffsetRatio = (maxDbm - yValue) / (maxDbm - minDbm);
+      final dbmRange = maxDbm - minDbm;
+      final verticalOffsetRatio = dbmRange > 0
+          ? ((maxDbm - yValue) / dbmRange).clamp(0.12, 0.92)
+          : 0.5;
 
       return VerticalLine(
         x: m.freqHz,
@@ -109,8 +120,9 @@ class SpectrumChart extends material.StatelessWidget {
         label: VerticalLineLabel(
           show: true,
           alignment: material.Alignment(0, -1 + (verticalOffsetRatio * 2)),
-          padding: const material.EdgeInsets.only(top: -40),
-          labelResolver: (line) => 'M${capturedM.id}\n▲',
+          padding:
+              const material.EdgeInsets.symmetric(horizontal: 24, vertical: 30),
+          labelResolver: (line) => 'M${capturedM.id}\n▼',
           style: const material.TextStyle(
             color: material.Colors.white,
             fontSize: 15,
@@ -123,6 +135,7 @@ class SpectrumChart extends material.StatelessWidget {
   }
 
   List<HorizontalLine> _buildMarkerHorizontalLines() {
+    if (isZeroSpan) return [];
     final enabledMarkers = markers.where((m) => m.enabled).toList();
     return enabledMarkers
         .where((m) =>
@@ -179,7 +192,9 @@ class SpectrumChart extends material.StatelessWidget {
                   show: true,
                   drawVerticalLine: true,
                   drawHorizontalLine: true,
-                  verticalInterval: (maxFreq - minFreq) / 10,
+                  verticalInterval: (maxFreq - minFreq) > 0
+                      ? (maxFreq - minFreq) / 10
+                      : 1.0,
                   horizontalInterval: scalePerGrid,
                   getDrawingHorizontalLine: (value) => FlLine(
                     color: material.Colors.white.withOpacity(0.1),
@@ -210,8 +225,45 @@ class SpectrumChart extends material.StatelessWidget {
                       ),
                     ),
                   ),
-                  bottomTitles: const AxisTitles(
-                    sideTitles: SideTitles(showTitles: false),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: isZeroSpan,
+                      reservedSize: 28,
+                      interval: (maxFreq - minFreq) > 0
+                          ? (maxFreq - minFreq) / 10
+                          : 1.0,
+                      getTitlesWidget: (value, meta) => material.Text(
+                        '${value.toInt()} s',
+                        style: const material.TextStyle(
+                            color: material.Colors.white, fontSize: 11),
+                      ),
+                    ),
+                  ),
+                ),
+                lineTouchData: LineTouchData(
+                  touchTooltipData: LineTouchTooltipData(
+                    getTooltipItems: (touchedSpots) {
+                      return touchedSpots.map((spot) {
+                        if (isZeroSpan) {
+                          return LineTooltipItem(
+                            '${spot.x.toStringAsFixed(1)} s\n'
+                            '${spot.y.toStringAsFixed(2)} dBm',
+                            const material.TextStyle(
+                              color: material.Colors.white,
+                              fontSize: 12,
+                            ),
+                          );
+                        }
+                        return LineTooltipItem(
+                          '${_formatFreqAutoUnit(spot.x)}\n'
+                          '${spot.y.toStringAsFixed(2)} dBm',
+                          const material.TextStyle(
+                            color: material.Colors.white,
+                            fontSize: 12,
+                          ),
+                        );
+                      }).toList();
+                    },
                   ),
                 ),
                 borderData: FlBorderData(show: false),
@@ -239,23 +291,35 @@ class SpectrumChart extends material.StatelessWidget {
           const material.SizedBox(height: 8),
           material.Row(
             mainAxisAlignment: material.MainAxisAlignment.spaceBetween,
-            children: [
-              material.Text('起始: $startFreqStr',
-                  style: const material.TextStyle(
-                      color: material.Colors.green, fontSize: 12)),
-              material.Text('中心: $centerFreqStr',
-                  style: const material.TextStyle(
-                      color: material.Colors.green, fontSize: 12)),
-              material.Text('扫宽: $spanStr',
-                  style: const material.TextStyle(
-                      color: material.Colors.green, fontSize: 12)),
-              material.Text('扫描速度: $sweepSpeedStr',
-                  style: const material.TextStyle(
-                      color: material.Colors.green, fontSize: 12)),
-              material.Text('终止: $stopFreqStr',
-                  style: const material.TextStyle(
-                      color: material.Colors.green, fontSize: 12)),
-            ],
+            children: isZeroSpan
+                ? [
+                    material.Text('监测频率: $zeroSpanFreqStr',
+                        style: const material.TextStyle(
+                            color: material.Colors.green, fontSize: 12)),
+                    material.Text('已用时间: $zeroSpanElapsedStr',
+                        style: const material.TextStyle(
+                            color: material.Colors.green, fontSize: 12)),
+                    material.Text('扫描速度: $sweepSpeedStr',
+                        style: const material.TextStyle(
+                            color: material.Colors.green, fontSize: 12)),
+                  ]
+                : [
+                    material.Text('起始: $startFreqStr',
+                        style: const material.TextStyle(
+                            color: material.Colors.green, fontSize: 12)),
+                    material.Text('中心: $centerFreqStr',
+                        style: const material.TextStyle(
+                            color: material.Colors.green, fontSize: 12)),
+                    material.Text('扫宽: $spanStr',
+                        style: const material.TextStyle(
+                            color: material.Colors.green, fontSize: 12)),
+                    material.Text('扫描速度: $sweepSpeedStr',
+                        style: const material.TextStyle(
+                            color: material.Colors.green, fontSize: 12)),
+                    material.Text('终止: $stopFreqStr',
+                        style: const material.TextStyle(
+                            color: material.Colors.green, fontSize: 12)),
+                  ],
           )
         ],
       ),

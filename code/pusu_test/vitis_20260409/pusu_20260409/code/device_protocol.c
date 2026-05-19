@@ -228,9 +228,13 @@ void device_protocol_set_sweep_control_handler(device_protocol_sweep_control_t h
     g_protocol.sweep_control = handler;
 }
 
-int device_protocol_stream_spectrum_point(uint32_t freq_hz, float amp_dbm)
+int device_protocol_stream_spectrum_point(uint32_t freq_hz,
+                                          float amp_dbm,
+                                          uint16_t total_points,
+                                          uint16_t current_index,
+                                          uint8_t done)
 {
-    unsigned short payload_length = 14U;
+    unsigned short payload_length = 19U;
     unsigned int offset = 4U;
 
     if ((unsigned int)payload_length + 7U > TX_FRAME_MAX_SIZE) {
@@ -242,6 +246,14 @@ int device_protocol_stream_spectrum_point(uint32_t freq_hz, float amp_dbm)
 
     write_u32_be(&g_protocol.tx_buffer[offset], g_protocol.stream_timestamp);
     offset += 4U;
+
+    write_u16_be(&g_protocol.tx_buffer[offset], total_points);
+    offset += 2U;
+
+    write_u16_be(&g_protocol.tx_buffer[offset], current_index);
+    offset += 2U;
+
+    g_protocol.tx_buffer[offset++] = (done != 0U) ? 1U : 0U;
 
     write_u32_le(&g_protocol.tx_buffer[offset], freq_hz);
     offset += 4U;
@@ -584,7 +596,11 @@ static int fake_spectrum_provider(
         double ratio = (point_count > 1U) ? ((double)i / (double)(point_count - 1U)) : 0.0;
         points[i].freq_hz = (uint32_t)(start_hz + step_hz * (double)i);
         points[i].amp_dbm = (float)make_fake_amplitude(ratio, config);
-        (void)device_protocol_stream_spectrum_point(points[i].freq_hz, points[i].amp_dbm);
+        (void)device_protocol_stream_spectrum_point(points[i].freq_hz,
+                                                    points[i].amp_dbm,
+                                                    point_count,
+                                                    i,
+                                                    (i + 1U >= point_count) ? 1U : 0U);
     }
 
     *out_point_count = point_count;

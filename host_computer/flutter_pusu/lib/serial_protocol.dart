@@ -8,10 +8,16 @@ import 'serial_port_manager.dart';
 
 class SpectrumSegment {
   final int timestamp;
+  final int totalPoints;
+  final int currentIndex;
+  final bool done;
   final List<FlSpot> spots;
 
   const SpectrumSegment({
     required this.timestamp,
+    required this.totalPoints,
+    required this.currentIndex,
+    required this.done,
     required this.spots,
   });
 }
@@ -25,12 +31,15 @@ class SerialProtocol {
       StreamController.broadcast();
   final StreamController<Map<String, dynamic>> _statusStream =
       StreamController.broadcast();
+  final StreamController<RfFrontendStatus> _rfFrontendStatusStream =
+      StreamController.broadcast();
   Uint8List _buffer = Uint8List(0);
   Completer<bool>? _handshakeCompleter;
-  bool _handshakeStatusAcked = false;
+  final Map<int, List<Completer<bool>>> _ackWaiters = {};
   int badFrameCount = 0;
   int crcErrorCount = 0;
   int resyncCount = 0;
+  int unknownFrameCount = 0;
 
   SerialProtocol(this._manager) {
     _manager.stream.listen(_parseIncomingData);
@@ -38,6 +47,8 @@ class SerialProtocol {
 
   Stream<SpectrumSegment> get spectrumStream => _spectrumStream.stream;
   Stream<Map<String, dynamic>> get statusStream => _statusStream.stream;
+  Stream<RfFrontendStatus> get rfFrontendStatusStream =>
+      _rfFrontendStatusStream.stream;
 
   void resetReceiveBuffer() {
     _buffer = Uint8List(0);
@@ -49,8 +60,9 @@ class SerialProtocol {
   }) async {
     for (int attempt = 0; attempt < attempts; attempt++) {
       resetReceiveBuffer();
+      await _manager.drainInputBuffer();
+      resetReceiveBuffer();
       _handshakeCompleter = Completer<bool>();
-      _handshakeStatusAcked = false;
       getStatus();
 
       final ok = await _handshakeCompleter!.future
@@ -95,6 +107,10 @@ class SerialProtocol {
     _buffer = Uint8List.fromList(_buffer + newData);
     while (_buffer.length >= _minFrameLength) {
       if (_buffer[0] != 0xAA) {
+        print(
+          'Serial frame resync: first=0x${_buffer[0].toRadixString(16)}, '
+          'buffer=${_buffer.length}',
+        );
         _dropUntilNextStart();
         continue;
       }
@@ -102,6 +118,10 @@ class SerialProtocol {
       final len = _buffer.buffer.asByteData(1).getUint16(0, Endian.big);
       if (len > _maxPayloadLength) {
         badFrameCount++;
+        print(
+          'Serial bad frame: payload length $len exceeds $_maxPayloadLength '
+          '(bad=$badFrameCount, crc=$crcErrorCount, resync=$resyncCount)',
+        );
         _dropUntilNextStart(skipFirst: true);
         continue;
       }
@@ -116,6 +136,11 @@ class SerialProtocol {
 
       if (frame.last != 0x55) {
         badFrameCount++;
+        print(
+          'Serial bad frame: missing end byte, cmd=0x${frame[3].toRadixString(16)}, '
+          'len=$len end=0x${frame.last.toRadixString(16)} '
+          '(bad=$badFrameCount, crc=$crcErrorCount, resync=$resyncCount)',
+        );
         _buffer = Uint8List.fromList(frame.sublist(1) + _buffer);
         _dropUntilNextStart();
         continue;
@@ -127,6 +152,11 @@ class SerialProtocol {
           frame.buffer.asByteData(1 + 2 + 1 + len).getUint16(0, Endian.big);
       if (calcCrc != rxCrc) {
         crcErrorCount++;
+        print(
+          'Serial CRC error: cmd=0x${frame[3].toRadixString(16)}, len=$len, '
+          'rx=0x${rxCrc.toRadixString(16)}, calc=0x${calcCrc.toRadixString(16)} '
+          '(bad=$badFrameCount, crc=$crcErrorCount, resync=$resyncCount)',
+        );
         _dropUntilNextStart();
         continue;
       }
@@ -161,10 +191,9 @@ class SerialProtocol {
       case 0x81:
         if (data.length >= 3) {
           print('ACK: cmd=${data[0]}, success=${data[1]}, error=${data[2]}');
+          _completeAckWaiter(data[0], data[1] == 1 && data[2] == 0);
           if (_handshakeCompleter != null && data[0] == 0x07) {
-            if (data[1] == 1) {
-              _handshakeStatusAcked = true;
-            } else if (!_handshakeCompleter!.isCompleted) {
+            if (data[1] != 1 && !_handshakeCompleter!.isCompleted) {
               _handshakeCompleter!.complete(false);
             }
           }
@@ -173,28 +202,71 @@ class SerialProtocol {
       case 0x82:
         if (data.length < 6) {
           badFrameCount++;
+          print(
+            'Spectrum frame too short: len=${data.length} '
+            '(bad=$badFrameCount, crc=$crcErrorCount, resync=$resyncCount)',
+          );
           break;
         }
         final pointCount = byteData.getUint16(0, Endian.big);
         final timestamp = byteData.getUint32(2, Endian.big);
-        if (data.length < 6 + pointCount * 8) {
+        final newFormatLength = 11 + pointCount * 8;
+        final oldFormatLength = 6 + pointCount * 16;
+        late final int totalPoints;
+        late final int currentIndex;
+        late final bool done;
+        late final List<FlSpot> spots;
+        late final String frameFormat;
+
+        if (data.length == newFormatLength) {
+          totalPoints = byteData.getUint16(6, Endian.big);
+          currentIndex = byteData.getUint16(8, Endian.big);
+          done = data[10] != 0;
+          spots = <FlSpot>[];
+          for (int i = 0; i < pointCount; i++) {
+            final offset = 11 + i * 8;
+            final freq = byteData.getUint32(offset, Endian.little).toDouble();
+            final amp =
+                byteData.getFloat32(offset + 4, Endian.little).toDouble();
+            spots.add(FlSpot(freq, amp));
+          }
+          frameFormat = 'segmented-v2';
+        } else if (data.length == oldFormatLength) {
+          totalPoints = pointCount;
+          currentIndex = 0;
+          done = true;
+          spots = <FlSpot>[];
+          for (int i = 0; i < pointCount; i++) {
+            final offset = 6 + i * 16;
+            final freq = byteData.getFloat64(offset, Endian.little);
+            final amp = byteData.getFloat64(offset + 8, Endian.little);
+            spots.add(FlSpot(freq, amp));
+          }
+          frameFormat = 'legacy-double';
+        } else {
           badFrameCount++;
+          print(
+            'Spectrum frame length mismatch: len=${data.length}, '
+            'points=$pointCount, expectedNew=$newFormatLength, '
+            'expectedLegacy=$oldFormatLength '
+            '(bad=$badFrameCount, crc=$crcErrorCount, resync=$resyncCount)',
+          );
           break;
         }
-        final spots = <FlSpot>[];
-        for (int i = 0; i < pointCount; i++) {
-          final offset = 6 + i * 8;
-          final freq = byteData.getUint32(offset, Endian.little).toDouble();
-          final amp = byteData.getFloat32(offset + 4, Endian.little).toDouble();
-          spots.add(FlSpot(freq, amp));
-        }
+
         _spectrumStream.add(
           SpectrumSegment(
             timestamp: timestamp,
+            totalPoints: totalPoints,
+            currentIndex: currentIndex,
+            done: done,
             spots: spots,
           ),
         );
-        print('Received spectrum: points=$pointCount timestamp=$timestamp');
+        print(
+          'Received spectrum: format=$frameFormat points=$pointCount timestamp=$timestamp '
+          'progress=${currentIndex + pointCount}/$totalPoints done=$done',
+        );
         break;
       case 0x83:
         if (data.length < 10) {
@@ -209,6 +281,23 @@ class SerialProtocol {
           'batteryPercent': battery,
           'errorCode': error,
         };
+        if (data.length >= 27) {
+          status.addAll({
+            'dmaStartCount': byteData.getUint32(10, Endian.big),
+            'dmaErrorCount': byteData.getUint32(14, Endian.big),
+            'frameReadyCount': byteData.getUint32(18, Endian.big),
+            'processFrameCount': byteData.getUint32(22, Endian.big),
+            'spectrumValid': data[26],
+          });
+        }
+        if (data.length >= 43) {
+          status.addAll({
+            's2mmDmacr': byteData.getUint32(27, Endian.big),
+            's2mmDmasr': byteData.getUint32(31, Endian.big),
+            'dmaIrqCount': byteData.getUint32(35, Endian.big),
+            'dmaLastIrqStatus': byteData.getUint32(39, Endian.big),
+          });
+        }
         if (data.length >= 59) {
           status.addAll({
             'uartRxBadFrameCount': byteData.getUint32(43, Endian.big),
@@ -218,15 +307,80 @@ class SerialProtocol {
           });
         }
         _statusStream.add(status);
-        if (_handshakeCompleter != null &&
-            _handshakeStatusAcked &&
-            !_handshakeCompleter!.isCompleted) {
+        if (_handshakeCompleter != null && !_handshakeCompleter!.isCompleted) {
           _handshakeCompleter!.complete(true);
         }
-        print('Status: Temp=$temp C, Battery=$battery%, Error=$error');
+        print(
+          'Status: Temp=$temp C, Battery=$battery%, Error=$error, '
+          'spectrumValid=${status['spectrumValid'] ?? '-'}, '
+          'dmaStart=${status['dmaStartCount'] ?? '-'}, '
+          'dmaError=${status['dmaErrorCount'] ?? '-'}, '
+          'frameReady=${status['frameReadyCount'] ?? '-'}, '
+          'processFrame=${status['processFrameCount'] ?? '-'}, '
+          's2mmDmasr=${status['s2mmDmasr'] != null ? '0x${(status['s2mmDmasr'] as int).toRadixString(16)}' : '-'}',
+        );
+        break;
+      case 0x84:
+        final status = parseRfFrontendStatus(data);
+        if (status == null) {
+          badFrameCount++;
+          print(
+            'RF frontend status frame too short: len=${data.length} '
+            '(bad=$badFrameCount, crc=$crcErrorCount, resync=$resyncCount)',
+          );
+          break;
+        }
+        _rfFrontendStatusStream.add(status);
+        print(
+          'RF frontend status: lna=${status.config.lnaMode.name}, '
+          'path=${status.config.pathMode.name}, '
+          'atten=${status.config.attenDb.toStringAsFixed(2)} dB, '
+          'gpio=0x${status.appliedGpio.toRadixString(16).padLeft(2, '0')}, '
+          'error=${status.error}',
+        );
         break;
       default:
+        unknownFrameCount++;
+        print(
+          'Unknown response frame: cmd=0x${cmd.toRadixString(16)}, '
+          'len=${data.length}, unknown=$unknownFrameCount '
+          '(bad=$badFrameCount, crc=$crcErrorCount, resync=$resyncCount)',
+        );
         break;
+    }
+  }
+
+  Future<bool> _sendAndWaitAck(
+    int cmd,
+    Uint8List data, {
+    Duration timeout = const Duration(milliseconds: 800),
+  }) {
+    final completer = Completer<bool>();
+    (_ackWaiters[cmd] ??= <Completer<bool>>[]).add(completer);
+    _manager.sendData(_buildFrame(cmd, data));
+
+    return completer.future.timeout(timeout, onTimeout: () {
+      final waiters = _ackWaiters[cmd];
+      waiters?.remove(completer);
+      if (waiters != null && waiters.isEmpty) {
+        _ackWaiters.remove(cmd);
+      }
+      return false;
+    });
+  }
+
+  void _completeAckWaiter(int cmd, bool ok) {
+    final waiters = _ackWaiters[cmd];
+    if (waiters == null || waiters.isEmpty) {
+      return;
+    }
+
+    final completer = waiters.removeAt(0);
+    if (waiters.isEmpty) {
+      _ackWaiters.remove(cmd);
+    }
+    if (!completer.isCompleted) {
+      completer.complete(ok);
     }
   }
 
@@ -238,14 +392,31 @@ class SerialProtocol {
     setSweepConfig(config.sweep);
   }
 
-  void setFreqConfig(FrequencyConfig config) {
+  Future<bool> applyControlConfigConfirmed(DeviceControlConfig config) async {
+    if (!await setFreqConfigConfirmed(config.frequency)) return false;
+    if (!await setAmplitudeConfigConfirmed(config.amplitude)) return false;
+    if (!await setBandwidthConfigConfirmed(config.bandwidth)) return false;
+    if (!await setDetectConfigConfirmed(config.detect)) return false;
+    if (!await setSweepConfigConfirmed(config.sweep)) return false;
+    return true;
+  }
+
+  Uint8List _buildFreqData(FrequencyConfig config) {
     final data = Uint8List(32);
     final byteData = data.buffer.asByteData();
     byteData.setFloat64(0, config.startHz, Endian.little);
     byteData.setFloat64(8, config.stopHz, Endian.little);
     byteData.setFloat64(16, config.centerHz, Endian.little);
     byteData.setFloat64(24, config.spanHz, Endian.little);
-    _manager.sendData(_buildFrame(0x01, data));
+    return data;
+  }
+
+  void setFreqConfig(FrequencyConfig config) {
+    _manager.sendData(_buildFrame(0x01, _buildFreqData(config)));
+  }
+
+  Future<bool> setFreqConfigConfirmed(FrequencyConfig config) {
+    return _sendAndWaitAck(0x01, _buildFreqData(config));
   }
 
   void setFreq(double startHz, double stopHz, double centerHz, double spanHz) {
@@ -259,13 +430,21 @@ class SerialProtocol {
     );
   }
 
-  void setAmplitudeConfig(AmplitudeConfig config) {
+  Uint8List _buildAmplitudeData(AmplitudeConfig config) {
     final data = Uint8List(10);
     final byteData = data.buffer.asByteData();
     byteData.setFloat64(0, config.refLevelDbm, Endian.little);
     data[8] = config.attenuatorMode & 0xFF;
     data[9] = config.preampMode & 0xFF;
-    _manager.sendData(_buildFrame(0x02, data));
+    return data;
+  }
+
+  void setAmplitudeConfig(AmplitudeConfig config) {
+    _manager.sendData(_buildFrame(0x02, _buildAmplitudeData(config)));
+  }
+
+  Future<bool> setAmplitudeConfigConfirmed(AmplitudeConfig config) {
+    return _sendAndWaitAck(0x02, _buildAmplitudeData(config));
   }
 
   void setAmplitude(double refLevel, int attenuator, int preamp) {
@@ -278,14 +457,22 @@ class SerialProtocol {
     );
   }
 
-  void setBandwidthConfig(BandwidthConfig config) {
+  Uint8List _buildBandwidthData(BandwidthConfig config) {
     final data = Uint8List(18);
     final byteData = data.buffer.asByteData();
     data[0] = config.rbwMode & 0xFF;
     byteData.setFloat64(1, config.rbwHz, Endian.little);
     data[9] = config.vbwMode & 0xFF;
     byteData.setFloat64(10, config.vbwHz, Endian.little);
-    _manager.sendData(_buildFrame(0x03, data));
+    return data;
+  }
+
+  void setBandwidthConfig(BandwidthConfig config) {
+    _manager.sendData(_buildFrame(0x03, _buildBandwidthData(config)));
+  }
+
+  Future<bool> setBandwidthConfigConfirmed(BandwidthConfig config) {
+    return _sendAndWaitAck(0x03, _buildBandwidthData(config));
   }
 
   void setBw(int rbwMode, double rbwHz, int vbwMode, double vbwHz) {
@@ -299,22 +486,37 @@ class SerialProtocol {
     );
   }
 
+  Uint8List _buildDetectData(DetectConfig config) {
+    return Uint8List(1)..[0] = config.mode & 0xFF;
+  }
+
   void setDetectConfig(DetectConfig config) {
-    final data = Uint8List(1)..[0] = config.mode & 0xFF;
-    _manager.sendData(_buildFrame(0x04, data));
+    _manager.sendData(_buildFrame(0x04, _buildDetectData(config)));
+  }
+
+  Future<bool> setDetectConfigConfirmed(DetectConfig config) {
+    return _sendAndWaitAck(0x04, _buildDetectData(config));
   }
 
   void setDetect(int mode) {
     setDetectConfig(DetectConfig(mode: mode));
   }
 
-  void setSweepConfig(SweepConfig config) {
+  Uint8List _buildSweepData(SweepConfig config) {
     final data = Uint8List(11);
     final byteData = data.buffer.asByteData();
     byteData.setFloat64(0, config.speedHz, Endian.little);
     data[8] = config.mode & 0xFF;
     byteData.setUint16(9, config.pointCount & 0xFFFF, Endian.little);
-    _manager.sendData(_buildFrame(0x05, data));
+    return data;
+  }
+
+  void setSweepConfig(SweepConfig config) {
+    _manager.sendData(_buildFrame(0x05, _buildSweepData(config)));
+  }
+
+  Future<bool> setSweepConfigConfirmed(SweepConfig config) {
+    return _sendAndWaitAck(0x05, _buildSweepData(config));
   }
 
   void setSweep(double speed, int mode, [int pointCount = 128]) {
@@ -351,6 +553,93 @@ class SerialProtocol {
     _manager.sendData(_buildFrame(0x0B, Uint8List.fromList([code & 0xFF])));
   }
 
+  int _encodeRfLnaMode(RfLnaMode mode) {
+    switch (mode) {
+      case RfLnaMode.bypass:
+        return 0;
+      case RfLnaMode.enable:
+        return 1;
+      case RfLnaMode.auto:
+        return 2;
+    }
+  }
+
+  int _encodeRfPathMode(RfPathMode mode) {
+    switch (mode) {
+      case RfPathMode.directIf:
+        return 0;
+      case RfPathMode.mixerChain:
+        return 1;
+      case RfPathMode.auto:
+        return 2;
+    }
+  }
+
+  RfLnaMode _decodeRfLnaMode(int value) {
+    switch (value) {
+      case 1:
+        return RfLnaMode.enable;
+      case 2:
+        return RfLnaMode.auto;
+      case 0:
+      default:
+        return RfLnaMode.bypass;
+    }
+  }
+
+  RfPathMode _decodeRfPathMode(int value) {
+    switch (value) {
+      case 1:
+        return RfPathMode.mixerChain;
+      case 2:
+        return RfPathMode.auto;
+      case 0:
+      default:
+        return RfPathMode.directIf;
+    }
+  }
+
+  Uint8List _buildRfFrontendData(
+    RfFrontendConfig config, {
+    bool applyImmediately = true,
+  }) {
+    final code = config.attenCode.clamp(0, 127).toInt();
+    return Uint8List.fromList([
+      _encodeRfLnaMode(config.lnaMode),
+      _encodeRfPathMode(config.pathMode),
+      code,
+      applyImmediately ? 0x01 : 0x00,
+    ]);
+  }
+
+  void setRfFrontend(RfFrontendConfig config) {
+    _manager.sendData(_buildFrame(0x0C, _buildRfFrontendData(config)));
+  }
+
+  Future<bool> setRfFrontendConfirmed(RfFrontendConfig config) {
+    return _sendAndWaitAck(0x0C, _buildRfFrontendData(config));
+  }
+
+  void getRfFrontendStatus() {
+    _manager.sendData(_buildFrame(0x0D, Uint8List(0)));
+  }
+
+  RfFrontendStatus? parseRfFrontendStatus(Uint8List data) {
+    if (data.length < 5) {
+      return null;
+    }
+
+    return RfFrontendStatus(
+      config: RfFrontendConfig(
+        lnaMode: _decodeRfLnaMode(data[0]),
+        pathMode: _decodeRfPathMode(data[1]),
+        attenCode: data[2].clamp(0, 127).toInt(),
+      ),
+      appliedGpio: data[3],
+      error: data[4],
+    );
+  }
+
   void getStatus() {
     _manager.sendData(_buildFrame(0x07, Uint8List(0)));
   }
@@ -362,5 +651,6 @@ class SerialProtocol {
   void dispose() {
     _spectrumStream.close();
     _statusStream.close();
+    _rfFrontendStatusStream.close();
   }
 }

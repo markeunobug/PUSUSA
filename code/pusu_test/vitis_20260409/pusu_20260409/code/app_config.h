@@ -19,6 +19,14 @@
 
 #define FFT_SIZE            4096U
 #define TRANSFER_LENGTH     (FFT_SIZE * 2U)
+#define DMA_MAX_SAMPLES     65536U
+#define DMA_MAX_BYTES       (DMA_MAX_SAMPLES * 2U)
+/* AXI DMA S2MM length width is 16 bits in the exported BSP, so one simple
+ * transfer must stay below 65536 bytes. Seven FFT blocks is the largest safe
+ * block-aligned sweep transfer: 7 * 4096 samples * 2 bytes = 57344 bytes. */
+#define DMA_SWEEP_MAX_BLOCKS_PER_TRANSFER   7U
+#define DMA_SWEEP_MAX_SAMPLES_PER_TRANSFER  (DMA_SWEEP_MAX_BLOCKS_PER_TRANSFER * FFT_SIZE)
+#define DMA_SIMPLE_MAX_BYTES                65535U
 #define SPECTRUM_BINS       (FFT_SIZE / 2U)
 
 #ifndef PI
@@ -62,11 +70,13 @@
 #define LMX2572_DEFAULT_REF_MULTIPLIER 1U
 #define LMX2572_DEFAULT_REF_R    1U
 #define LMX2572_DEFAULT_OUTPUT_HZ 1000000000ULL
-#define LMX2572_DEFAULT_OUTPUT_POWER_DBM 0
+#define LMX2572_LO1_OUTPUT_POWER_DBM 0
+#define LMX2572_LO2_OUTPUT_POWER_DBM 0
+#define LMX2572_DEFAULT_OUTPUT_POWER_DBM LMX2572_LO1_OUTPUT_POWER_DBM
 
 #define SIGNAL_PROCESSING_VERBOSE 0
 
-/* ADC full-scale reference: LTC2208 2.25 Vpp diff → 1:2 balun → 50Ω */
+/* ADC full-scale reference: LTC2208 2.25 Vpp diff 鈫� 1:2 balun 鈫� 50惟 */
 #define ADC_INPUT_FULL_SCALE_DBM  8.02f
 
 #define RBW_10K_HZ          10000.0f
@@ -96,8 +106,8 @@
 #define RBW_10K_FIR_TAPS      256U
 
 /* Decimated output target per sweep point (post-CIC, post-FIR-transient).
- * Chosen for ~0.6-1.0 dB power measurement accuracy (σ ≈ 4.34/√N_indep).
- * Effective independent samples ≈ T_measure × RBW ≈ observe_pts × RBW/fs_out. */
+ * Chosen for ~0.6-1.0 dB power measurement accuracy (蟽 鈮� 4.34/鈭歂_indep).
+ * Effective independent samples 鈮� T_measure 脳 RBW 鈮� observe_pts 脳 RBW/fs_out. */
 #define RBW_1M_OBSERVE_POINTS   384U
 #define RBW_300K_OBSERVE_POINTS 384U
 #define RBW_100K_OBSERVE_POINTS 384U
@@ -113,7 +123,7 @@
 
 /* Accumulation buffer: holds decimated CIC output across DMA transfers.
  * Max needed = observe + skip + fir_taps:
- *   RBW_10K: 256 + 128 + 256 = 640 → 768 for margin */
+ *   RBW_10K: 256 + 128 + 256 = 640 鈫� 768 for margin */
 #define ACCUM_BUFFER_SIZE     768U
 
 typedef enum {

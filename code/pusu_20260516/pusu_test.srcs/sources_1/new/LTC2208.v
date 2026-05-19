@@ -1,0 +1,258 @@
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Module Name: LTC2208
+// Description: LTC2208 LVDS parallel SDR + 完整 AXI4-Stream 输出（专为 Zynq + AXI DMA）
+// 
+// 改动亮点：
+//   - 标准 m_axis_* 接口（Vivado 自动识别）
+//   - 参数化 PACKET_LENGTH + tlast 自动生成
+//   - tready 背压合规处理 + tuser 携带 overflow
+//   - tdata 保持 signed（LTC2208 原生格式）
+//////////////////////////////////////////////////////////////////////////////////
+module LTC2208 #(
+    parameter integer PACKET_LENGTH = 4096   // 每包样本数，0 = 连续模式（不产生 tlast）
+)(
+    input wire rst_n,
+    /* ================= ADC sampling clock (ENC) ================= */
+    input wire enc_clk,
+//    output wire enc_p,
+//    output wire enc_n,
+    
+    /* ================= ADC output clock ================= */
+    input wire clkout_p,
+    input wire clkout_n,
+    
+    /* ================= ADC data ================= */
+    input wire [15:0] data_p,
+    input wire [15:0] data_n,
+    
+    /* ================= ADC overflow ================= */
+    input wire of_p,
+    input wire of_n,
+    
+    /* ================= 原始调试输出（保持不变）================= */
+    output reg [15:0] adc_data,
+    output reg adc_of,
+    output wire adc_clk,
+    
+    /* ================= AXI4-Stream Master 输出（新增/完善）================= */
+    output wire m_axis_aclk,         // ← 必须！连 DMA 的 s_axis_s2mm_aclk
+    output reg signed [15:0] m_axis_tdata,
+    output reg m_axis_tvalid,
+    input wire m_axis_tready,
+    output reg m_axis_tlast,
+    output reg m_axis_tuser          // bit0 = overflow（可扩展）
+);
+
+    /* ============================================================
+     * 1. ENC：单端 → 差分（不变）
+     * ============================================================ */
+//    OBUFDS #(
+//        .IOSTANDARD("LVDS_25")
+//    ) u_obufds_enc (
+//        .I (enc_clk),
+//        .O (enc_p),
+//        .OB(enc_n)
+//    );
+
+    /* ============================================================
+     * 2. CLKOUT：差分 → 单端（不变 + 给 stream 用）
+     * ============================================================ */
+    IBUFDS #(
+        .IOSTANDARD("LVDS_25"),
+        .DIFF_TERM("TRUE")
+    ) u_ibufds_clkout (
+        .I (clkout_p),
+        .IB(clkout_n),
+        .O (m_axis_aclk)
+    );
+    assign adc_clk = m_axis_aclk;   // ← 关键！stream 时钟
+
+    /* ============================================================
+     * 3. DATA & OF：LVDS → 单端（不变）
+     * ============================================================ */
+    wire [15:0] data_s;
+    genvar i;
+    generate
+        for (i = 0; i < 16; i = i + 1) begin : gen_data_ibuf
+            IBUFDS #(
+                .IOSTANDARD("LVDS_25"),
+                .DIFF_TERM("TRUE")
+            ) u_ibufds_data (
+                .I (data_p[i]),
+                .IB(data_n[i]),
+                .O (data_s[i])
+            );
+        end
+    endgenerate
+   
+    wire of_s;
+    IBUFDS #(
+        .IOSTANDARD("LVDS_25"),
+        .DIFF_TERM("TRUE")
+    ) u_ibufds_of (
+        .I (of_p),
+        .IB(of_n),
+        .O (of_s)
+    );
+
+    /* ============================================================
+     * 4. 采样 + AXI-Stream 完整逻辑（这里是最大改动点）
+     * ============================================================ */
+    reg [31:0] transfer_cnt;
+
+    always @(posedge adc_clk or negedge rst_n) begin
+        if (!rst_n) begin
+            adc_data      <= 16'd0;
+            adc_of        <= 1'b0;
+            m_axis_tdata  <= 16'sh0000;
+            m_axis_tvalid <= 1'b0;
+            m_axis_tlast  <= 1'b0;
+            m_axis_tuser  <= 1'b0;
+            transfer_cnt  <= 32'd0;
+        end
+        else begin
+            // 原始采样（保留给 ILA）
+            adc_data <= data_s;
+            adc_of   <= of_s;
+
+            // ====================== AXI-Stream 核心逻辑 ======================
+            if (m_axis_tready || !m_axis_tvalid) begin
+                // 可以接收新数据
+                m_axis_tdata  <= $signed(data_s);   // signed 转换
+                m_axis_tuser  <= of_s;
+                m_axis_tvalid <= 1'b1;
+
+                if (m_axis_tvalid && m_axis_tready) begin
+                    transfer_cnt <= transfer_cnt + 1'b1;
+                    if (PACKET_LENGTH > 0 && transfer_cnt == PACKET_LENGTH - 1) begin
+                        m_axis_tlast <= 1'b1;
+                        transfer_cnt <= 0;
+                    end else begin
+                        m_axis_tlast <= 1'b0;
+                    end
+                end
+            end
+            else begin
+                // tready 低 → 严格保持当前数据（AXI-Stream 协议要求）
+                m_axis_tlast  <= m_axis_tlast;
+                // transfer_cnt 不递增，新采样被丢弃（高速场景极少发生）
+            end
+        end
+    end
+
+endmodule
+
+//`timescale 1ns / 1ps
+////////////////////////////////////////////////////////////////////////////////////
+//// Module Name: LTC2208
+//// Description:
+////   LTC2208 LVDS parallel SDR interface for Zynq-7010
+////
+////   - ENC± generated by PL (external PLL / MMCM)
+////   - CLKOUT± used as source-synchronous sampling clock
+////   - D0-D15 sampled on CLKOUT rising edge
+////
+//// Author: 
+////////////////////////////////////////////////////////////////////////////////////
+
+//module LTC2208(
+//    input  wire        rst_n,
+
+//    /* ================= ADC sampling clock (ENC) ================= */
+//    input  wire        enc_clk,     // 来自 PLL / MMCM 的单端采样时钟
+//    output wire        enc_p,
+//    output wire        enc_n,
+
+//    /* ================= ADC output clock ================= */
+//    input  wire        clkout_p,
+//    input  wire        clkout_n,
+
+//    /* ================= ADC data ================= */
+//    input  wire [15:0] data_p,
+//    input  wire [15:0] data_n,
+    
+//    /* ================= ADC overflow ================= */
+//    input  wire        of_p,
+//    input  wire        of_n,
+
+//    /* ================= ADC data output ================= */
+//    output reg  [15:0] adc_data,
+//    output reg         adc_of,
+//    output wire        adc_clk ,      // 提供给外部（ILA / FIFO）
+//    /* ================= AXI ADC data output ================= */
+//    output reg signed [15:0] M_AXIS_tdata,
+////    output reg [11:0] M_AXIS_tuser,
+//    output reg M_AXIS_tvalid,
+//    input M_AXIS_tready
+//);
+
+//    /* ============================================================
+//     * 1. ENC：单端 → 差分，驱动 ADC 采样
+//     * ============================================================ */
+//    OBUFDS #(
+//        .IOSTANDARD("LVDS_25")
+//    ) u_obufds_enc (
+//        .I (enc_clk),
+//        .O (enc_p),
+//        .OB(enc_n)
+//    );
+
+//    /* ============================================================
+//     * 2. CLKOUT：ADC → FPGA（差分 → 单端 → BUFG）
+//     * ============================================================ */
+
+//    IBUFDS #(
+//        .IOSTANDARD("LVDS_25"),
+//        .DIFF_TERM("TRUE")
+//    ) u_ibufds_clkout (
+//        .I (clkout_p),
+//        .IB(clkout_n),
+//        .O (adc_clk)
+//    );
+
+//    /* ============================================================
+//     * 3. DATA：LVDS → 单端
+//     * ============================================================ */
+//    wire [15:0] data_s;
+
+//    genvar i;
+//    generate
+//        for (i = 0; i < 16; i = i + 1) begin : gen_data_ibuf
+//            IBUFDS #(
+//                .IOSTANDARD("LVDS_25"),
+//                .DIFF_TERM("TRUE")
+//            ) u_ibufds_data (
+//                .I (data_p[i]),
+//                .IB(data_n[i]),
+//                .O (data_s[i])
+//            );
+//        end
+//    endgenerate
+    
+//    wire of_s;
+
+//    IBUFDS #(
+//        .IOSTANDARD("LVDS_25"),
+//        .DIFF_TERM("TRUE")
+//    ) u_ibufds_of (
+//        .I (of_p),
+//        .IB(of_n),
+//        .O (of_s)
+//    );
+
+//    /* ============================================================
+//     * 4. 数据采样（SDR，完全匹配 LTC2208 时序）
+//     * ============================================================ */
+//    always @(posedge adc_clk or negedge rst_n) begin
+//    if (!rst_n) begin
+//            adc_data <= 16'd0;
+//            adc_of   <= 1'b0;
+//        end
+//        else begin
+//            adc_data <= data_s;
+//            adc_of   <= of_s;
+//        end
+//    end
+
+//endmodule

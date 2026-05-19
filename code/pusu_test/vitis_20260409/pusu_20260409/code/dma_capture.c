@@ -11,11 +11,12 @@
 static XAxiDma axidma;
 static XScuGic intc;
 
-static volatile u16 rx_buffer[TRANSFER_LENGTH / 2U] __attribute__((aligned(32)));
+static volatile u16 rx_buffer[DMA_MAX_SAMPLES] __attribute__((aligned(32)));
 static volatile int rx_done = 0;
 static volatile int error = 0;
 static volatile u32 irq_count = 0U;
 static volatile u32 last_irq_status = 0U;
+static u32 current_transfer_bytes = TRANSFER_LENGTH;
 
 static void rx_intr_handler(void *callback);
 static int setup_intr_system(XScuGic *int_ins_ptr, XAxiDma *axidma_ptr, u16 rx_intr_id);
@@ -43,13 +44,50 @@ int dma_capture_init(void)
     return XST_SUCCESS;
 }
 
-int dma_capture_start(void)
+#define DMA_RESET_TIMEOUT 10000U
+
+int dma_capture_reset(void)
 {
+    int timeout;
+
     rx_done = 0;
-    Xil_DCacheFlushRange((UINTPTR)rx_buffer, TRANSFER_LENGTH);
+    error = 0;
+
+    XAxiDma_Reset(&axidma);
+
+    timeout = (int)DMA_RESET_TIMEOUT;
+    while (timeout > 0) {
+        if (XAxiDma_ResetIsDone(&axidma) != 0) {
+            break;
+        }
+        timeout--;
+    }
+
+    if (timeout == 0) {
+        return XST_FAILURE;
+    }
+
+    rx_done = 0;
+    error = 0;
+    XAxiDma_IntrEnable(&axidma, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DEVICE_TO_DMA);
+
+    return XST_SUCCESS;
+}
+
+int dma_capture_start(u32 transfer_bytes)
+{
+    if (transfer_bytes > DMA_MAX_BYTES ||
+        transfer_bytes > DMA_SIMPLE_MAX_BYTES ||
+        (transfer_bytes & 0x3U) != 0U) {
+        return XST_FAILURE;
+    }
+
+    rx_done = 0;
+    current_transfer_bytes = transfer_bytes;
+    Xil_DCacheFlushRange((UINTPTR)rx_buffer, (u32)transfer_bytes);
     return XAxiDma_SimpleTransfer(&axidma,
                                   (UINTPTR)rx_buffer,
-                                  TRANSFER_LENGTH,
+                                  (int)transfer_bytes,
                                   XAXIDMA_DEVICE_TO_DMA);
 }
 
@@ -60,7 +98,7 @@ int dma_capture_frame_ready(void)
     }
 
     rx_done = 0;
-    Xil_DCacheInvalidateRange((UINTPTR)rx_buffer, TRANSFER_LENGTH);
+    Xil_DCacheInvalidateRange((UINTPTR)rx_buffer, current_transfer_bytes);
     return 1;
 }
 

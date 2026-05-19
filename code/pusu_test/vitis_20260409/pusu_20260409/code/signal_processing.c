@@ -25,6 +25,7 @@ static float32_t accum_i[ACCUM_BUFFER_SIZE];
 static float32_t accum_q[ACCUM_BUFFER_SIZE];
 static int       accum_count;
 static int       accum_target;
+static u32       current_dma_samples = FFT_SIZE;
 
 static float32_t comp_fir_coeffs[RBW_10K_FIR_TAPS];
 static float32_t comp_fir_state[ACCUM_BUFFER_SIZE + RBW_10K_FIR_TAPS];
@@ -36,6 +37,8 @@ static int       comp_fir_skip;
 static float32_t nco_cos_table[FFT_SIZE];
 static float32_t nco_sin_table[FFT_SIZE];
 static float32_t nco_if_hz;
+static float32_t nco_block_phase_step;
+static float32_t sweep_nco_phase;
 
 static rbw_mode_t current_rbw_mode = RBW_MODE_100K;
 static int latest_spectrum_valid = 0;
@@ -60,6 +63,7 @@ static void fft_report_peak(void);
 /* Sweep-path internals */
 static void nco_table_build(float32_t if_hz);
 static void ddc_mix_to_time_domain(volatile u16 *rx_buffer);
+static void ddc_mix_to_time_domain_sweep(volatile u16 *rx_buffer);
 static void sweep_configure_for_rbw(rbw_mode_t mode);
 static void compensating_fir_init(float32_t cutoff_hz, int taps);
 static void apply_compensating_fir(void);
@@ -160,18 +164,21 @@ int signal_processing_measure_power_dbm(volatile u16 *rx_buffer, float *out_powe
 
 /* ── Sweep-path: multi-DMA accumulation ──────────────────────────── */
 
-void signal_processing_accumulate_dma(volatile u16 *rx_buffer)
+void signal_processing_accumulate_dma(volatile u16 *rx_buffer, u32 dma_samples)
 {
+    u32 offset;
     int produced;
 
-    ddc_mix_to_time_domain(rx_buffer);
+    for (offset = 0; offset < dma_samples; offset += FFT_SIZE) {
+        ddc_mix_to_time_domain_sweep(rx_buffer + offset);
 
-    produced = cic_decimator_process(time_domain_real, time_domain_imag,
-                                     (int)FFT_SIZE,
-                                     accum_i + accum_count,
-                                     accum_q + accum_count,
-                                     (int)ACCUM_BUFFER_SIZE - accum_count);
-    accum_count += produced;
+        produced = cic_decimator_process(time_domain_real, time_domain_imag,
+                                         (int)FFT_SIZE,
+                                         accum_i + accum_count,
+                                         accum_q + accum_count,
+                                         (int)ACCUM_BUFFER_SIZE - accum_count);
+        accum_count += produced;
+    }
 }
 
 int signal_processing_accumulation_ready(void)
@@ -196,7 +203,13 @@ int signal_processing_measure_accumulated_power_dbm(float *out_power_dbm)
 void signal_processing_reset_accumulation(void)
 {
     accum_count = 0;
+    sweep_nco_phase = 0.0f;
     cic_decimator_reset();
+}
+
+u32 signal_processing_get_dma_samples(void)
+{
+    return current_dma_samples;
 }
 
 /* ── Spectrum read-back (FFT path) ───────────────────────────────── */
@@ -275,6 +288,8 @@ static void sweep_configure_for_rbw(rbw_mode_t mode)
     const rbw_mode_config_t *cfg = get_rbw_config(mode);
 
     cic_decimator_init(cfg->cic_n, cfg->cic_r);
+    accum_count = 0;
+    sweep_nco_phase = 0.0f;
 
     /* Compensating FIR: RBW lowpass at the decimated rate.
      * fs_out = ADC_SAMPLE_RATE_HZ / cfg->cic_r */
@@ -286,6 +301,26 @@ static void sweep_configure_for_rbw(rbw_mode_t mode)
     accum_target = (int)cfg->accum_target_obs + comp_fir_skip + cfg->fir_taps;
     if (accum_target > (int)ACCUM_BUFFER_SIZE) {
         accum_target = (int)ACCUM_BUFFER_SIZE;
+    }
+
+    /* Optimal DMA transfer size: minimize frames without exceeding the AXI DMA
+     * simple-transfer length limit. Narrow RBW modes will accumulate several
+     * DMA frames in SWEEP_ENGINE_STATE_REARM_DMA.
+     * Compute in FFT_SIZE blocks since DDC+CIC operate on 4096-sample chunks.
+     * total outputs from B blocks = floor(B * FFT_SIZE / cic_r).
+     * Find minimum B where total_outputs >= accum_target, then clamp to the
+     * largest safe block-aligned transfer. */
+    {
+        u32 blocks_needed = 1U;
+        while ((u32)(blocks_needed * FFT_SIZE) / (u32)cfg->cic_r < (u32)accum_target) {
+            blocks_needed++;
+        }
+
+        if (blocks_needed > DMA_SWEEP_MAX_BLOCKS_PER_TRANSFER) {
+            blocks_needed = DMA_SWEEP_MAX_BLOCKS_PER_TRANSFER;
+        }
+
+        current_dma_samples = blocks_needed * FFT_SIZE;
     }
 }
 
@@ -410,6 +445,9 @@ static void nco_table_build(float32_t if_hz)
         nco_sin_table[i] = -arm_sin_f32(phase);
     }
     nco_if_hz = if_hz;
+    nco_block_phase_step = fmodf(phase_step * (float32_t)FFT_SIZE,
+                                 2.0f * PI);
+    sweep_nco_phase = 0.0f;
 }
 
 /* ── Static: DDC mix (no LPF) – used by sweep accumulation path ──── */
@@ -423,6 +461,30 @@ static void ddc_mix_to_time_domain(volatile u16 *rx_buffer)
 
         time_domain_real[i] = norm * nco_cos_table[i];
         time_domain_imag[i] = norm * nco_sin_table[i];
+    }
+}
+
+static void ddc_mix_to_time_domain_sweep(volatile u16 *rx_buffer)
+{
+    uint32_t i;
+    float32_t phase = sweep_nco_phase;
+    float32_t phase_cos = arm_cos_f32(phase);
+    float32_t phase_sin = arm_sin_f32(phase);
+
+    for (i = 0; i < FFT_SIZE; i++) {
+        float32_t norm = (float32_t)(int16_t)rx_buffer[i] / 32768.0f;
+        float32_t cos_base = nco_cos_table[i];
+        float32_t neg_sin_base = nco_sin_table[i];
+
+        time_domain_real[i] = norm * ((phase_cos * cos_base) +
+                                      (phase_sin * neg_sin_base));
+        time_domain_imag[i] = norm * ((phase_cos * neg_sin_base) -
+                                      (phase_sin * cos_base));
+    }
+
+    sweep_nco_phase += nco_block_phase_step;
+    if (sweep_nco_phase >= 2.0f * PI) {
+        sweep_nco_phase -= 2.0f * PI;
     }
 }
 

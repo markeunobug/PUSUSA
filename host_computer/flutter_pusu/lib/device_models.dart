@@ -56,6 +56,58 @@ class DetectConfig {
   const DetectConfig({required this.mode});
 }
 
+enum RfLnaMode {
+  bypass,
+  enable,
+  auto,
+}
+
+enum RfPathMode {
+  directIf,
+  mixerChain,
+  auto,
+}
+
+class RfFrontendConfig {
+  final RfLnaMode lnaMode;
+  final RfPathMode pathMode;
+  final int attenCode;
+
+  const RfFrontendConfig({
+    required this.lnaMode,
+    required this.pathMode,
+    required this.attenCode,
+  });
+
+  double get attenDb => attenCode * 0.25;
+
+  RfFrontendConfig copyWith({
+    RfLnaMode? lnaMode,
+    RfPathMode? pathMode,
+    int? attenCode,
+  }) {
+    return RfFrontendConfig(
+      lnaMode: lnaMode ?? this.lnaMode,
+      pathMode: pathMode ?? this.pathMode,
+      attenCode: attenCode ?? this.attenCode,
+    );
+  }
+}
+
+class RfFrontendStatus {
+  final RfFrontendConfig config;
+  final int appliedGpio;
+  final int error;
+
+  const RfFrontendStatus({
+    required this.config,
+    required this.appliedGpio,
+    required this.error,
+  });
+
+  bool get ok => error == 0;
+}
+
 class DeviceControlConfig {
   final FrequencyConfig frequency;
   final AmplitudeConfig amplitude;

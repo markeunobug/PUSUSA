@@ -82,17 +82,13 @@ class SerialPortManager extends ChangeNotifier {
     if (selectedPort == null || isConnected) return;
     try {
       _serialPort = SerialPort(selectedPort!);
-      final config = SerialPortConfig()
-        ..baudRate = 921600
-        ..bits = 8
-        ..stopBits = 1
-        ..parity = SerialPortParity.none;
-      _serialPort!.config = config;
 
       if (_serialPort!.openReadWrite()) {
-        clearInputBuffer();
+        _applySerialConfiguration();
+        _serialPort!.flush(SerialPortBuffer.both);
+        await drainInputBuffer();
         await Future.delayed(const Duration(milliseconds: 150));
-        clearInputBuffer();
+        await drainInputBuffer();
         isConnected = true;
         _updateStatus();
         notifyListeners();
@@ -106,7 +102,35 @@ class SerialPortManager extends ChangeNotifier {
     }
   }
 
+  void _applySerialConfiguration() {
+    if (_serialPort == null || !_serialPort!.isOpen) return;
+
+    final config = SerialPortConfig()
+      ..baudRate = 921600
+      ..bits = 8
+      ..stopBits = 1
+      ..parity = SerialPortParity.none
+      ..setFlowControl(SerialPortFlowControl.none)
+      ..rts = SerialPortRts.on
+      ..dtr = SerialPortDtr.on;
+
+    try {
+      _serialPort!.config = config;
+      print('Serial configured: 921600 8N1, flow=none, RTS/DTR=on');
+    } catch (e) {
+      print('Serial RTS/DTR configuration failed, retry without control lines: $e');
+      final fallbackConfig = SerialPortConfig()
+        ..baudRate = 921600
+        ..bits = 8
+        ..stopBits = 1
+        ..parity = SerialPortParity.none
+        ..setFlowControl(SerialPortFlowControl.none);
+      _serialPort!.config = fallbackConfig;
+    }
+  }
+
   void _startReading() {
+    _readTimer?.cancel();
     _readTimer = Timer.periodic(const Duration(milliseconds: 10), (_) {
       if (_serialPort == null) return;
 
@@ -126,7 +150,11 @@ class SerialPortManager extends ChangeNotifier {
   void sendData(Uint8List data) {
     if (isConnected && _serialPort != null) {
       try {
-        _serialPort!.write(data);
+        final written = _serialPort!.write(data, timeout: 1000);
+        if (written != data.length) {
+          print('Serial short write: $written/${data.length} bytes');
+        }
+        _serialPort!.drain();
       } catch (e) {
         print('Write error: $e');
         disconnect();
@@ -150,6 +178,56 @@ class SerialPortManager extends ChangeNotifier {
     if (totalCleared > 0) {
       print('Cleared $totalCleared residual bytes from serial input buffer');
     }
+  }
+
+  Future<int> drainInputBuffer({
+    Duration quietPeriod = const Duration(milliseconds: 40),
+    Duration timeout = const Duration(milliseconds: 350),
+  }) async {
+    if (_serialPort == null || !_serialPort!.isOpen) return 0;
+
+    final bool shouldRestartReading = _readTimer != null;
+    _readTimer?.cancel();
+    _readTimer = null;
+
+    int totalCleared = 0;
+    final deadline = DateTime.now().add(timeout);
+    var quietSince = DateTime.now();
+
+    try {
+      while (DateTime.now().isBefore(deadline)) {
+        final port = _serialPort;
+        if (port == null || !port.isOpen) break;
+
+        final int bytes = port.bytesAvailable;
+        if (bytes > 0) {
+          final data = port.read(bytes);
+          totalCleared += data.length;
+          quietSince = DateTime.now();
+          if (data.isEmpty) {
+            await Future.delayed(const Duration(milliseconds: 5));
+          }
+          continue;
+        }
+
+        if (DateTime.now().difference(quietSince) >= quietPeriod) {
+          break;
+        }
+        await Future.delayed(const Duration(milliseconds: 5));
+      }
+    } catch (e) {
+      print('Drain serial input buffer error: $e');
+      disconnect();
+    } finally {
+      if (shouldRestartReading && isConnected && _serialPort != null) {
+        _startReading();
+      }
+    }
+
+    if (totalCleared > 0) {
+      print('Drained $totalCleared residual bytes from serial input buffer');
+    }
+    return totalCleared;
   }
 
   void disconnect() {

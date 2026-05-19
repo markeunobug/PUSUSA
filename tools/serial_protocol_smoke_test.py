@@ -137,20 +137,28 @@ def decode_status(payload: bytes) -> str:
 
 
 def decode_spectrum(payload: bytes) -> str:
-    if len(payload) < 6:
+    if len(payload) < 11:
         return "spectrum payload too short"
     point_count = struct.unpack(">H", payload[0:2])[0]
     timestamp = struct.unpack(">I", payload[2:6])[0]
-    expected = 6 + point_count * 16
+    total_points = struct.unpack(">H", payload[6:8])[0]
+    current_index = struct.unpack(">H", payload[8:10])[0]
+    done = payload[10] != 0
+    expected = 11 + point_count * 8
     if len(payload) < expected:
-        return f"point_count={point_count}, timestamp={timestamp}, payload_truncated={len(payload)}"
-    first_freq = struct.unpack("<d", payload[6:14])[0]
-    first_amp = struct.unpack("<d", payload[14:22])[0]
-    last_base = 6 + (point_count - 1) * 16
-    last_freq = struct.unpack("<d", payload[last_base:last_base + 8])[0]
-    last_amp = struct.unpack("<d", payload[last_base + 8:last_base + 16])[0]
+        return (
+            f"point_count={point_count}, timestamp={timestamp}, "
+            f"total_points={total_points}, current_index={current_index}, "
+            f"done={done}, payload_truncated={len(payload)}"
+        )
+    first_freq = struct.unpack("<I", payload[11:15])[0]
+    first_amp = struct.unpack("<f", payload[15:19])[0]
+    last_base = 11 + (point_count - 1) * 8
+    last_freq = struct.unpack("<I", payload[last_base:last_base + 4])[0]
+    last_amp = struct.unpack("<f", payload[last_base + 4:last_base + 8])[0]
     return (
         f"point_count={point_count}, timestamp={timestamp}, "
+        f"progress={current_index + point_count}/{total_points}, done={done}, "
         f"first=({first_freq:.3f}, {first_amp:.3f}), "
         f"last=({last_freq:.3f}, {last_amp:.3f})"
     )

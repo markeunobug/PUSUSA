@@ -161,7 +161,7 @@ int sweep_engine_poll(sweep_engine_t *engine)
             return SWEEP_ENGINE_ERR_FRAME_TIMEOUT;
         }
 
-        if (dma_capture_start() != XST_SUCCESS) {
+        if (dma_capture_start((u32)(signal_processing_get_dma_samples() * 2U)) != XST_SUCCESS) {
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_FRAME_TIMEOUT);
             return SWEEP_ENGINE_ERR_FRAME_TIMEOUT;
         }
@@ -171,7 +171,7 @@ int sweep_engine_poll(sweep_engine_t *engine)
         return SWEEP_ENGINE_OK;
 
     case SWEEP_ENGINE_STATE_REARM_DMA:
-        if (dma_capture_start() != XST_SUCCESS) {
+        if (dma_capture_start((u32)(signal_processing_get_dma_samples() * 2U)) != XST_SUCCESS) {
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_FRAME_TIMEOUT);
             return SWEEP_ENGINE_ERR_FRAME_TIMEOUT;
         }
@@ -187,7 +187,8 @@ int sweep_engine_poll(sweep_engine_t *engine)
         }
 
         if (dma_capture_frame_ready() != 0) {
-            signal_processing_accumulate_dma(dma_capture_get_rx_buffer());
+            signal_processing_accumulate_dma(dma_capture_get_rx_buffer(),
+                                             signal_processing_get_dma_samples());
 
             if (signal_processing_accumulation_ready() != 0) {
                 engine->state = SWEEP_ENGINE_STATE_MEASURE;
@@ -220,6 +221,9 @@ int sweep_engine_poll(sweep_engine_t *engine)
         if (engine->point_callback != 0) {
             if (engine->point_callback((uint32_t)engine->current_rf_hz,
                                        engine->current_power_dbm,
+                                       engine->point_count,
+                                       engine->current_point,
+                                       (engine->current_point + 1U >= engine->point_count) ? 1 : 0,
                                        engine->point_callback_context) != 0) {
                 sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_STREAM_CALLBACK);
                 return SWEEP_ENGINE_ERR_STREAM_CALLBACK;

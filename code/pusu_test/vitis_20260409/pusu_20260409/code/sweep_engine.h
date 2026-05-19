@@ -33,7 +33,12 @@ typedef enum {
     SWEEP_ENGINE_STATE_ERROR
 } sweep_engine_state_t;
 
-typedef int (*sweep_engine_point_callback_t)(uint32_t freq_hz, float power_dbm, void *context);
+typedef int (*sweep_engine_point_callback_t)(uint32_t freq_hz,
+                                             float power_dbm,
+                                             uint32_t total_points,
+                                             uint32_t current_index,
+                                             int done,
+                                             void *context);
 
 typedef struct {
     double freq_hz;

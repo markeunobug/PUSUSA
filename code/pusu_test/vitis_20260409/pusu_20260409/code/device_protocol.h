@@ -89,6 +89,10 @@ const device_control_config_t *device_protocol_get_config(void);
 void device_protocol_set_spectrum_provider(device_protocol_spectrum_provider_t provider);
 void device_protocol_set_status_provider(device_protocol_status_provider_t provider);
 void device_protocol_set_sweep_control_handler(device_protocol_sweep_control_t handler);
-int device_protocol_stream_spectrum_point(uint32_t freq_hz, float amp_dbm);
+int device_protocol_stream_spectrum_point(uint32_t freq_hz,
+                                          float amp_dbm,
+                                          uint16_t total_points,
+                                          uint16_t current_index,
+                                          uint8_t done);
 
 #endif

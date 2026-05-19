@@ -38,12 +38,29 @@ int sweep_plan_build(const device_control_config_t *config, sweep_plan_t *plan)
 
     start_hz = (config->frequency.start_hz > 0.0) ? (uint64_t)config->frequency.start_hz : 0ULL;
     stop_hz = (config->frequency.stop_hz > 0.0) ? (uint64_t)config->frequency.stop_hz : 0ULL;
+    rbw_mode = (rbw_mode_t)config->bandwidth.rbw_mode;
+    rbw_hz = sweep_plan_rbw_hz(rbw_mode, config->bandwidth.rbw_hz);
+
+    if ((config->frequency.span_hz == 0.0) || (stop_hz == start_hz)) {
+        uint64_t center_hz = (config->frequency.center_hz > 0.0) ?
+            (uint64_t)config->frequency.center_hz : start_hz;
+
+        if (center_hz == 0ULL) {
+            return -1;
+        }
+
+        plan->start_hz = center_hz;
+        plan->stop_hz = center_hz;
+        plan->step_hz = 0ULL;
+        plan->point_count = 1U;
+        plan->rbw_mode = rbw_mode;
+        plan->rbw_hz = rbw_hz;
+        return 0;
+    }
+
     if (stop_hz <= start_hz) {
         return -1;
     }
-
-    rbw_mode = (rbw_mode_t)config->bandwidth.rbw_mode;
-    rbw_hz = sweep_plan_rbw_hz(rbw_mode, config->bandwidth.rbw_hz);
 
     /* Internal sweep density rule:
      * 步长 step = RBW / 2

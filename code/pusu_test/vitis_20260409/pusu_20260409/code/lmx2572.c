@@ -595,8 +595,8 @@ int lmx2572_board_init(void)
         return XST_FAILURE;
     }
 
-    LMX2572_SetOutputPower(&lmx2572_dev1, 0U, LMX2572_DEFAULT_OUTPUT_POWER_DBM);
-    LMX2572_SetOutputPower(&lmx2572_dev2, 0U, LMX2572_DEFAULT_OUTPUT_POWER_DBM);
+    LMX2572_SetOutputPower(&lmx2572_dev1, 0U, LMX2572_LO1_OUTPUT_POWER_DBM);
+    LMX2572_SetOutputPower(&lmx2572_dev2, 0U, LMX2572_LO2_OUTPUT_POWER_DBM);
     LMX2572_SetMuxFunction(&lmx2572_dev1, 1U);
     LMX2572_SetMuxFunction(&lmx2572_dev2, 1U);
     LMX2572_SetOutputChannel(&lmx2572_dev1, 0U);
