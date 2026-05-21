@@ -102,6 +102,14 @@
 #define RF_DSA_LE_MASK             (1U << 7)
 #define RF_FRONTEND_DEFAULT_ATTEN_CODE 127U
 
+#define AMPLITUDE_LNA_GAIN_DB         30.0f
+#define AMPLITUDE_DIRECT_IF_CAL_DB    0.0f
+#define AMPLITUDE_MIXER_CHAIN_CAL_DB  0.0f
+#define AMPLITUDE_FREQ_CAL_DB_0       0.0f
+#define AMPLITUDE_FREQ_CAL_DB_1       0.0f
+#define AMPLITUDE_FREQ_CAL_DB_2       0.0f
+#define AMPLITUDE_FREQ_CAL_DB_3       0.0f
+
 #define SIGNAL_PROCESSING_VERBOSE 0
 
 /* ADC full-scale reference: LTC2208 2.25 Vpp diff 鈫� 1:2 balun 鈫� 50惟 */

@@ -52,6 +52,8 @@ typedef struct {
     uint32_t current_point;
     uint64_t current_rf_hz;
     uint32_t wait_counter;
+    float current_raw_power_dbm;
+    float current_correction_db;
     float current_power_dbm;
     sweep_engine_state_t state;
     int stop_requested;

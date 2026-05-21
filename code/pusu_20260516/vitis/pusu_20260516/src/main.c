@@ -119,6 +119,7 @@ int main(void)
                 reset_and_resume_background_capture_if_idle();
             } else if (sweep_engine_is_active(&g_sweep_engine) == 0) {
                 sweep_engine_set_point_callback(&g_sweep_engine, 0, 0);
+                lock_indicator_toggle_activity();
                 reset_and_resume_background_capture_if_idle();
             }
             continue;
@@ -253,6 +254,7 @@ static int protocol_spectrum_provider(const device_control_config_t *config,
 
     *out_point_count = stream_context.point_count;
     g_last_sweep_error = 0;
+    lock_indicator_toggle_activity();
     reset_and_resume_background_capture_if_idle();
     return 0;
 }

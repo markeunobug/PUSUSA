@@ -78,8 +78,6 @@ class _MyHomePageState extends State<MyHomePage> {
   // 幅度 鍙傛暟
   final TextEditingController refLevelController =
       TextEditingController(text: '0');
-  final ValueNotifier<String> attenuatorValue = ValueNotifier<String>('自动');
-  final ValueNotifier<String> preAmpValue = ValueNotifier<String>('自动');
   final ValueNotifier<String> vgaGainValue = ValueNotifier<String>('0 dB');
   RfFrontendConfig _rfFrontendConfig = const RfFrontendConfig(
     lnaMode: RfLnaMode.bypass,
@@ -189,8 +187,6 @@ class _MyHomePageState extends State<MyHomePage> {
     _serialManager.connectionStatus.addListener(_handleConnectionStatusChanged);
 
     sweepSpeed.addListener(_sendSweepConfig);
-    attenuatorValue.addListener(_sendAmplitudeConfig);
-    preAmpValue.addListener(_sendAmplitudeConfig);
     vgaGainValue.addListener(_sendVgaGainConfig);
     rbwMode.addListener(() {
       _updateRbwField();
@@ -281,8 +277,6 @@ class _MyHomePageState extends State<MyHomePage> {
     _rfFrontendSendDebounce?.cancel();
     _speedCalculationTimer?.cancel(); // 閿€姣佹壂鎻忛€熷害璁＄畻瀹氭椂鍣?
     sweepSpeed.removeListener(_sendSweepConfig);
-    attenuatorValue.removeListener(_sendAmplitudeConfig);
-    preAmpValue.removeListener(_sendAmplitudeConfig);
     vgaGainValue.removeListener(_sendVgaGainConfig);
     rbwMode.removeListener(() {
       _updateRbwField();
@@ -830,9 +824,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
   void _sendAmplitudeConfig() {
     final double refLevel = double.tryParse(refLevelController.text) ?? 0;
-    int attenuator = _mapAttenuatorStringToInt(attenuatorValue.value);
-    int preamp = _mapPreAmpStringToInt(preAmpValue.value);
-    _protocol.setAmplitude(refLevel, attenuator, preamp);
+    _protocol.setAmplitude(refLevel, 0, 0);
   }
 
   void _sendVgaGainConfig() {
@@ -1003,8 +995,8 @@ class _MyHomePageState extends State<MyHomePage> {
       ),
       amplitude: AmplitudeConfig(
         refLevelDbm: double.tryParse(refLevelController.text) ?? 0,
-        attenuatorMode: _mapAttenuatorStringToInt(attenuatorValue.value),
-        preampMode: _mapPreAmpStringToInt(preAmpValue.value),
+        attenuatorMode: 0,
+        preampMode: 0,
       ),
       bandwidth: BandwidthConfig(
         rbwMode: _mapRbwModeStringToInt(rbwMode.value),
@@ -1108,46 +1100,6 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   // ====================== 浼犵粺 switch 璇彞锛堝吋瀹规棫 Dart 鐗堟湰锛?======================
-  int _mapAttenuatorStringToInt(String value) {
-    switch (value) {
-      case '自动':
-        return 0;
-      case '0dB':
-        return 1;
-      case '0.25dB':
-        return 2;
-      case '0.5dB':
-        return 3;
-      case '1dB':
-        return 4;
-      case '2dB':
-        return 5;
-      case '4dB':
-        return 6;
-      case '8dB':
-        return 7;
-      case '16dB':
-        return 8;
-      case '31.75dB':
-        return 9;
-      default:
-        return 0;
-    }
-  }
-
-  int _mapPreAmpStringToInt(String value) {
-    switch (value) {
-      case '自动':
-        return 0;
-      case '使能':
-        return 1;
-      case '关闭':
-        return 2;
-      default:
-        return 0;
-    }
-  }
-
   int _mapVgaGainStringToCode(String value) {
     switch (value) {
       case '-11 dB':
@@ -1549,6 +1501,18 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
+  void _updateMarkerFreq(Marker marker, double freqHz) {
+    if (!marker.enabled) return;
+    final clampedFreq =
+        freqHz.clamp(_getCurrentStartFreq(), _getCurrentStopFreq()).toDouble();
+    setState(() {
+      _currentMarker = marker;
+      marker.freqHz = clampedFreq;
+    });
+    _markerFreqController.text =
+        _formatFreq(clampedFreq, _markerFreqUnit.value);
+  }
+
   @override
   Widget build(BuildContext context) {
     final double startFreq = _confirmedStartHz;
@@ -1688,6 +1652,8 @@ class _MyHomePageState extends State<MyHomePage> {
                 sweepSpeedStr:
                     '${_currentSweepSpeed.toStringAsFixed(1)} packets/s',
                 markers: _markers,
+                markersDraggable: !autoPeakEnabled.value,
+                onMarkerDragUpdate: _updateMarkerFreq,
                 isZeroSpan: _isZeroSpan,
                 zeroSpanFreqStr:
                     _isZeroSpan ? _formatFreqAutoUnit(_confirmedStartHz) : '',
@@ -1763,110 +1729,6 @@ class _MyHomePageState extends State<MyHomePage> {
                                     controller: refLevelController,
                                     onSubmitted: (v) =>
                                         _sendAmplitudeConfig())),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            const SizedBox(
-                                width: 100,
-                                child: Text('衰减器：',
-                                    style: TextStyle(
-                                        color: material.Colors.white))),
-                            Expanded(
-                              child: ValueListenableBuilder<String>(
-                                valueListenable: attenuatorValue,
-                                builder: (context, value, child) =>
-                                    ComboBox<String>(
-                                  value: value,
-                                  isExpanded: true,
-                                  items: [
-                                    '自动',
-                                    '0dB',
-                                    '0.25dB',
-                                    '0.5dB',
-                                    '1dB',
-                                    '2dB',
-                                    '4dB',
-                                    '8dB',
-                                    '16dB',
-                                    '31.75dB'
-                                  ]
-                                      .map((o) => ComboBoxItem<String>(
-                                          value: o, child: Text(o)))
-                                      .toList(),
-                                  onChanged: (nv) => nv != null
-                                      ? attenuatorValue.value = nv
-                                      : null,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            const SizedBox(
-                                width: 100,
-                                child: Text('预放：',
-                                    style: TextStyle(
-                                        color: material.Colors.white))),
-                            Expanded(
-                              child: ValueListenableBuilder<String>(
-                                valueListenable: preAmpValue,
-                                builder: (context, value, child) =>
-                                    ComboBox<String>(
-                                  value: value,
-                                  isExpanded: true,
-                                  items: ['使能', '关闭', '自动']
-                                      .map((o) => ComboBoxItem<String>(
-                                          value: o, child: Text(o)))
-                                      .toList(),
-                                  onChanged: (nv) => nv != null
-                                      ? preAmpValue.value = nv
-                                      : null,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            const SizedBox(
-                                width: 100,
-                                child: Text('VGA：',
-                                    style: TextStyle(
-                                        color: material.Colors.white))),
-                            Expanded(
-                              child: ValueListenableBuilder<String>(
-                                valueListenable: vgaGainValue,
-                                builder: (context, value, child) =>
-                                    ComboBox<String>(
-                                  value: value,
-                                  isExpanded: true,
-                                  items: [
-                                    '-11 dB',
-                                    '-10 dB',
-                                    '-6 dB',
-                                    '-3 dB',
-                                    '0 dB',
-                                    '3 dB',
-                                    '6 dB',
-                                    '10 dB',
-                                    '20 dB',
-                                    '30 dB',
-                                    '34 dB'
-                                  ]
-                                      .map((o) => ComboBoxItem<String>(
-                                          value: o, child: Text(o)))
-                                      .toList(),
-                                  onChanged: (nv) => nv != null
-                                      ? vgaGainValue.value = nv
-                                      : null,
-                                ),
-                              ),
-                            ),
                           ],
                         ),
                       ],
@@ -2031,7 +1893,8 @@ class _MyHomePageState extends State<MyHomePage> {
                                           color: material.Colors.white))),
                               ToggleSwitch(
                                 checked: value,
-                                onChanged: (v) => autoPeakEnabled.value = v,
+                                onChanged: (v) =>
+                                    setState(() => autoPeakEnabled.value = v),
                               ),
                             ],
                           ),
@@ -2372,6 +2235,45 @@ class _MyHomePageState extends State<MyHomePage> {
                   );
                 },
                 child: const Text('+'),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            const SizedBox(
+              width: 100,
+              child: Text(
+                'VGA：',
+                style: TextStyle(color: material.Colors.white),
+              ),
+            ),
+            Expanded(
+              child: ValueListenableBuilder<String>(
+                valueListenable: vgaGainValue,
+                builder: (context, value, child) => ComboBox<String>(
+                  value: value,
+                  isExpanded: true,
+                  items: [
+                    '-11 dB',
+                    '-10 dB',
+                    '-6 dB',
+                    '-3 dB',
+                    '0 dB',
+                    '3 dB',
+                    '6 dB',
+                    '10 dB',
+                    '20 dB',
+                    '30 dB',
+                    '34 dB'
+                  ]
+                      .map((o) =>
+                          ComboBoxItem<String>(value: o, child: Text(o)))
+                      .toList(),
+                  onChanged: (nv) =>
+                      nv != null ? vgaGainValue.value = nv : null,
+                ),
               ),
             ),
           ],

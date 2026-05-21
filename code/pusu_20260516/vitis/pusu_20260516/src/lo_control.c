@@ -4,6 +4,22 @@
 #include "lock_indicator.h"
 #include "lmx2572.h"
 
+static void lo_control_update_lock_indicator(uint8_t device_index, int locked)
+{
+    lock_indicator_set_lmx(device_index, locked);
+}
+
+static void lo_control_update_all_lock_indicators(void)
+{
+    uint8_t device_index;
+
+    for (device_index = 0U; device_index < 3U; device_index++) {
+        lo_control_update_lock_indicator(
+            device_index,
+            lmx2572_board_is_locked(device_index) ? 1 : 0);
+    }
+}
+
 int lo_control_init(void)
 {
     int status;
@@ -24,6 +40,7 @@ int lo_control_init(void)
         return status;
     }
 
+    lo_control_update_all_lock_indicators();
 
     /* LO2 is fixed in this architecture. If the board is healthy, we should
      * be able to show an immediate lock indication after initialization.
@@ -52,28 +69,28 @@ int lo_control_wait_lock(uint8_t device_index, uint32_t timeout_loops)
 {
     uint32_t i;
 
-    /* A retune starts in an unlocked state. Only light the indicator once the
-     * synthesizer reports a valid lock.
-     */
-    lock_indicator_set(0);
+    lo_control_update_lock_indicator(device_index, 0);
 
     for (i = 0U; i < timeout_loops; i++) {
         if (lmx2572_board_is_locked(device_index)) {
-            lock_indicator_set(1);
+            lo_control_update_lock_indicator(device_index, 1);
+            lo_control_update_all_lock_indicators();
             return XST_SUCCESS;
         }
     }
 
-    lock_indicator_set(0);
+    lo_control_update_lock_indicator(device_index, 0);
+    lo_control_update_all_lock_indicators();
     return XST_FAILURE;
 }
 
 int lo_control_is_locked(uint8_t device_index)
 {
     if (lmx2572_board_is_locked(device_index)) {
-        lock_indicator_set(1);
+        lo_control_update_lock_indicator(device_index, 1);
         return XST_SUCCESS;
     }
 
+    lo_control_update_lock_indicator(device_index, 0);
     return XST_FAILURE;
 }

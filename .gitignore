@@ -17,10 +17,12 @@ windows/flutter/ephemeral/
 *.bin
 *.elf
 *.bit
+*.a
 *.dcp
 *.rpt
 *.rpx
 *.pb
+*.xsa
 
 # Vivado/Vitis generated logs and temporary files
 **/Debug/

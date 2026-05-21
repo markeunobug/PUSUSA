@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "amplitude_correction.h"
 #include "dma_capture.h"
 #include "lo_control.h"
 #include "signal_processing.h"
@@ -54,6 +55,8 @@ int sweep_engine_prepare(sweep_engine_t *engine, const device_control_config_t *
     engine->current_point = 0U;
     engine->current_rf_hz = 0ULL;
     engine->wait_counter = 0U;
+    engine->current_raw_power_dbm = 0.0f;
+    engine->current_correction_db = 0.0f;
     engine->current_power_dbm = 0.0f;
     engine->stop_requested = 0;
     engine->last_error = SWEEP_ENGINE_OK;
@@ -207,7 +210,15 @@ int sweep_engine_poll(sweep_engine_t *engine)
 
     case SWEEP_ENGINE_STATE_MEASURE:
         if (signal_processing_measure_accumulated_power_dbm(
-                &engine->current_power_dbm) != 0) {
+                &engine->current_raw_power_dbm) != 0) {
+            sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_POWER_MEASURE);
+            return SWEEP_ENGINE_ERR_POWER_MEASURE;
+        }
+
+        if (amplitude_correction_apply(engine->current_rf_hz,
+                                       engine->current_raw_power_dbm,
+                                       &engine->current_power_dbm,
+                                       &engine->current_correction_db) != 0) {
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_POWER_MEASURE);
             return SWEEP_ENGINE_ERR_POWER_MEASURE;
         }
