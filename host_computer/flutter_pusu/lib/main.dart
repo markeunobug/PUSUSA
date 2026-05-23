@@ -2,13 +2,21 @@
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/material.dart' as material;
 import 'dart:async';
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/rendering.dart';
 
 // 瀵煎叆涓插彛鐩稿叧
 import 'serial_port_manager.dart';
 import 'serial_port_selector.dart';
 import 'serial_protocol.dart';
 import 'device_models.dart';
+import 'phase_noise_chart.dart';
+import 'phase_noise_models.dart';
+import 'phase_noise_processor.dart';
 
 // 瀵煎叆鑷畾涔夐璋卞浘缁勪欢
 import 'spectrum_chart.dart';
@@ -17,6 +25,38 @@ import 'spectrum_chart.dart';
 enum SweepMode { standard, realTime }
 
 enum FrequencyEditMode { startStop, centerSpan }
+
+enum MeasurementMode { spectrum, phaseNoise }
+
+class MeasurementPreset {
+  const MeasurementPreset({
+    required this.name,
+    required this.description,
+    required this.startHz,
+    required this.stopHz,
+    required this.rbwMode,
+    required this.vbwMode,
+    required this.detectMode,
+    required this.refLevelDbm,
+    required this.scalePerGridDb,
+    required this.pointCount,
+    required this.sweepSpeedHz,
+    required this.sweepMode,
+  });
+
+  final String name;
+  final String description;
+  final double startHz;
+  final double stopHz;
+  final String rbwMode;
+  final String vbwMode;
+  final String detectMode;
+  final double refLevelDbm;
+  final double scalePerGridDb;
+  final int pointCount;
+  final double sweepSpeedHz;
+  final SweepMode sweepMode;
+}
 
 void main() {
   runApp(const MyApp());
@@ -48,7 +88,71 @@ class MyHomePage extends StatefulWidget {
 class _MyHomePageState extends State<MyHomePage> {
   static const int _defaultSpectrumPointCount = 128;
   static const int _maxInternalSweepPointCount = 4096;
+  static const double _fullSpanStartHz = 50e6;
+  static const double _fullSpanStopHz = 1.5e9;
+  static const String _defaultScreenshotDirectory =
+      r'C:\learning\pusu_V2\host_computer\flutter_pusu\image';
 
+  static const List<MeasurementPreset> _measurementPresets = [
+    MeasurementPreset(
+      name: '默认全频段',
+      description: '50 MHz - 1.5 GHz，常规测量状态',
+      startHz: 50e6,
+      stopHz: 1.5e9,
+      rbwMode: '1 MHz',
+      vbwMode: 'VBW=RBW',
+      detectMode: '平均',
+      refLevelDbm: 0,
+      scalePerGridDb: 10,
+      pointCount: 128,
+      sweepSpeedHz: 30,
+      sweepMode: SweepMode.standard,
+    ),
+    MeasurementPreset(
+      name: '快速扫频',
+      description: '低点数、快速刷新，适合粗略观察',
+      startHz: 50e6,
+      stopHz: 1.5e9,
+      rbwMode: '1 MHz',
+      vbwMode: 'VBW=RBW',
+      detectMode: '取样',
+      refLevelDbm: 0,
+      scalePerGridDb: 10,
+      pointCount: 64,
+      sweepSpeedHz: 50,
+      sweepMode: SweepMode.standard,
+    ),
+    MeasurementPreset(
+      name: '高分辨率',
+      description: '300 kHz RBW、更多显示点，适合细看峰值',
+      startHz: 200e6,
+      stopHz: 400e6,
+      rbwMode: '300 kHz',
+      vbwMode: 'VBW=RBW',
+      detectMode: '平均',
+      refLevelDbm: 0,
+      scalePerGridDb: 5,
+      pointCount: 512,
+      sweepSpeedHz: 10,
+      sweepMode: SweepMode.standard,
+    ),
+    MeasurementPreset(
+      name: '零扫宽观察',
+      description: '固定中心频点，进入时域观察',
+      startHz: 775e6,
+      stopHz: 775e6,
+      rbwMode: '1 MHz',
+      vbwMode: 'VBW=RBW',
+      detectMode: '平均',
+      refLevelDbm: 0,
+      scalePerGridDb: 10,
+      pointCount: 128,
+      sweepSpeedHz: 30,
+      sweepMode: SweepMode.realTime,
+    ),
+  ];
+
+  final GlobalKey _screenshotBoundaryKey = GlobalKey();
   final FocusNode startFreqFocus = FocusNode();
   final FocusNode stopFreqFocus = FocusNode();
   final FocusNode centerFreqFocus = FocusNode();
@@ -108,14 +212,73 @@ class _MyHomePageState extends State<MyHomePage> {
       TextEditingController(text: '10');
   final TextEditingController pointCountController =
       TextEditingController(text: '128');
+  final TextEditingController _screenshotDirController =
+      TextEditingController(text: _defaultScreenshotDirectory);
+  bool _screenshotInProgress = false;
 
   // 鎵弿閫熷害锛堣缃€硷級
   final ValueNotifier<double> sweepSpeed = ValueNotifier<double>(30.0);
 
   // 鎵弿模式锛堥粯璁ゆ爣鍑嗘ā寮忥級
   SweepMode _sweepMode = SweepMode.standard;
+  MeasurementMode _measurementMode = MeasurementMode.spectrum;
   final FlyoutController _modeFlyoutController = FlyoutController();
+  final FlyoutController _presetFlyoutController = FlyoutController();
   ConnectionStatus? _lastConnectionStatus;
+
+  final PhaseNoiseConfig _phaseNoiseConfig = const PhaseNoiseConfig();
+  PhaseNoiseCarrierMode _phaseNoiseCarrierMode = PhaseNoiseCarrierMode.auto;
+  PhaseNoiseDensityPreset _phaseNoiseDensityPreset =
+      PhaseNoiseDensityPreset.normal;
+  final TextEditingController _phaseNoiseCarrierController =
+      TextEditingController(text: '775');
+  final ValueNotifier<String> _phaseNoiseCarrierUnit =
+      ValueNotifier<String>('MHz');
+  final TextEditingController _phaseNoiseCarrierSearchSpanController =
+      TextEditingController(text: '100');
+  final ValueNotifier<String> _phaseNoiseCarrierSearchSpanUnit =
+      ValueNotifier<String>('kHz');
+  final TextEditingController _phaseNoiseMinimumCarrierLevelController =
+      TextEditingController(text: '-50');
+  final TextEditingController _phaseNoiseStartOffsetController =
+      TextEditingController(text: '1');
+  final ValueNotifier<String> _phaseNoiseStartOffsetUnit =
+      ValueNotifier<String>('kHz');
+  final TextEditingController _phaseNoiseStopOffsetController =
+      TextEditingController(text: '1');
+  final ValueNotifier<String> _phaseNoiseStopOffsetUnit =
+      ValueNotifier<String>('MHz');
+  final TextEditingController _phaseNoiseAverageCountController =
+      TextEditingController(text: '10');
+  final List<FlSpot> _phaseNoiseRawTrace = [];
+  final List<FlSpot> _phaseNoiseAverageTrace = [];
+  PhaseNoiseTrace _phaseNoiseTrace = const PhaseNoiseTrace.empty();
+  PhaseNoiseTraceDisplay _phaseNoiseTraceDisplay = PhaseNoiseTraceDisplay.both;
+  PhaseNoiseMarker? _phaseNoiseMarker;
+  Timer? _phaseNoiseDemoTimer;
+  int _phaseNoiseCompletedAverages = 0;
+  StreamSubscription<PhaseNoiseDataFrame>? _phaseNoiseDataSubscription;
+  StreamSubscription<PhaseNoiseStatusFrame>? _phaseNoiseStatusSubscription;
+  final Map<double, PhaseNoisePoint> _phaseNoiseLivePoints = {};
+  int? _phaseNoiseDataTraceId;
+  int _phaseNoiseTraceId = 0;
+  int _phaseNoisePlannedTotalPoints = 0;
+  int _phaseNoiseReceivedPoints = 0;
+  int _phaseNoiseCurrentIndex = -1;
+  int _phaseNoiseAverageIndex = 0;
+  int _phaseNoiseElapsedMs = 0;
+  int _phaseNoiseWarningCode = 0;
+  int _phaseNoiseErrorCode = 0;
+  int _phaseNoiseCurrentOffsetHz = 0;
+  int _phaseNoiseCurrentRbwHz = 0;
+  double? _phaseNoiseNominalCarrierHz;
+  double? _phaseNoiseMeasuredCarrierHz;
+  double? _phaseNoiseCarrierLevelDbm;
+  bool _phaseNoiseRunning = false;
+  bool _phaseNoiseComplete = false;
+  bool _phaseNoiseCommandInFlight = false;
+  bool _phaseNoiseUsingDemo = false;
+  String _phaseNoiseStateText = 'Idle';
 
   // 涓插彛绠＄悊
   late SerialPortManager _serialManager;
@@ -141,6 +304,8 @@ class _MyHomePageState extends State<MyHomePage> {
   int _startupSyncGeneration = 0;
   int _measurementConfigGeneration = 0;
   bool _measurementConfigInFlight = false;
+  bool _lastMeasurementConfigApplied = false;
+  bool _suppressPresetDeviceUpdates = false;
   bool _suppressBandwidthListener = false;
   bool _awaitingTimeoutStatus = false;
   FrequencyEditMode _lastFrequencyEditMode = FrequencyEditMode.centerSpan;
@@ -171,8 +336,9 @@ class _MyHomePageState extends State<MyHomePage> {
   double _currentSweepSpeed = 0.0; // 褰撳墠瀹為檯鎵弿閫熷害锛堟/绉掞級
   Timer? _speedCalculationTimer; // 姣忕璁＄畻涓€娆℃壂鎻忛€熷害
   DateTime? _lastSpectrumArrivalTime; // 鏈€杩戜竴甯ч璋卞埌杈炬椂闂?
-  double _confirmedStartHz = 50e6;
-  double _confirmedStopHz = 1.5e9;
+  double _confirmedStartHz = _fullSpanStartHz;
+  double _confirmedStopHz = _fullSpanStopHz;
+  String _profileStatusText = 'Profile: --';
 
   @override
   void initState() {
@@ -184,6 +350,11 @@ class _MyHomePageState extends State<MyHomePage> {
     _protocol.spectrumStream.listen(_handleSpectrumData);
     _protocol.statusStream.listen(_handleStatusData);
     _protocol.rfFrontendStatusStream.listen(_handleRfFrontendStatus);
+    _protocol.sweepProfileStream.listen(_handleSweepProfileData);
+    _phaseNoiseDataSubscription =
+        _protocol.phaseNoiseStream.listen(_handlePhaseNoiseDataFrame);
+    _phaseNoiseStatusSubscription =
+        _protocol.phaseNoiseStatusStream.listen(_handlePhaseNoiseStatusFrame);
     _serialManager.connectionStatus.addListener(_handleConnectionStatusChanged);
 
     sweepSpeed.addListener(_sendSweepConfig);
@@ -260,22 +431,37 @@ class _MyHomePageState extends State<MyHomePage> {
     vbwController.dispose();
     scalePerGridController.dispose();
     pointCountController.dispose();
+    _screenshotDirController.dispose();
     _rfAttenController.dispose();
     _markerFreqController.dispose();
     _markerFreqUnit.dispose();
+    _phaseNoiseCarrierController.dispose();
+    _phaseNoiseCarrierUnit.dispose();
+    _phaseNoiseCarrierSearchSpanController.dispose();
+    _phaseNoiseCarrierSearchSpanUnit.dispose();
+    _phaseNoiseMinimumCarrierLevelController.dispose();
+    _phaseNoiseStartOffsetController.dispose();
+    _phaseNoiseStartOffsetUnit.dispose();
+    _phaseNoiseStopOffsetController.dispose();
+    _phaseNoiseStopOffsetUnit.dispose();
+    _phaseNoiseAverageCountController.dispose();
     _serialManager.connectionStatus
         .removeListener(_handleConnectionStatusChanged);
-    _serialManager.dispose();
-    _protocol.dispose();
-    _serialFlyoutController.dispose();
-    _modeFlyoutController.dispose();
     _continuousSweepTimer?.cancel();
     _spectrumRequestTimeoutTimer?.cancel();
     _sweepAssembleTimer?.cancel();
     _startupSyncTimer?.cancel();
     _serialInitTimer?.cancel();
+    _phaseNoiseDemoTimer?.cancel();
+    _phaseNoiseDataSubscription?.cancel();
+    _phaseNoiseStatusSubscription?.cancel();
     _rfFrontendSendDebounce?.cancel();
     _speedCalculationTimer?.cancel(); // 閿€姣佹壂鎻忛€熷害璁＄畻瀹氭椂鍣?
+    _serialManager.dispose();
+    _protocol.dispose();
+    _serialFlyoutController.dispose();
+    _modeFlyoutController.dispose();
+    _presetFlyoutController.dispose();
     sweepSpeed.removeListener(_sendSweepConfig);
     vgaGainValue.removeListener(_sendVgaGainConfig);
     rbwMode.removeListener(() {
@@ -459,6 +645,7 @@ class _MyHomePageState extends State<MyHomePage> {
       _spectrumRequestTimeoutTimer?.cancel();
       _spectrumRequestInFlight = false;
       _activeSweepTimestamp = null;
+      _protocol.getSweepProfile();
 
       setState(() {
         _spectrumData = _zeroSpanData;
@@ -497,6 +684,7 @@ class _MyHomePageState extends State<MyHomePage> {
     _spectrumRequestInFlight = false;
     _spectrumRequestTimeoutTimer?.cancel();
     _activeSweepTimestamp = null;
+    _protocol.getSweepProfile();
 
     if (_lastSpectrumArrivalTime != null) {
       final dtMs = now.difference(_lastSpectrumArrivalTime!).inMilliseconds;
@@ -579,6 +767,376 @@ class _MyHomePageState extends State<MyHomePage> {
     });
   }
 
+  void _handleSweepProfileData(SweepProfileReport report) {
+    if (!mounted) return;
+
+    setState(() {
+      _profileStatusText = _formatSweepProfileStatus(report);
+    });
+  }
+
+  void _handlePhaseNoiseDataFrame(PhaseNoiseDataFrame frame) {
+    _deviceResponsive = true;
+    _startupSyncTimer?.cancel();
+    if (!mounted) return;
+
+    setState(() {
+      _phaseNoiseUsingDemo = false;
+      _phaseNoiseTraceId = frame.traceId;
+      _phaseNoisePlannedTotalPoints = frame.plannedTotalPoints;
+      _phaseNoiseReceivedPoints = frame.receivedPoints;
+      _phaseNoiseCurrentIndex = frame.currentIndex;
+      _phaseNoiseAverageIndex = frame.averageIndex;
+      _phaseNoiseErrorCode = frame.errorCode;
+      _phaseNoiseCurrentOffsetHz = frame.offsetHz;
+      _phaseNoiseCurrentRbwHz = frame.rbwHz;
+      _phaseNoiseRunning = !frame.done && frame.errorCode == 0;
+      _phaseNoiseComplete = frame.done && frame.errorCode == 0;
+      _phaseNoiseStateText = frame.errorCode != 0
+          ? 'Error ${_phaseNoiseErrorLabel(frame.errorCode)}'
+          : (frame.done ? 'Complete' : 'Measuring');
+
+      final newTrace = _phaseNoiseDataTraceId != frame.traceId;
+      if (newTrace) {
+        _phaseNoiseLivePoints.clear();
+      }
+      _phaseNoiseDataTraceId = frame.traceId;
+
+      final point = PhaseNoisePoint(
+        offsetHz: frame.offsetHz.toDouble(),
+        noisePowerDbm: frame.noisePowerDbm,
+        dbcHz: frame.phaseNoiseDbcHz,
+        rbwHz: frame.rbwHz.toDouble(),
+        valid: frame.errorCode == 0 && frame.phaseNoiseValid,
+      );
+      if (point.valid) {
+        _phaseNoiseLivePoints[point.offsetHz] = point;
+      }
+
+      final rawPoints = _phaseNoiseLivePoints.values.toList()
+        ..sort((a, b) => a.offsetHz.compareTo(b.offsetHz));
+      final carrier = _buildPhaseNoiseCarrierFromData(frame);
+      final warnings = _buildPhaseNoiseWarnings(
+        warningCode: frame.warning ? _phaseNoiseWarningCode : 0,
+        errorCode: frame.errorCode,
+      );
+      _setPhaseNoiseTrace(
+        PhaseNoiseTrace(
+          rawPoints: List<PhaseNoisePoint>.unmodifiable(rawPoints),
+          averagePoints: List<PhaseNoisePoint>.unmodifiable(rawPoints),
+          completedAverages: frame.averageIndex,
+          carrier: carrier,
+          warnings: warnings,
+        ),
+      );
+    });
+  }
+
+  void _handlePhaseNoiseStatusFrame(PhaseNoiseStatusFrame status) {
+    _deviceResponsive = true;
+    _startupSyncTimer?.cancel();
+    if (!mounted) return;
+
+    setState(() {
+      _phaseNoiseUsingDemo = false;
+      _phaseNoiseTraceId = status.traceId;
+      _phaseNoisePlannedTotalPoints = status.plannedTotalPoints;
+      _phaseNoiseReceivedPoints = status.dataValid ? status.receivedPoints : 0;
+      _phaseNoiseCurrentIndex = status.currentIndex;
+      _phaseNoiseAverageIndex = status.averageIndex;
+      _phaseNoiseElapsedMs = status.elapsedMs;
+      _phaseNoiseWarningCode = status.warningCode;
+      _phaseNoiseErrorCode = status.errorCode;
+      _phaseNoiseCurrentOffsetHz = status.currentOffsetHz;
+      _phaseNoiseCurrentRbwHz = status.currentRbwHz;
+      _phaseNoiseNominalCarrierHz = status.nominalCarrierHz > 0
+          ? status.nominalCarrierHz
+          : _phaseNoiseNominalCarrierHz;
+      _phaseNoiseMeasuredCarrierHz = status.carrierValid
+          ? status.measuredCarrierHz
+          : _phaseNoiseMeasuredCarrierHz;
+      _phaseNoiseCarrierLevelDbm = status.carrierValid
+          ? status.carrierLevelDbm
+          : _phaseNoiseCarrierLevelDbm;
+      _phaseNoiseRunning = status.running;
+      _phaseNoiseComplete = status.complete;
+      _phaseNoiseStateText = _phaseNoiseStateLabel(status);
+
+      final carrier = _buildPhaseNoiseCarrierFromStatus(status);
+      if (carrier != null || status.warningCode != 0 || status.errorCode != 0) {
+        _setPhaseNoiseTrace(
+          PhaseNoiseTrace(
+            rawPoints: _phaseNoiseTrace.rawPoints,
+            averagePoints: _phaseNoiseTrace.averagePoints,
+            completedAverages: math.max(
+              _phaseNoiseTrace.completedAverages,
+              status.averageIndex,
+            ),
+            carrier: carrier ?? _phaseNoiseTrace.carrier,
+            warnings: _buildPhaseNoiseWarnings(
+              warningCode: status.warningCode,
+              errorCode: status.errorCode,
+            ),
+          ),
+        );
+      }
+    });
+  }
+
+  PhaseNoiseCarrier _buildPhaseNoiseCarrierFromData(
+    PhaseNoiseDataFrame frame,
+  ) {
+    if (!frame.carrierValid) {
+      final fallbackNominal = _phaseNoiseNominalCarrierHz ??
+          frame.carrierHz.takeIfPositive() ??
+          _getCurrentCenterFreq();
+      return PhaseNoiseCarrier(
+        nominalHz: fallbackNominal,
+        measuredHz: _phaseNoiseMeasuredCarrierHz ?? fallbackNominal,
+        levelDbm: _phaseNoiseCarrierLevelDbm ?? 0.0,
+        initialDeltaHz: 0.0,
+        driftHz: 0.0,
+      );
+    }
+
+    final nominal = _phaseNoiseNominalCarrierHz ??
+        frame.carrierHz.takeIfPositive() ??
+        _getCurrentCenterFreq();
+    final measured = frame.carrierValid
+        ? frame.carrierHz
+        : (_phaseNoiseMeasuredCarrierHz ?? nominal);
+    final level = frame.carrierValid
+        ? frame.carrierLevelDbm
+        : (_phaseNoiseCarrierLevelDbm ?? 0.0);
+
+    _phaseNoiseNominalCarrierHz = nominal;
+    _phaseNoiseMeasuredCarrierHz = measured;
+    _phaseNoiseCarrierLevelDbm = level;
+
+    return PhaseNoiseCarrier(
+      nominalHz: nominal,
+      measuredHz: measured,
+      levelDbm: level,
+      initialDeltaHz: measured - nominal,
+      driftHz: _phaseNoiseTrace.carrier == null
+          ? 0.0
+          : measured - _phaseNoiseTrace.carrier!.measuredHz,
+    );
+  }
+
+  PhaseNoiseCarrier? _buildPhaseNoiseCarrierFromStatus(
+    PhaseNoiseStatusFrame status,
+  ) {
+    final nominal =
+        status.nominalCarrierHz > 0 ? status.nominalCarrierHz : null;
+    final measured = status.carrierValid && status.measuredCarrierHz > 0
+        ? status.measuredCarrierHz
+        : null;
+    if (nominal == null && measured == null) {
+      return null;
+    }
+
+    final resolvedNominal = nominal ??
+        _phaseNoiseNominalCarrierHz ??
+        measured ??
+        _getCurrentCenterFreq();
+    final resolvedMeasured =
+        measured ?? _phaseNoiseMeasuredCarrierHz ?? resolvedNominal;
+    final level = status.carrierValid
+        ? status.carrierLevelDbm
+        : (_phaseNoiseCarrierLevelDbm ?? 0.0);
+
+    return PhaseNoiseCarrier(
+      nominalHz: resolvedNominal,
+      measuredHz: resolvedMeasured,
+      levelDbm: level,
+      initialDeltaHz: resolvedMeasured - resolvedNominal,
+      driftHz: _phaseNoiseTrace.carrier == null
+          ? 0.0
+          : resolvedMeasured - _phaseNoiseTrace.carrier!.measuredHz,
+    );
+  }
+
+  List<PhaseNoiseWarning> _buildPhaseNoiseWarnings({
+    required int warningCode,
+    required int errorCode,
+  }) {
+    return [
+      if (warningCode != 0)
+        PhaseNoiseWarning(
+          code: PhaseNoiseWarningCode.deviceWarning,
+          message: 'Warning ${_phaseNoiseWarningLabel(warningCode)}',
+        ),
+      if (errorCode != 0)
+        PhaseNoiseWarning(
+          code: PhaseNoiseWarningCode.deviceError,
+          message: 'Error ${_phaseNoiseErrorLabel(errorCode)}',
+        ),
+    ];
+  }
+
+  String _phaseNoiseStateLabel(PhaseNoiseStatusFrame status) {
+    if (status.errorCode != 0 && status.state == 6) {
+      return 'Error ${_phaseNoiseErrorLabel(status.errorCode)}';
+    }
+    switch (status.state) {
+      case 0:
+        return status.configured ? 'Idle (configured)' : 'Idle';
+      case 1:
+        return 'Configured';
+      case 2:
+        if (status.currentOffsetHz <= 0) {
+          return 'Searching carrier (no offset data yet)';
+        }
+        return 'Searching carrier';
+      case 3:
+        return 'Measuring';
+      case 4:
+        return 'Stopping';
+      case 5:
+        return 'Complete';
+      case 6:
+        return 'Error ${_phaseNoiseErrorLabel(status.errorCode)}';
+      default:
+        return 'State ${status.state}';
+    }
+  }
+
+  String _phaseNoiseErrorLabel(int code) {
+    switch (code) {
+      case 0:
+        return 'OK';
+      case 1:
+        return 'BAD_CONFIG';
+      case 2:
+        return 'CARRIER_NOT_FOUND';
+      case 3:
+        return 'OFFSET_OUT_OF_RANGE';
+      case 4:
+        return 'RBW_UNSUPPORTED';
+      case 5:
+        return 'LO_LOCK_TIMEOUT';
+      case 6:
+        return 'DMA_TIMEOUT';
+      case 7:
+        return 'MEASURE_FAILED';
+      case 8:
+        return 'BUSY';
+      case 9:
+        return 'NOT_CONFIGURED';
+      case 10:
+        return 'STOPPED_BY_HOST';
+      case 11:
+        return 'UNSUPPORTED_VERSION';
+      case 12:
+        return 'INTERNAL';
+      default:
+        return code.toString();
+    }
+  }
+
+  String _phaseNoiseWarningLabel(int code) {
+    switch (code) {
+      case 0:
+        return 'NONE';
+      case 1:
+        return 'OFFSET_BELOW_RBW';
+      case 2:
+        return 'ENBW_ESTIMATED';
+      case 3:
+        return 'CARRIER_LEVEL_LOW';
+      case 4:
+        return 'RF_RANGE_CLIPPED';
+      case 5:
+        return 'PARTIAL_DUAL_SIDEBAND';
+      case 6:
+        return 'PLAN_TRUNCATED';
+      default:
+        return code.toString();
+    }
+  }
+
+  String _formatPhaseNoiseElapsed(int elapsedMs) {
+    if (elapsedMs <= 0) return '--';
+    final totalSeconds = elapsedMs ~/ 1000;
+    final minutes = totalSeconds ~/ 60;
+    final seconds = totalSeconds % 60;
+    final millis = elapsedMs % 1000;
+    if (minutes > 0) {
+      return '$minutes m ${seconds.toString().padLeft(2, '0')}s';
+    }
+    return '$seconds.${(millis ~/ 100).toString()}s';
+  }
+
+  String _formatSweepProfileStatus(SweepProfileReport report) {
+    if (!report.enabled) {
+      return 'Profile: disabled';
+    }
+
+    SweepProfileSection? findSection(int sectionId) {
+      for (final section in report.sections) {
+        if (section.id == sectionId) {
+          return section;
+        }
+      }
+      return null;
+    }
+
+    double avgMs(int sectionId) {
+      final section = findSection(sectionId);
+      return section == null ? 0.0 : report.ticksToMs(section.averageTicks);
+    }
+
+    double perPointMs(int sectionId) {
+      final section = findSection(sectionId);
+      if (section == null || report.pointCount <= 0) {
+        return 0.0;
+      }
+      return report.ticksToMs(section.totalTicks / report.pointCount);
+    }
+
+    final pointMs = avgMs(0);
+    final setLoMs = perPointMs(1);
+    final lockMs = perPointMs(2);
+    final dmaMs = perPointMs(3) + perPointMs(4) + perPointMs(5);
+    final accumulateMs = perPointMs(6);
+    final measureMs = perPointMs(7);
+    final uartMs = perPointMs(8);
+    final ddcMs = perPointMs(9);
+    final cicMs = perPointMs(10);
+    final trackedMs =
+        setLoMs + lockMs + dmaMs + accumulateMs + measureMs + uartMs;
+    final otherMs = pointMs > trackedMs ? pointMs - trackedMs : 0.0;
+    final rearmAvg =
+        report.pointCount > 0 ? report.dmaRearmCount / report.pointCount : 0.0;
+    final frameAvg = rearmAvg + 1.0;
+
+    return 'Profile: point ${_formatProfileDuration(pointMs)} | '
+        'LO ${_formatProfileDuration(setLoMs)} | '
+        'lock ${_formatProfileDuration(lockMs)} | '
+        'DMA ${_formatProfileDuration(dmaMs)} | '
+        'acc ${_formatProfileDuration(accumulateMs)} | '
+        'ddc ${_formatProfileDuration(ddcMs)} | '
+        'cic ${_formatProfileDuration(cicMs)} | '
+        'meas ${_formatProfileDuration(measureMs)} | '
+        'UART ${_formatProfileDuration(uartMs)} | '
+        'other ${_formatProfileDuration(otherMs)} | '
+        'frames ${frameAvg.toStringAsFixed(1)}';
+  }
+
+  String _formatProfileDuration(double ms) {
+    if (ms <= 0.0) {
+      return '0';
+    }
+    if (ms < 1.0) {
+      return '${(ms * 1000.0).toStringAsFixed(0)} us';
+    }
+    if (ms < 10.0) {
+      return '${ms.toStringAsFixed(2)} ms';
+    }
+    return '${ms.toStringAsFixed(1)} ms';
+  }
+
   void _clearSpectrumDisplay() {
     _sweepAssembleTimer?.cancel();
     _activeSweepTimestamp = null;
@@ -638,6 +1196,15 @@ class _MyHomePageState extends State<MyHomePage> {
     return '${freqHz.toStringAsFixed(decimalPlaces)} Hz';
   }
 
+  String _formatSignedFreqAutoUnit(double freqHz, [int decimalPlaces = 2]) {
+    final sign = freqHz > 0
+        ? '+'
+        : freqHz < 0
+            ? '-'
+            : '';
+    return '$sign${_formatFreqAutoUnit(freqHz.abs(), decimalPlaces)}';
+  }
+
   String _formatFreq(double freqHz, String unit, [int decimalPlaces = 2]) {
     final double factor = _getUnitFactor(unit);
     return (freqHz / factor).toStringAsFixed(decimalPlaces);
@@ -685,6 +1252,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
   double _getRbwHzForMode(String mode) {
     switch (mode) {
+      case '1 kHz':
+        return 1e3;
       case '10 kHz':
         return 10e3;
       case '30 kHz':
@@ -731,6 +1300,212 @@ class _MyHomePageState extends State<MyHomePage> {
           Button(
               child: const Text('确定'), onPressed: () => Navigator.pop(context))
         ],
+      ),
+    );
+  }
+
+  void _showScreenshotSettings() {
+    final TextEditingController dialogController =
+        TextEditingController(text: _screenshotDirController.text);
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) => ContentDialog(
+        title: const Text('截图保存'),
+        constraints: const BoxConstraints(maxWidth: 560, maxHeight: 420),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('保存目录'),
+            const SizedBox(height: 8),
+            TextBox(
+              controller: dialogController,
+              placeholder: _defaultScreenshotDirectory,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '图片会自动添加保存日期时间，并以 PNG 格式保存。',
+              style: TextStyle(color: material.Colors.grey[300], fontSize: 12),
+            ),
+          ],
+        ),
+        actions: [
+          Button(
+            child: const Text('恢复默认'),
+            onPressed: () {
+              dialogController.text = _defaultScreenshotDirectory;
+            },
+          ),
+          Button(
+            child: const Text('取消'),
+            onPressed: () {
+              Navigator.pop(dialogContext);
+            },
+          ),
+          FilledButton(
+            onPressed: _screenshotInProgress
+                ? null
+                : () async {
+                    final String directoryPath = dialogController.text.trim();
+                    _screenshotDirController.text = directoryPath;
+                    Navigator.pop(dialogContext);
+                    await _saveScreenshot(directoryPath);
+                  },
+            child: Text(_screenshotInProgress ? '保存中...' : '保存截图'),
+          ),
+        ],
+      ),
+    ).whenComplete(dialogController.dispose);
+  }
+
+  Future<void> _saveScreenshot(String rawDirectoryPath) async {
+    if (_screenshotInProgress) return;
+
+    final String directoryPath = rawDirectoryPath.trim().isEmpty
+        ? _defaultScreenshotDirectory
+        : rawDirectoryPath.trim();
+    _screenshotDirController.text = directoryPath;
+
+    setState(() => _screenshotInProgress = true);
+    try {
+      await WidgetsBinding.instance.endOfFrame;
+
+      final boundaryContext = _screenshotBoundaryKey.currentContext;
+      final renderObject = boundaryContext?.findRenderObject();
+      if (renderObject is! RenderRepaintBoundary) {
+        throw StateError('未找到可截图区域');
+      }
+
+      final DateTime savedAt = DateTime.now();
+      final ui.Image screenshot = await renderObject.toImage(pixelRatio: 2.0);
+      final ui.Image annotatedScreenshot =
+          await _addScreenshotTimestamp(screenshot, savedAt);
+      final ByteData? pngBytes =
+          await annotatedScreenshot.toByteData(format: ui.ImageByteFormat.png);
+      screenshot.dispose();
+      annotatedScreenshot.dispose();
+
+      if (pngBytes == null) {
+        throw StateError('截图编码失败');
+      }
+
+      final Directory directory = Directory(directoryPath);
+      await directory.create(recursive: true);
+
+      final String fileName = 'spectrum_${_formatFileTimestamp(savedAt)}.png';
+      final File file =
+          File('${directory.path}${Platform.pathSeparator}$fileName');
+      await file.writeAsBytes(pngBytes.buffer.asUint8List(), flush: true);
+
+      _showInfoBar(
+        title: '截图保存成功',
+        content: file.path,
+        severity: InfoBarSeverity.success,
+      );
+    } catch (error) {
+      _showInfoBar(
+        title: '截图保存失败',
+        content: error.toString(),
+        severity: InfoBarSeverity.error,
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _screenshotInProgress = false);
+      }
+    }
+  }
+
+  Future<ui.Image> _addScreenshotTimestamp(
+      ui.Image screenshot, DateTime savedAt) async {
+    final ui.PictureRecorder recorder = ui.PictureRecorder();
+    final ui.Canvas canvas = ui.Canvas(recorder);
+    final ui.Size imageSize =
+        ui.Size(screenshot.width.toDouble(), screenshot.height.toDouble());
+
+    canvas.drawImage(screenshot, ui.Offset.zero, ui.Paint());
+
+    final String timestampText = _formatReadableTimestamp(savedAt);
+    final TextPainter textPainter = TextPainter(
+      text: TextSpan(
+        text: timestampText,
+        style: const TextStyle(
+          color: material.Colors.white,
+          fontSize: 28,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      textDirection: ui.TextDirection.ltr,
+    )..layout(maxWidth: imageSize.width - 48);
+
+    const double paddingX = 18;
+    const double paddingY = 10;
+    final ui.Rect backgroundRect = ui.Rect.fromLTWH(
+      imageSize.width - textPainter.width - paddingX * 2 - 24,
+      24,
+      textPainter.width + paddingX * 2,
+      textPainter.height + paddingY * 2,
+    );
+    final ui.RRect background = ui.RRect.fromRectAndRadius(
+      backgroundRect,
+      const ui.Radius.circular(6),
+    );
+
+    canvas.drawRRect(
+      background,
+      ui.Paint()..color = material.Colors.black.withValues(alpha: 0.38),
+    );
+    canvas.drawRRect(
+      background,
+      ui.Paint()
+        ..color = material.Colors.white.withValues(alpha: 0.18)
+        ..style = ui.PaintingStyle.stroke
+        ..strokeWidth = 1,
+    );
+    textPainter.paint(
+      canvas,
+      ui.Offset(backgroundRect.left + paddingX, backgroundRect.top + paddingY),
+    );
+
+    final ui.Picture picture = recorder.endRecording();
+    return picture.toImage(screenshot.width, screenshot.height);
+  }
+
+  String _formatFileTimestamp(DateTime value) {
+    return '${value.year.toString().padLeft(4, '0')}'
+        '${value.month.toString().padLeft(2, '0')}'
+        '${value.day.toString().padLeft(2, '0')}_'
+        '${value.hour.toString().padLeft(2, '0')}'
+        '${value.minute.toString().padLeft(2, '0')}'
+        '${value.second.toString().padLeft(2, '0')}';
+  }
+
+  String _formatReadableTimestamp(DateTime value) {
+    return '${value.year.toString().padLeft(4, '0')}-'
+        '${value.month.toString().padLeft(2, '0')}-'
+        '${value.day.toString().padLeft(2, '0')} '
+        '${value.hour.toString().padLeft(2, '0')}:'
+        '${value.minute.toString().padLeft(2, '0')}:'
+        '${value.second.toString().padLeft(2, '0')}';
+  }
+
+  void _showInfoBar({
+    required String title,
+    String? content,
+    InfoBarSeverity severity = InfoBarSeverity.info,
+  }) {
+    if (!mounted) return;
+
+    displayInfoBar(
+      context,
+      alignment: Alignment.topRight,
+      duration: const Duration(seconds: 4),
+      builder: (context, close) => InfoBar(
+        title: Text(title),
+        content: content == null ? null : Text(content),
+        severity: severity,
+        isLong: true,
+        onClose: close,
       ),
     );
   }
@@ -822,12 +1597,152 @@ class _MyHomePageState extends State<MyHomePage> {
     _applyFrequencyChange();
   }
 
+  void _setFullSpan() {
+    _lastFrequencyEditMode = FrequencyEditMode.startStop;
+    setState(() {
+      _confirmedStartHz = _fullSpanStartHz;
+      _confirmedStopHz = _fullSpanStopHz;
+      _syncFrequencyFieldsFromConfirmed();
+    });
+    _updateRbwField();
+    _updateVbwField();
+    _applyFrequencyChange();
+  }
+
+  void _setZeroSpan() {
+    _lastFrequencyEditMode = FrequencyEditMode.startStop;
+    final centerHz = _getCurrentCenterFreq();
+    setState(() {
+      _confirmedStartHz = centerHz;
+      _confirmedStopHz = centerHz;
+      _syncFrequencyFieldsFromConfirmed();
+    });
+    _updateRbwField();
+    _updateVbwField();
+    _applyFrequencyChange();
+  }
+
   void _sendAmplitudeConfig() {
+    if (_suppressPresetDeviceUpdates) return;
     final double refLevel = double.tryParse(refLevelController.text) ?? 0;
     _protocol.setAmplitude(refLevel, 0, 0);
   }
 
+  String _formatRefLevel(double value) {
+    if (value == value.roundToDouble()) {
+      return value.toStringAsFixed(0);
+    }
+    return value.toStringAsFixed(2).replaceFirst(RegExp(r'\.?0+$'), '');
+  }
+
+  void _stepRefLevel(double deltaDbm) {
+    final double current =
+        double.tryParse(refLevelController.text.trim()) ?? 0.0;
+    final String nextText = _formatRefLevel(current + deltaDbm);
+    setState(() {
+      refLevelController.text = nextText;
+      refLevelController.selection =
+          TextSelection.collapsed(offset: nextText.length);
+    });
+    _sendAmplitudeConfig();
+  }
+
+  void _showPresetFlyout() {
+    _presetFlyoutController.showFlyout(
+      builder: (context) => FlyoutContent(
+        child: SizedBox(
+          width: 320,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: _measurementPresets
+                .map(
+                  (preset) => ListTile(
+                    title: Text(preset.name),
+                    subtitle: Text(preset.description),
+                    onPressed: () {
+                      Navigator.pop(context);
+                      _applyPreset(preset);
+                    },
+                  ),
+                )
+                .toList(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _applyPreset(MeasurementPreset preset) async {
+    _measurementConfigGeneration++;
+    _continuousSweepTimer?.cancel();
+    _spectrumRequestTimeoutTimer?.cancel();
+    _sweepAssembleTimer?.cancel();
+    _measurementConfigInFlight = false;
+    _spectrumRequestInFlight = false;
+    _awaitingTimeoutStatus = false;
+    _acceptSpectrumData = false;
+    _lastMeasurementConfigApplied = false;
+    _protocol.stopSweep();
+
+    _suppressBandwidthListener = true;
+    _suppressPresetDeviceUpdates = true;
+    try {
+      setState(() {
+        _sweepMode = preset.sweepMode;
+        _isContinuousSweepRunning = false;
+        _confirmedStartHz = preset.startHz;
+        _confirmedStopHz = preset.stopHz;
+        _lastFrequencyEditMode = FrequencyEditMode.startStop;
+        _syncFrequencyFieldsFromConfirmed();
+        rbwMode.value = preset.rbwMode;
+        vbwMode.value = preset.vbwMode;
+        detectMode.value = preset.detectMode;
+        refLevelController.text = _formatRefLevel(preset.refLevelDbm);
+        scalePerGridController.text = _formatRefLevel(preset.scalePerGridDb);
+        pointCountController.text = preset.pointCount.toString();
+        sweepSpeed.value = preset.sweepSpeedHz;
+      });
+      _updateRbwField();
+      _updateVbwField();
+    } finally {
+      _suppressBandwidthListener = false;
+      _suppressPresetDeviceUpdates = false;
+    }
+
+    _clearSpectrumDisplay();
+
+    if (!_serialManager.isConnected) {
+      _showInfoBar(
+        title: '已应用${preset.name}',
+        content: '界面参数已更新，设备未连接，未下发配置。',
+        severity: InfoBarSeverity.warning,
+      );
+      return;
+    }
+
+    await _applyMeasurementConfigChange(
+      forceContinuous: false,
+      clearDisplay: true,
+    );
+
+    if (!mounted) return;
+    if (_lastMeasurementConfigApplied) {
+      _showInfoBar(
+        title: '已应用${preset.name}',
+        content: '参数已下发到设备。',
+        severity: InfoBarSeverity.success,
+      );
+    } else {
+      _showInfoBar(
+        title: '${preset.name}未完成下发',
+        content: '设备未响应或配置未确认，请检查串口连接后重试。',
+        severity: InfoBarSeverity.warning,
+      );
+    }
+  }
+
   void _sendVgaGainConfig() {
+    if (_suppressPresetDeviceUpdates) return;
     _protocol.setVgaGainCode(_mapVgaGainStringToCode(vgaGainValue.value));
   }
 
@@ -900,6 +1815,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   void _sendDetectConfig() {
+    if (_suppressPresetDeviceUpdates) return;
     _protocol.setDetect(_mapDetectStringToInt(detectMode.value));
   }
 
@@ -1095,6 +2011,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   void _sendSweepConfig() {
+    if (_suppressPresetDeviceUpdates) return;
     _protocol.setSweep(sweepSpeed.value,
         _sweepMode == SweepMode.standard ? 0 : 1, _getCurrentPointCount());
   }
@@ -1131,6 +2048,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
   int _mapRbwModeStringToInt(String value) {
     switch (value) {
+      case '1 kHz':
+        return 5;
       case '10 kHz':
         return 0;
       case '30 kHz':
@@ -1355,6 +2274,7 @@ class _MyHomePageState extends State<MyHomePage> {
     final generation = ++_measurementConfigGeneration;
     final shouldContinue = forceContinuous ?? _isContinuousSweepRunning;
     _measurementConfigInFlight = true;
+    _lastMeasurementConfigApplied = false;
     _continuousSweepTimer?.cancel();
     _spectrumRequestTimeoutTimer?.cancel();
     _spectrumRequestInFlight = false;
@@ -1389,6 +2309,7 @@ class _MyHomePageState extends State<MyHomePage> {
       _acceptSpectrumData = false;
       return;
     }
+    _lastMeasurementConfigApplied = true;
     await Future.delayed(const Duration(milliseconds: 40));
     _protocol.resetReceiveBuffer();
     if (!mounted ||
@@ -1428,27 +2349,24 @@ class _MyHomePageState extends State<MyHomePage> {
             mainAxisSize: MainAxisSize.min,
             children: [
               ListTile(
-                title: const Text('标准模式'),
-                subtitle: const Text('分段扫描，显示扫频进度（大扫宽推荐）'),
-                trailing: _sweepMode == SweepMode.standard
+                title: const Text('频谱模式'),
+                subtitle: const Text('标准扫频显示与测量'),
+                trailing: _measurementMode == MeasurementMode.spectrum
                     ? const Icon(FluentIcons.check_mark)
                     : const SizedBox.shrink(),
                 onPressed: () {
-                  setState(() {
-                    _sweepMode = SweepMode.standard;
-                    _spectrumData.clear();
-                  });
+                  _switchMeasurementMode(MeasurementMode.spectrum);
                   Navigator.pop(context);
                 },
               ),
               ListTile(
-                title: const Text('实时模式'),
-                subtitle: const Text('全帧实时刷新（小扫宽推荐）'),
-                trailing: _sweepMode == SweepMode.realTime
+                title: const Text('相位噪声'),
+                subtitle: const Text('1 kHz - 1 MHz offset，显示 dBc/Hz 曲线'),
+                trailing: _measurementMode == MeasurementMode.phaseNoise
                     ? const Icon(FluentIcons.check_mark)
                     : const SizedBox.shrink(),
                 onPressed: () {
-                  setState(() => _sweepMode = SweepMode.realTime);
+                  _switchMeasurementMode(MeasurementMode.phaseNoise);
                   Navigator.pop(context);
                 },
               ),
@@ -1513,6 +2431,903 @@ class _MyHomePageState extends State<MyHomePage> {
         _formatFreq(clampedFreq, _markerFreqUnit.value);
   }
 
+  void _switchMeasurementMode(MeasurementMode mode) {
+    if (_measurementMode == mode) return;
+    if (mode == MeasurementMode.phaseNoise) {
+      _stopContinuousSweep();
+      _acceptSpectrumData = false;
+      _clearSpectrumDisplay();
+      _clearPhaseNoiseShellData();
+    } else {
+      _stopContinuousSweep();
+      _clearPhaseNoiseShellData();
+      _acceptSpectrumData = true;
+      _sweepMode = SweepMode.standard;
+    }
+    setState(() {
+      _measurementMode = mode;
+    });
+  }
+
+  void _clearPhaseNoiseShellData() {
+    _phaseNoiseDemoTimer?.cancel();
+    _phaseNoiseRawTrace.clear();
+    _phaseNoiseAverageTrace.clear();
+    _phaseNoiseTrace = const PhaseNoiseTrace.empty();
+    _phaseNoiseMarker = null;
+    _phaseNoiseCompletedAverages = 0;
+    _phaseNoiseLivePoints.clear();
+    _phaseNoiseDataTraceId = null;
+    _phaseNoiseTraceId = 0;
+    _phaseNoisePlannedTotalPoints = 0;
+    _phaseNoiseReceivedPoints = 0;
+    _phaseNoiseCurrentIndex = -1;
+    _phaseNoiseAverageIndex = 0;
+    _phaseNoiseElapsedMs = 0;
+    _phaseNoiseWarningCode = 0;
+    _phaseNoiseErrorCode = 0;
+    _phaseNoiseCurrentOffsetHz = 0;
+    _phaseNoiseCurrentRbwHz = 0;
+    _phaseNoiseNominalCarrierHz = null;
+    _phaseNoiseMeasuredCarrierHz = null;
+    _phaseNoiseCarrierLevelDbm = null;
+    _phaseNoiseRunning = false;
+    _phaseNoiseComplete = false;
+    _phaseNoiseUsingDemo = false;
+    _phaseNoiseStateText = 'Idle';
+  }
+
+  PhaseNoiseConfig _buildCurrentPhaseNoiseConfig() {
+    final startOffsetHz = _parseFreq(
+          _phaseNoiseStartOffsetController.text,
+          _phaseNoiseStartOffsetUnit.value,
+        ) ??
+        _phaseNoiseConfig.startOffsetHz;
+    final stopOffsetHz = _parseFreq(
+          _phaseNoiseStopOffsetController.text,
+          _phaseNoiseStopOffsetUnit.value,
+        ) ??
+        _phaseNoiseConfig.stopOffsetHz;
+    final averageTarget =
+        int.tryParse(_phaseNoiseAverageCountController.text.trim()) ??
+            _phaseNoiseConfig.averageTarget;
+    final manualCarrierHz = _parseFreq(
+      _phaseNoiseCarrierController.text,
+      _phaseNoiseCarrierUnit.value,
+    );
+    final carrierSearchSpanHz = _parseFreq(
+          _phaseNoiseCarrierSearchSpanController.text,
+          _phaseNoiseCarrierSearchSpanUnit.value,
+        ) ??
+        _phaseNoiseConfig.carrierSearchSpanHz;
+    final minimumCarrierLevelDbm = double.tryParse(
+          _phaseNoiseMinimumCarrierLevelController.text.trim(),
+        ) ??
+        _phaseNoiseConfig.minimumCarrierLevelDbm;
+
+    return PhaseNoiseConfig(
+      carrierMode: _phaseNoiseCarrierMode,
+      manualCarrierHz: _phaseNoiseCarrierMode == PhaseNoiseCarrierMode.manual
+          ? manualCarrierHz
+          : null,
+      nominalCarrierHz: _resolvePhaseNoiseNominalCarrierHz(
+        manualCarrierHz: manualCarrierHz,
+      ),
+      startOffsetHz:
+          startOffsetHz > 0 ? startOffsetHz : _phaseNoiseConfig.startOffsetHz,
+      stopOffsetHz: stopOffsetHz >= startOffsetHz
+          ? stopOffsetHz
+          : _phaseNoiseConfig.stopOffsetHz,
+      rbwHz: _phaseNoiseConfig.rbwHz,
+      enbwHz: _phaseNoiseConfig.enbwHz,
+      averageTarget: averageTarget.clamp(1, 1000),
+      pointsPerDecade: _phaseNoiseDensityPreset.pointsPerDecade,
+      sidebandMode: _phaseNoiseConfig.sidebandMode,
+      carrierSearchSpanHz: carrierSearchSpanHz > 0
+          ? carrierSearchSpanHz
+          : _phaseNoiseConfig.carrierSearchSpanHz,
+      minimumCarrierLevelDbm: minimumCarrierLevelDbm,
+      manualCarrierSearchWindowHz:
+          _phaseNoiseConfig.manualCarrierSearchWindowHz,
+    );
+  }
+
+  double _resolvePhaseNoiseNominalCarrierHz({double? manualCarrierHz}) {
+    if (_phaseNoiseCarrierMode == PhaseNoiseCarrierMode.manual) {
+      return manualCarrierHz ?? 0.0;
+    }
+    final centerHz = _getCurrentCenterFreq();
+    return centerHz > 0 ? centerHz : 0.0;
+  }
+
+  PhaseNoiseTrace _buildDemoPhaseNoiseTrace({
+    bool resetAverage = false,
+    int sweepCount = 1,
+  }) {
+    final config = _buildCurrentPhaseNoiseConfig();
+    final processor = PhaseNoiseProcessor(config);
+    var trace = resetAverage ? const PhaseNoiseTrace.empty() : _phaseNoiseTrace;
+
+    for (var i = 0; i < sweepCount; i++) {
+      final sweepIndex = trace.completedAverages + i + 1;
+      final carrierHz = config.manualCarrierHz ?? _getCurrentCenterFreq();
+      const carrierLevelDbm = -6.0;
+      final carrier = PhaseNoiseCarrier(
+        nominalHz: carrierHz,
+        measuredHz: carrierHz,
+        levelDbm: carrierLevelDbm,
+        initialDeltaHz: 0.0,
+        driftHz: 0.0,
+      );
+      trace = processor.processSweep(
+        _buildDemoPhaseNoiseSweep(config, carrier, sweepIndex),
+        carrier: carrier,
+        previousTrace: trace,
+      );
+    }
+
+    return trace;
+  }
+
+  List<PhaseNoiseSweepPoint> _buildDemoPhaseNoiseSweep(
+    PhaseNoiseConfig config,
+    PhaseNoiseCarrier carrier,
+    int sweepIndex,
+  ) {
+    final pointCount = config.estimatedPointCount;
+    final minLog = math.log(config.startOffsetHz) / math.ln10;
+    final maxLog = math.log(config.stopOffsetHz) / math.ln10;
+    final enbwDb = 10.0 * math.log(config.effectiveEnbwHz) / math.ln10;
+    final points = <PhaseNoiseSweepPoint>[
+      PhaseNoiseSweepPoint(
+        frequencyHz: carrier.measuredHz,
+        powerDbm: carrier.levelDbm,
+      ),
+    ];
+
+    for (var i = 0; i < pointCount; i++) {
+      final ratio = pointCount == 1 ? 0.0 : i / (pointCount - 1);
+      final logOffset = minLog + ratio * (maxLog - minLog);
+      final offsetHz = math.pow(10.0, logOffset).toDouble();
+      final decadeFromStart = logOffset - minLog;
+      final ripple = 2.2 * math.sin(logOffset * 5.4 + sweepIndex * 0.73) +
+          0.9 * math.cos(logOffset * 13.0 + sweepIndex * 0.31);
+      final slopeDbcHz = -86.0 - 15.5 * decadeFromStart;
+      final dbcHz = slopeDbcHz + ripple;
+      points.add(
+        PhaseNoiseSweepPoint(
+          frequencyHz: carrier.measuredHz + offsetHz,
+          powerDbm: carrier.levelDbm + dbcHz + enbwDb,
+        ),
+      );
+    }
+
+    return points;
+  }
+
+  void _setPhaseNoiseTrace(PhaseNoiseTrace trace) {
+    _phaseNoiseTrace = trace;
+    _phaseNoiseRawTrace
+      ..clear()
+      ..addAll(
+        trace.rawPoints.map((p) => FlSpot(p.offsetHz, p.dbcHz)),
+      );
+    _phaseNoiseAverageTrace
+      ..clear()
+      ..addAll(
+        trace.averagePoints.map((p) => FlSpot(p.offsetHz, p.dbcHz)),
+      );
+    _phaseNoiseCompletedAverages = trace.completedAverages;
+  }
+
+  PhaseNoisePoint? _nearestPhaseNoiseMarkerPoint() {
+    final marker = _phaseNoiseMarker;
+    if (marker == null) return null;
+
+    final points = _phaseNoiseTraceDisplay == PhaseNoiseTraceDisplay.raw
+        ? _phaseNoiseTrace.rawPoints
+        : (_phaseNoiseTrace.averagePoints.isNotEmpty
+            ? _phaseNoiseTrace.averagePoints
+            : _phaseNoiseTrace.rawPoints);
+    final validPoints = points
+        .where(
+          (point) =>
+              point.offsetHz > 0 && point.dbcHz.isFinite && point.valid,
+        )
+        .toList(growable: false);
+    if (validPoints.isEmpty) return null;
+
+    return validPoints.reduce(
+      (best, point) =>
+          (point.offsetHz - marker.offsetHz).abs() <
+                  (best.offsetHz - marker.offsetHz).abs()
+              ? point
+              : best,
+    );
+  }
+
+  void _runSinglePhaseNoiseDemoSweep({bool resetAverage = false}) {
+    _phaseNoiseDemoTimer?.cancel();
+    setState(() {
+      _phaseNoiseUsingDemo = true;
+      _phaseNoiseRunning = false;
+      _phaseNoiseComplete = true;
+      _phaseNoiseStateText = 'Demo complete';
+      _phaseNoiseElapsedMs = 0;
+      _setPhaseNoiseTrace(
+        _buildDemoPhaseNoiseTrace(resetAverage: resetAverage),
+      );
+      _phaseNoisePlannedTotalPoints = _phaseNoiseTrace.rawPoints.length;
+      _phaseNoiseReceivedPoints = _phaseNoiseTrace.rawPoints.length;
+      _phaseNoiseAverageIndex = _phaseNoiseTrace.completedAverages;
+      _phaseNoiseCurrentIndex = _phaseNoiseReceivedPoints - 1;
+    });
+  }
+
+  void _startPhaseNoiseDemoContinuous() {
+    _phaseNoiseDemoTimer?.cancel();
+    setState(() {
+      _phaseNoiseUsingDemo = true;
+      _phaseNoiseRunning = true;
+      _phaseNoiseComplete = false;
+      _phaseNoiseStateText = 'Demo continuous';
+      _setPhaseNoiseTrace(
+        _buildDemoPhaseNoiseTrace(resetAverage: true),
+      );
+      _phaseNoisePlannedTotalPoints = _phaseNoiseTrace.rawPoints.length;
+      _phaseNoiseReceivedPoints = _phaseNoiseTrace.rawPoints.length;
+      _phaseNoiseAverageIndex = _phaseNoiseTrace.completedAverages;
+      _phaseNoiseCurrentIndex = _phaseNoiseReceivedPoints - 1;
+    });
+    _phaseNoiseDemoTimer = Timer.periodic(
+      const Duration(milliseconds: 800),
+      (_) {
+        if (!mounted) return;
+        setState(() {
+          _setPhaseNoiseTrace(_buildDemoPhaseNoiseTrace());
+          _phaseNoisePlannedTotalPoints = _phaseNoiseTrace.rawPoints.length;
+          _phaseNoiseReceivedPoints = _phaseNoiseTrace.rawPoints.length;
+          _phaseNoiseAverageIndex = _phaseNoiseTrace.completedAverages;
+          _phaseNoiseCurrentIndex = _phaseNoiseReceivedPoints - 1;
+        });
+      },
+    );
+  }
+
+  void _stopPhaseNoiseDemoContinuous() {
+    _phaseNoiseDemoTimer?.cancel();
+    _phaseNoiseDemoTimer = null;
+  }
+
+  void _resetPhaseNoiseAcquisitionState({
+    required PhaseNoiseConfig config,
+    required bool demo,
+    required String stateText,
+    bool clearTrace = true,
+  }) {
+    _phaseNoiseDemoTimer?.cancel();
+    if (clearTrace) {
+      _phaseNoiseLivePoints.clear();
+      _phaseNoiseDataTraceId = null;
+      _phaseNoiseTrace = const PhaseNoiseTrace.empty();
+      _phaseNoiseRawTrace.clear();
+      _phaseNoiseAverageTrace.clear();
+      _phaseNoiseMarker = null;
+      _phaseNoiseCompletedAverages = 0;
+    }
+    _phaseNoiseTraceId = 0;
+    _phaseNoisePlannedTotalPoints = config.estimatedPointCount;
+    _phaseNoiseReceivedPoints = 0;
+    _phaseNoiseCurrentIndex = -1;
+    _phaseNoiseAverageIndex = 0;
+    _phaseNoiseElapsedMs = 0;
+    _phaseNoiseWarningCode = 0;
+    _phaseNoiseErrorCode = 0;
+    _phaseNoiseCurrentOffsetHz = 0;
+    _phaseNoiseCurrentRbwHz = 0;
+    _phaseNoiseNominalCarrierHz = config.protocolNominalCarrierHz > 0
+        ? config.protocolNominalCarrierHz
+        : null;
+    _phaseNoiseMeasuredCarrierHz = null;
+    _phaseNoiseCarrierLevelDbm = null;
+    _phaseNoiseRunning = true;
+    _phaseNoiseComplete = false;
+    _phaseNoiseUsingDemo = demo;
+    _phaseNoiseStateText = stateText;
+  }
+
+  Future<void> _startSinglePhaseNoiseMeasurement() async {
+    await _startPhaseNoiseMeasurement(continuous: false);
+  }
+
+  Future<void> _startContinuousPhaseNoiseMeasurement() async {
+    await _startPhaseNoiseMeasurement(continuous: true);
+  }
+
+  void _startLocalPhaseNoiseDemo({
+    required PhaseNoiseConfig config,
+    required bool continuous,
+    required String title,
+    required String content,
+  }) {
+    _showInfoBar(
+      title: title,
+      content: content,
+      severity: InfoBarSeverity.warning,
+    );
+    setState(() {
+      _resetPhaseNoiseAcquisitionState(
+        config: config,
+        demo: true,
+        stateText: 'Demo',
+      );
+    });
+    if (continuous) {
+      _startPhaseNoiseDemoContinuous();
+    } else {
+      _runSinglePhaseNoiseDemoSweep(resetAverage: true);
+    }
+  }
+
+  Future<void> _startPhaseNoiseMeasurement({required bool continuous}) async {
+    if (_phaseNoiseCommandInFlight) return;
+    final config = _buildCurrentPhaseNoiseConfig();
+    if (!config.isValid || config.protocolNominalCarrierHz <= 0) {
+      _showInfoBar(
+        title: 'Phase noise config invalid',
+        content: 'Carrier and offset settings must be positive.',
+        severity: InfoBarSeverity.warning,
+      );
+      return;
+    }
+
+    if (!_serialManager.isConnected) {
+      _startLocalPhaseNoiseDemo(
+        config: config,
+        continuous: continuous,
+        title: 'Phase noise demo started',
+        content: 'Serial port is not connected; running local demo trace.',
+      );
+      return;
+    }
+
+    setState(() {
+      _phaseNoiseCommandInFlight = true;
+      _resetPhaseNoiseAcquisitionState(
+        config: config,
+        demo: false,
+        stateText: continuous ? 'Starting continuous' : 'Starting single',
+        clearTrace: false,
+      );
+    });
+
+    var started = false;
+    var configOk = false;
+    configOk = await _protocol.setPhaseNoiseConfigConfirmed(
+      config,
+      continuous: continuous,
+    );
+    if (mounted && configOk) {
+      started = await _protocol.startPhaseNoiseConfirmed();
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _phaseNoiseCommandInFlight = false;
+    });
+
+    if (started) {
+      _protocol.getPhaseNoiseStatus();
+      setState(() {
+        _phaseNoiseRunning = true;
+        _phaseNoiseComplete = false;
+        _phaseNoiseUsingDemo = false;
+        _phaseNoiseStateText = 'Searching carrier';
+      });
+      return;
+    }
+
+    _protocol.getPhaseNoiseStatus();
+    _showInfoBar(
+      title: configOk
+          ? 'Phase noise start rejected'
+          : 'Phase noise config rejected',
+      content: 'Requested device status; local demo was not started.',
+      severity: InfoBarSeverity.warning,
+    );
+    setState(() {
+      _phaseNoiseRunning = false;
+      _phaseNoiseComplete = false;
+      _phaseNoiseUsingDemo = false;
+      _phaseNoiseStateText = configOk
+          ? 'Start rejected; reading status'
+          : 'Config rejected; reading status';
+    });
+  }
+
+  Future<void> _stopPhaseNoiseMeasurement() async {
+    if (_phaseNoiseCommandInFlight) return;
+    _stopPhaseNoiseDemoContinuous();
+    setState(() {
+      _phaseNoiseCommandInFlight = true;
+      _phaseNoiseRunning = false;
+      _phaseNoiseStateText = _phaseNoiseUsingDemo ? 'Demo stopped' : 'Stopping';
+    });
+
+    var stopped = !_serialManager.isConnected;
+    if (_serialManager.isConnected) {
+      stopped = await _protocol.stopPhaseNoiseConfirmed();
+      if (mounted) {
+        _protocol.getPhaseNoiseStatus();
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _phaseNoiseCommandInFlight = false;
+      _phaseNoiseRunning = false;
+      if (!stopped) {
+        _phaseNoiseStateText = 'Stop not acknowledged';
+      } else if (!_phaseNoiseComplete) {
+        _phaseNoiseStateText =
+            _phaseNoiseUsingDemo ? 'Demo stopped' : 'Stopped';
+      }
+    });
+  }
+
+  Future<void> _exportPhaseNoiseCsv() async {
+    if (_phaseNoiseTrace.rawPoints.isEmpty &&
+        _phaseNoiseTrace.averagePoints.isEmpty) {
+      _showInfoBar(
+        title: 'Phase noise CSV not exported',
+        content: 'No phase-noise trace data is available.',
+        severity: InfoBarSeverity.warning,
+      );
+      return;
+    }
+
+    try {
+      final directoryPath = _screenshotDirController.text.trim().isEmpty
+          ? _defaultScreenshotDirectory
+          : _screenshotDirController.text.trim();
+      final directory = Directory(directoryPath);
+      await directory.create(recursive: true);
+      final savedAt = DateTime.now();
+      final file = File(
+        '${directory.path}${Platform.pathSeparator}'
+        'phase_noise_${_formatFileTimestamp(savedAt)}.csv',
+      );
+      await file.writeAsString(
+        PhaseNoiseCsvExporter.buildCsv(
+          trace: _phaseNoiseTrace,
+          config: _buildCurrentPhaseNoiseConfig(),
+        ),
+        flush: true,
+      );
+      _showInfoBar(
+        title: 'Phase noise CSV exported',
+        content: file.path,
+        severity: InfoBarSeverity.success,
+      );
+    } catch (error) {
+      _showInfoBar(
+        title: 'Phase noise CSV export failed',
+        content: error.toString(),
+        severity: InfoBarSeverity.error,
+      );
+    }
+  }
+
+  Widget _buildPhaseNoiseView() {
+    final config = _buildCurrentPhaseNoiseConfig();
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            children: [
+              _buildPhaseNoiseStatusBar(),
+              Expanded(
+                child: Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                  child: PhaseNoiseChart(
+                    trace: _phaseNoiseTrace,
+                    config: config,
+                    traceDisplay: _phaseNoiseTraceDisplay,
+                    minOffsetHz: config.startOffsetHz,
+                    maxOffsetHz: config.stopOffsetHz,
+                    markerEnabled: true,
+                    onMarkerChanged: (marker) {
+                      setState(() {
+                        _phaseNoiseMarker = marker;
+                      });
+                    },
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        _buildPhaseNoiseControlPanel(),
+      ],
+    );
+  }
+
+  Widget _buildPhaseNoiseStatusBar() {
+    final config = _buildCurrentPhaseNoiseConfig();
+    final carrier = _phaseNoiseTrace.carrier;
+    final nominal = _phaseNoiseCarrierMode == PhaseNoiseCarrierMode.manual
+        ? _parseFreq(
+            _phaseNoiseCarrierController.text, _phaseNoiseCarrierUnit.value)
+        : (_phaseNoiseNominalCarrierHz ?? _getCurrentCenterFreq());
+    final measured =
+        carrier?.measuredHz ?? _phaseNoiseMeasuredCarrierHz ?? nominal;
+    final carrierLevel = carrier?.levelDbm ?? _phaseNoiseCarrierLevelDbm;
+    final levelText = carrierLevel == null
+        ? '-- dBm'
+        : '${carrierLevel.toStringAsFixed(2)} dBm';
+    final warningText =
+        _phaseNoiseTrace.warnings.map((warning) => warning.message).join(' | ');
+    final warningLabel = _phaseNoiseWarningCode == 0
+        ? 'None'
+        : _phaseNoiseWarningLabel(_phaseNoiseWarningCode);
+    final elapsedText = _formatPhaseNoiseElapsed(_phaseNoiseElapsedMs);
+    final totalPoints = _phaseNoisePlannedTotalPoints > 0
+        ? _phaseNoisePlannedTotalPoints
+        : config.estimatedPointCount;
+    final avgCurrent = _phaseNoiseAverageIndex > 0
+        ? _phaseNoiseAverageIndex
+        : _phaseNoiseTrace.completedAverages;
+    final runningText = _phaseNoiseRunning ? 'Running' : 'Idle';
+    final indexText =
+        _phaseNoiseCurrentIndex < 0 ? '--' : '${_phaseNoiseCurrentIndex + 1}';
+    final markerPoint = _nearestPhaseNoiseMarkerPoint();
+    final markerOffsetHz = markerPoint?.offsetHz ?? _phaseNoiseMarker?.offsetHz;
+    final markerDbcHz = markerPoint?.dbcHz ?? _phaseNoiseMarker?.dbcHz;
+    final markerRbwHz = markerPoint?.rbwHz ?? _phaseNoiseMarker?.rbwHz;
+    final markerText = markerOffsetHz == null || markerDbcHz == null
+        ? '--'
+        : '${_formatFreqAutoUnit(markerOffsetHz)} '
+            '${markerDbcHz.toStringAsFixed(2)} dBc/Hz';
+    final markerRbwText = markerRbwHz == null
+        ? (_phaseNoiseCurrentRbwHz <= 0
+            ? '--'
+            : _formatFreqAutoUnit(_phaseNoiseCurrentRbwHz.toDouble()))
+        : _formatFreqAutoUnit(markerRbwHz);
+    final pointRbwLabel = markerRbwHz == null ? 'Point RBW' : 'Marker RBW';
+
+    return Container(
+      margin: const EdgeInsets.all(8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      color: const Color(0xFF2A2A2A),
+      child: Wrap(
+        spacing: 24,
+        runSpacing: 8,
+        children: [
+          Text(
+              'Nominal Frequency: ${nominal == null ? '--' : _formatFreqAutoUnit(nominal)}'),
+          Text(
+              'Measured Frequency: ${measured == null ? '--' : _formatFreqAutoUnit(measured)}'),
+          Text('Measured Level: $levelText'),
+          Text(
+            'Measurement: ${_formatFreqAutoUnit(config.startOffsetHz)} - ${_formatFreqAutoUnit(config.stopOffsetHz)}',
+          ),
+          Text(
+            'Average: ${_phaseNoiseTrace.completedAverages}/${config.averageTarget}',
+          ),
+          Text('State: $_phaseNoiseStateText ($runningText)'),
+          Text('Points: $_phaseNoiseReceivedPoints/$totalPoints'),
+          Text('Index: $indexText'),
+          Text('Avg: $avgCurrent/${config.averageTarget}'),
+          Text('Elapsed: $elapsedText'),
+          Text('Warning: $warningLabel'),
+          Text('Trace: ${_phaseNoiseTraceId == 0 ? '--' : _phaseNoiseTraceId}'),
+          Text(
+            'Current: ${_phaseNoiseCurrentOffsetHz <= 0 ? '--' : _formatFreqAutoUnit(_phaseNoiseCurrentOffsetHz.toDouble())}',
+          ),
+          Text(
+            '$pointRbwLabel: $markerRbwText',
+          ),
+          Text(
+            'RBW: ${_formatFreqAutoUnit(config.rbwHz)}',
+          ),
+          Text(
+            'Density: ${config.pointsPerDecade} pts/dec',
+          ),
+          Text(
+            'Marker: $markerText',
+          ),
+          Text(
+            'Initial Delta: ${carrier == null ? '-- Hz' : _formatSignedFreqAutoUnit(carrier.initialDeltaHz)}',
+          ),
+          Text(
+            'Drift: ${carrier == null ? '-- Hz' : _formatFreqAutoUnit(carrier.driftHz.abs())}',
+          ),
+          Text(
+            warningText.isEmpty
+                ? (_phaseNoiseErrorCode == 0
+                    ? 'UNCAL: estimated ENBW'
+                    : 'Error: ${_phaseNoiseErrorLabel(_phaseNoiseErrorCode)}')
+                : 'UNCAL: $warningText',
+            style: const TextStyle(color: material.Color(0xFFFFD166)),
+          ),
+        ].map((text) {
+          return DefaultTextStyle(
+            style: const TextStyle(color: material.Colors.white, fontSize: 12),
+            child: text,
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildPhaseNoiseControlPanel() {
+    final config = _buildCurrentPhaseNoiseConfig();
+    final markerPoint = _nearestPhaseNoiseMarkerPoint();
+    final markerOffsetHz = markerPoint?.offsetHz ?? _phaseNoiseMarker?.offsetHz;
+    final markerDbcHz = markerPoint?.dbcHz ?? _phaseNoiseMarker?.dbcHz;
+    final markerRbwHz = markerPoint?.rbwHz ?? _phaseNoiseMarker?.rbwHz;
+    return Container(
+      width: 320,
+      color: const Color.fromARGB(255, 66, 66, 66),
+      padding: const EdgeInsets.all(8),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expander(
+              header: const Text('Carrier'),
+              content: Column(
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ToggleButton(
+                          checked: _phaseNoiseCarrierMode ==
+                              PhaseNoiseCarrierMode.auto,
+                          onChanged: (_) => setState(() {
+                            _phaseNoiseCarrierMode = PhaseNoiseCarrierMode.auto;
+                          }),
+                          child: const Text('Auto'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: ToggleButton(
+                          checked: _phaseNoiseCarrierMode ==
+                              PhaseNoiseCarrierMode.manual,
+                          onChanged: (_) => setState(() {
+                            _phaseNoiseCarrierMode =
+                                PhaseNoiseCarrierMode.manual;
+                          }),
+                          child: const Text('Manual'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  _buildInputRow(
+                    label: 'Carrier',
+                    controller: _phaseNoiseCarrierController,
+                    unitNotifier: _phaseNoiseCarrierUnit,
+                    units: freqUnits,
+                    enabled:
+                        _phaseNoiseCarrierMode == PhaseNoiseCarrierMode.manual,
+                  ),
+                  const SizedBox(height: 8),
+                  _buildInputRow(
+                    label: 'Search span',
+                    controller: _phaseNoiseCarrierSearchSpanController,
+                    unitNotifier: _phaseNoiseCarrierSearchSpanUnit,
+                    units: freqUnits,
+                    onChanged: () => setState(() {}),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      const SizedBox(
+                        width: 100,
+                        child: Text(
+                          'Trigger/Min level',
+                          style: TextStyle(color: material.Colors.white),
+                        ),
+                      ),
+                      Expanded(
+                        child: TextBox(
+                          controller: _phaseNoiseMinimumCarrierLevelController,
+                          onChanged: (_) => setState(() {}),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      const SizedBox(width: 80, child: Text('dBm')),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            Expander(
+              header: const Text('Offset'),
+              content: Column(
+                children: [
+                  _buildInputRow(
+                    label: 'Start',
+                    controller: _phaseNoiseStartOffsetController,
+                    unitNotifier: _phaseNoiseStartOffsetUnit,
+                    units: freqUnits,
+                  ),
+                  const SizedBox(height: 8),
+                  _buildInputRow(
+                    label: 'Stop',
+                    controller: _phaseNoiseStopOffsetController,
+                    unitNotifier: _phaseNoiseStopOffsetUnit,
+                    units: freqUnits,
+                  ),
+                  const SizedBox(height: 12),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Density',
+                      style: const TextStyle(color: material.Colors.white),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  ComboBox<PhaseNoiseDensityPreset>(
+                    value: _phaseNoiseDensityPreset,
+                    items: PhaseNoiseDensityPreset.values
+                        .where((preset) =>
+                            preset != PhaseNoiseDensityPreset.custom)
+                        .map(
+                          (preset) => ComboBoxItem(
+                            value: preset,
+                            child: Text(
+                              '${preset.label} (${preset.pointsPerDecade})',
+                            ),
+                          ),
+                        )
+                        .toList(growable: false),
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setState(() {
+                        _phaseNoiseDensityPreset = value;
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Points: ${config.estimatedPointCount}  '
+                    'Density: ${config.pointsPerDecade} pts/dec',
+                    style: const TextStyle(color: material.Colors.white70),
+                  ),
+                ],
+              ),
+            ),
+            Expander(
+              header: const Text('Average'),
+              content: Column(
+                children: [
+                  Row(
+                    children: [
+                      const SizedBox(
+                        width: 100,
+                        child: Text(
+                          'Count',
+                          style: TextStyle(color: material.Colors.white),
+                        ),
+                      ),
+                      Expanded(
+                        child: TextBox(
+                          controller: _phaseNoiseAverageCountController,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Completed: $_phaseNoiseCompletedAverages',
+                    style: const TextStyle(color: material.Colors.white70),
+                  ),
+                ],
+              ),
+            ),
+            Expander(
+              header: const Text('Trace'),
+              content: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  ComboBox<PhaseNoiseTraceDisplay>(
+                    value: _phaseNoiseTraceDisplay,
+                    items: const [
+                      ComboBoxItem(
+                        value: PhaseNoiseTraceDisplay.raw,
+                        child: Text('Raw'),
+                      ),
+                      ComboBoxItem(
+                        value: PhaseNoiseTraceDisplay.average,
+                        child: Text('Avg'),
+                      ),
+                      ComboBoxItem(
+                        value: PhaseNoiseTraceDisplay.both,
+                        child: Text('Both'),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setState(() {
+                        _phaseNoiseTraceDisplay = value;
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    markerOffsetHz == null ||
+                            markerDbcHz == null ||
+                            markerRbwHz == null
+                        ? 'Marker: --'
+                        : 'Marker: ${_formatFreqAutoUnit(markerOffsetHz)}  '
+                            '${markerDbcHz.toStringAsFixed(2)} dBc/Hz  '
+                            'RBW ${_formatFreqAutoUnit(markerRbwHz)}',
+                    style: const TextStyle(color: material.Colors.white70),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Density: ${config.pointsPerDecade} pts/dec',
+                    style: const TextStyle(color: material.Colors.white70),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: Button(
+                    onPressed: _phaseNoiseCommandInFlight
+                        ? null
+                        : _startSinglePhaseNoiseMeasurement,
+                    child: Text(
+                      _phaseNoiseCommandInFlight ? 'Busy' : 'Single',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Button(
+                    onPressed: _phaseNoiseCommandInFlight
+                        ? null
+                        : _startContinuousPhaseNoiseMeasurement,
+                    child: const Text('Continuous'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Button(
+                    onPressed: _phaseNoiseCommandInFlight
+                        ? null
+                        : _stopPhaseNoiseMeasurement,
+                    child: const Text('Stop'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Button(
+              onPressed: _phaseNoiseCommandInFlight
+                  ? null
+                  : () => _runSinglePhaseNoiseDemoSweep(resetAverage: true),
+              child: const Text('Demo'),
+            ),
+            const SizedBox(height: 8),
+            Button(
+              onPressed: _exportPhaseNoiseCsv,
+              child: const Text('Export CSV'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final double startFreq = _confirmedStartHz;
@@ -1557,12 +3372,12 @@ class _MyHomePageState extends State<MyHomePage> {
               label: const Text('系统'),
               onPressed: () {}),
           CommandBarButton(
-              icon: const Icon(FluentIcons.refresh),
+              icon: FlyoutTarget(
+                controller: _presetFlyoutController,
+                child: const Icon(FluentIcons.refresh),
+              ),
               label: const Text('预设'),
-              onPressed: () {
-                _protocol.reset();
-                _spectrumData.clear();
-              }),
+              onPressed: _showPresetFlyout),
           CommandBarButton(
             icon: const Icon(FluentIcons.play),
             label: const Text('单次'),
@@ -1589,9 +3404,10 @@ class _MyHomePageState extends State<MyHomePage> {
               label: const Text('回放'),
               onPressed: () {}),
           CommandBarButton(
-              icon: const Icon(FluentIcons.camera),
-              label: const Text('截图'),
-              onPressed: () {}),
+            icon: const Icon(FluentIcons.camera),
+            label: const Text('截图'),
+            onPressed: _screenshotInProgress ? null : _showScreenshotSettings,
+          ),
           const CommandBarSeparator(),
           CommandBarButton(
             icon: FlyoutTarget(
@@ -1631,473 +3447,553 @@ class _MyHomePageState extends State<MyHomePage> {
       content: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: Acrylic(
-              tint: material.Colors.black.withOpacity(0.8),
-              child: SpectrumChart(
-                data: _isZeroSpan ? _zeroSpanData : _spectrumData,
-                minFreq: _isZeroSpan ? 0.0 : startFreq,
-                maxFreq: _isZeroSpan
-                    ? (_zeroSpanData.isNotEmpty
-                        ? _zeroSpanData.last.x + 1.0
-                        : 10.0)
-                    : stopFreq,
-                minDbm: minDbmDisplay,
-                maxDbm: maxDbmDisplay,
-                scalePerGrid: scalePerGrid,
-                startFreqStr: _formatFreqAutoUnit(startFreq),
-                stopFreqStr: _formatFreqAutoUnit(stopFreq),
-                centerFreqStr: _formatFreqAutoUnit(centerFreq),
-                spanStr: _formatFreqAutoUnit(span),
-                sweepSpeedStr:
-                    '${_currentSweepSpeed.toStringAsFixed(1)} packets/s',
-                markers: _markers,
-                markersDraggable: !autoPeakEnabled.value,
-                onMarkerDragUpdate: _updateMarkerFreq,
-                isZeroSpan: _isZeroSpan,
-                zeroSpanFreqStr:
-                    _isZeroSpan ? _formatFreqAutoUnit(_confirmedStartHz) : '',
-                zeroSpanElapsedStr: _isZeroSpan && _zeroSpanStartTime != null
-                    ? '${DateTime.now().difference(_zeroSpanStartTime!).inSeconds} s'
-                    : '',
+          if (_measurementMode == MeasurementMode.phaseNoise)
+            Expanded(child: _buildPhaseNoiseView())
+          else ...[
+            Expanded(
+              child: RepaintBoundary(
+                key: _screenshotBoundaryKey,
+                child: Acrylic(
+                  tint: material.Colors.black.withValues(alpha: 0.8),
+                  child: SpectrumChart(
+                    data: _isZeroSpan ? _zeroSpanData : _spectrumData,
+                    minFreq: _isZeroSpan ? 0.0 : startFreq,
+                    maxFreq: _isZeroSpan
+                        ? (_zeroSpanData.isNotEmpty
+                            ? _zeroSpanData.last.x + 1.0
+                            : 10.0)
+                        : stopFreq,
+                    minDbm: minDbmDisplay,
+                    maxDbm: maxDbmDisplay,
+                    scalePerGrid: scalePerGrid,
+                    startFreqStr: _formatFreqAutoUnit(startFreq),
+                    stopFreqStr: _formatFreqAutoUnit(stopFreq),
+                    centerFreqStr: _formatFreqAutoUnit(centerFreq),
+                    spanStr: _formatFreqAutoUnit(span),
+                    sweepSpeedStr:
+                        '${_currentSweepSpeed.toStringAsFixed(1)} packets/s',
+                    markers: _markers,
+                    markersDraggable: !autoPeakEnabled.value,
+                    onMarkerDragUpdate: _updateMarkerFreq,
+                    isZeroSpan: _isZeroSpan,
+                    zeroSpanFreqStr: _isZeroSpan
+                        ? _formatFreqAutoUnit(_confirmedStartHz)
+                        : '',
+                    zeroSpanElapsedStr: _isZeroSpan &&
+                            _zeroSpanStartTime != null
+                        ? '${DateTime.now().difference(_zeroSpanStartTime!).inSeconds} s'
+                        : '',
+                  ),
+                ),
               ),
             ),
-          ),
-          Container(
-            width: 300,
-            color: const Color.fromARGB(255, 66, 66, 66),
-            padding: const EdgeInsets.all(8),
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Expander(
-                    header: const Text('频率'),
-                    content: Column(
-                      children: [
-                        _buildInputRow(
-                            label: '起始频率：',
-                            controller: startFreqController,
-                            unitNotifier: startFreqUnit,
-                            units: freqUnits,
-                            onChanged: () => _lastFrequencyEditMode =
-                                FrequencyEditMode.startStop,
-                            onSubmitted: _updateFreqFromStartStop),
-                        const SizedBox(height: 8),
-                        _buildInputRow(
-                            label: '终止频率：',
-                            controller: stopFreqController,
-                            unitNotifier: stopFreqUnit,
-                            units: freqUnits,
-                            onChanged: () => _lastFrequencyEditMode =
-                                FrequencyEditMode.startStop,
-                            onSubmitted: _updateFreqFromStartStop),
-                        const SizedBox(height: 8),
-                        _buildInputRow(
-                            label: '中心频率：',
-                            controller: centerFreqController,
-                            unitNotifier: centerFreqUnit,
-                            units: freqUnits,
-                            onChanged: () => _lastFrequencyEditMode =
-                                FrequencyEditMode.centerSpan,
-                            onSubmitted: _updateFreqFromCenterSpan),
-                        const SizedBox(height: 8),
-                        _buildInputRow(
-                            label: '扫描宽度：',
-                            controller: spanController,
-                            unitNotifier: spanUnit,
-                            units: freqUnits,
-                            onChanged: () => _lastFrequencyEditMode =
-                                FrequencyEditMode.centerSpan,
-                            onSubmitted: _updateFreqFromCenterSpan),
-                      ],
-                    ),
-                  ),
-                  Expander(
-                    header: const Text('幅度'),
-                    content: Column(
-                      children: [
-                        Row(
-                          children: [
-                            const SizedBox(
-                                width: 100,
-                                child: Text('参考电平：',
-                                    style: TextStyle(
-                                        color: material.Colors.white))),
-                            Expanded(
-                                child: TextBox(
-                                    controller: refLevelController,
-                                    onSubmitted: (v) =>
-                                        _sendAmplitudeConfig())),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  Expander(
-                    header: const Text('RF 前端'),
-                    content: _buildRfFrontendPanel(),
-                  ),
-                  Expander(
-                    header: const Text('BW'),
-                    content: Column(
-                      children: [
-                        Row(
-                          children: [
-                            const SizedBox(
-                                width: 100,
-                                child: Text('RBW模式：',
-                                    style: TextStyle(
-                                        color: material.Colors.white))),
-                            Expanded(
-                              child: ValueListenableBuilder<String>(
-                                valueListenable: rbwMode,
-                                builder: (context, value, child) =>
-                                    ComboBox<String>(
-                                  value: value,
-                                  isExpanded: true,
-                                  items: [
-                                    '10 kHz',
-                                    '30 kHz',
-                                    '100 kHz',
-                                    '300 kHz',
-                                    '1 MHz'
-                                  ]
-                                      .map((o) => ComboBoxItem<String>(
-                                          value: o, child: Text(o)))
-                                      .toList(),
-                                  onChanged: (nv) =>
-                                      nv != null ? rbwMode.value = nv : null,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        ValueListenableBuilder<String>(
-                          valueListenable: rbwMode,
-                          builder: (context, mode, child) {
-                            const bool isEnabled = false;
-                            return _buildInputRow(
-                              label: 'RBW：',
-                              controller: rbwController,
-                              unitNotifier: rbwUnit,
+            Container(
+              width: 300,
+              color: const Color.fromARGB(255, 66, 66, 66),
+              padding: const EdgeInsets.all(8),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expander(
+                      header: const Text('频率'),
+                      content: Column(
+                        children: [
+                          _buildInputRow(
+                              label: '起始频率：',
+                              controller: startFreqController,
+                              unitNotifier: startFreqUnit,
                               units: freqUnits,
-                              enabled: isEnabled,
-                              onSubmitted: null,
-                            );
-                          },
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            const SizedBox(
-                                width: 100,
-                                child: Text('VBW模式：',
-                                    style: TextStyle(
-                                        color: material.Colors.white))),
-                            Expanded(
-                              child: ValueListenableBuilder<String>(
-                                valueListenable: vbwMode,
-                                builder: (context, value, child) =>
-                                    ComboBox<String>(
-                                  value: value,
-                                  isExpanded: true,
-                                  items: [
-                                    '手动',
-                                    'VBW=RBW',
-                                    'VBW=0.1*RBW',
-                                    'VBW=0.01*RBW',
-                                    'VBW=10*RBW'
-                                  ]
-                                      .map((o) => ComboBoxItem<String>(
-                                          value: o, child: Text(o)))
-                                      .toList(),
-                                  onChanged: (nv) =>
-                                      nv != null ? vbwMode.value = nv : null,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        ValueListenableBuilder<String>(
-                          valueListenable: vbwMode,
-                          builder: (context, mode, child) {
-                            final bool isEnabled = mode == '手动';
-                            return _buildInputRow(
-                              label: 'VBW：',
-                              controller: vbwController,
-                              unitNotifier: vbwUnit,
+                              onChanged: () => _lastFrequencyEditMode =
+                                  FrequencyEditMode.startStop,
+                              onSubmitted: _updateFreqFromStartStop),
+                          const SizedBox(height: 8),
+                          _buildInputRow(
+                              label: '终止频率：',
+                              controller: stopFreqController,
+                              unitNotifier: stopFreqUnit,
                               units: freqUnits,
-                              enabled: isEnabled,
-                              onSubmitted:
-                                  isEnabled ? _submitBandwidthConfig : null,
-                            );
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                  Expander(
-                    header: const Text('检波'),
-                    content: Column(
-                      children: [
-                        Row(
-                          children: [
-                            const SizedBox(
-                                width: 100,
-                                child: Text('检波方式：',
-                                    style: TextStyle(
-                                        color: material.Colors.white))),
-                            Expanded(
-                              child: ValueListenableBuilder<String>(
-                                valueListenable: detectMode,
-                                builder: (context, value, child) =>
-                                    ComboBox<String>(
-                                  value: value,
-                                  isExpanded: true,
-                                  items: [
-                                    '取样',
-                                    '平均',
-                                    '正峰值',
-                                    '负峰值',
-                                    '最大功率',
-                                    '均方根值'
-                                  ]
-                                      .map((o) => ComboBoxItem<String>(
-                                          value: o, child: Text(o)))
-                                      .toList(),
-                                  onChanged: (nv) =>
-                                      nv != null ? detectMode.value = nv : null,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  Expander(
-                    header: const Text('游标'),
-                    content: Column(
-                      children: [
-                        ValueListenableBuilder<bool>(
-                          valueListenable: autoPeakEnabled,
-                          builder: (context, value, child) => Row(
+                              onChanged: () => _lastFrequencyEditMode =
+                                  FrequencyEditMode.startStop,
+                              onSubmitted: _updateFreqFromStartStop),
+                          const SizedBox(height: 8),
+                          _buildInputRow(
+                              label: '中心频率：',
+                              controller: centerFreqController,
+                              unitNotifier: centerFreqUnit,
+                              units: freqUnits,
+                              onChanged: () => _lastFrequencyEditMode =
+                                  FrequencyEditMode.centerSpan,
+                              onSubmitted: _updateFreqFromCenterSpan),
+                          const SizedBox(height: 8),
+                          _buildInputRow(
+                              label: '扫描宽度：',
+                              controller: spanController,
+                              unitNotifier: spanUnit,
+                              units: freqUnits,
+                              onChanged: () => _lastFrequencyEditMode =
+                                  FrequencyEditMode.centerSpan,
+                              onSubmitted: _updateFreqFromCenterSpan),
+                          const SizedBox(height: 8),
+                          Row(
                             children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('峰值搜索：',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              ToggleSwitch(
-                                checked: value,
-                                onChanged: (v) =>
-                                    setState(() => autoPeakEnabled.value = v),
+                              Expanded(
+                                child: Button(
+                                  onPressed: _setFullSpan,
+                                  child: const Text('FULL SPAN'),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Button(
+                                  onPressed: _setZeroSpan,
+                                  child: const Text('ZERO SPAN'),
+                                ),
                               ),
                             ],
                           ),
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            const SizedBox(
-                                width: 100,
-                                child: Text('当前游标：',
-                                    style: TextStyle(
-                                        color: material.Colors.white))),
-                            Expanded(
-                              child: ComboBox<int?>(
-                                value: _currentMarker?.id,
-                                isExpanded: true,
-                                items: _markers
-                                    .map((m) => ComboBoxItem<int?>(
-                                        value: m.id, child: Text('游标 ${m.id}')))
-                                    .toList(),
-                                placeholder: const Text('无'),
-                                onChanged: (id) {
-                                  if (id == null) {
-                                    _selectMarker(null);
-                                  } else {
-                                    _selectMarker(
-                                        _markers.firstWhere((m) => m.id == id));
-                                  }
-                                },
+                        ],
+                      ),
+                    ),
+                    Expander(
+                      header: const Text('幅度'),
+                      content: Column(
+                        children: [
+                          Row(
+                            children: [
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('参考电平：',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
+                              Expanded(
+                                  child: TextBox(
+                                      controller: refLevelController,
+                                      onSubmitted: (v) =>
+                                          _sendAmplitudeConfig())),
+                              const SizedBox(width: 8),
+                              SizedBox(
+                                width: 44,
+                                child: Button(
+                                  onPressed: () => _stepRefLevel(-10.0),
+                                  child: const Text('-'),
+                                ),
                               ),
-                            ),
-                            const SizedBox(width: 8),
-                            if (_currentMarker != null) ...[
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.end,
-                                children: [
-                                  ToggleSwitch(
-                                    checked: _currentMarker!.enabled,
-                                    onChanged: (v) => setState(
-                                        () => _currentMarker!.enabled = v),
-                                  ),
-                                ],
+                              const SizedBox(width: 4),
+                              SizedBox(
+                                width: 44,
+                                child: Button(
+                                  onPressed: () => _stepRefLevel(10.0),
+                                  child: const Text('+'),
+                                ),
                               ),
-                              const SizedBox(height: 8),
                             ],
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        ValueListenableBuilder<bool>(
-                          valueListenable: autoPeakEnabled,
-                          builder: (context, autoEnabled, child) {
-                            final bool manualEnabled = !autoEnabled;
-                            return Row(
-                              children: [
-                                const SizedBox(
-                                    width: 100,
-                                    child: Text('游标操作：',
-                                        style: TextStyle(
-                                            color: material.Colors.white))),
-                                Expanded(
-                                  child: ComboBox<String>(
-                                    placeholder: const Text('选择操作'),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Expander(
+                      header: const Text('RF 前端'),
+                      content: _buildRfFrontendPanel(),
+                    ),
+                    Expander(
+                      header: const Text('BW'),
+                      content: Column(
+                        children: [
+                          Row(
+                            children: [
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('RBW模式：',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
+                              Expanded(
+                                child: ValueListenableBuilder<String>(
+                                  valueListenable: rbwMode,
+                                  builder: (context, value, child) =>
+                                      ComboBox<String>(
+                                    value: value,
                                     isExpanded: true,
-                                    items: ['向左寻峰', '向右寻峰', '起始点', '结束点', '中间点']
+                                    items: [
+                                      '1 kHz',
+                                      '10 kHz',
+                                      '30 kHz',
+                                      '100 kHz',
+                                      '300 kHz',
+                                      '1 MHz'
+                                    ]
                                         .map((o) => ComboBoxItem<String>(
                                             value: o, child: Text(o)))
                                         .toList(),
-                                    onChanged: manualEnabled
-                                        ? (action) {
-                                            if (action == null ||
-                                                _currentMarker == null) {
-                                              return;
-                                            }
-                                            double newFreq =
-                                                _currentMarker!.freqHz;
-                                            switch (action) {
-                                              case '起始点':
-                                                newFreq =
-                                                    _getCurrentStartFreq();
-                                                break;
-                                              case '结束点':
-                                                newFreq = _getCurrentStopFreq();
-                                                break;
-                                              case '向左寻峰':
-                                                newFreq = _findLeftPeak(
-                                                    _currentMarker!.freqHz);
-                                                break;
-                                              case '向右寻峰':
-                                                newFreq = _findRightPeak(
-                                                    _currentMarker!.freqHz);
-                                                break;
-                                              case '中间点':
-                                                newFreq =
-                                                    _getCurrentCenterFreq();
-                                                break;
-                                            }
-                                            _currentMarker!.freqHz = newFreq;
-                                            _markerFreqController.text =
-                                                _formatFreq(newFreq,
-                                                    _markerFreqUnit.value);
-                                            setState(() {});
-                                          }
+                                    onChanged: (nv) =>
+                                        nv != null ? rbwMode.value = nv : null,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          ValueListenableBuilder<String>(
+                            valueListenable: rbwMode,
+                            builder: (context, mode, child) {
+                              const bool isEnabled = false;
+                              return _buildInputRow(
+                                label: 'RBW：',
+                                controller: rbwController,
+                                unitNotifier: rbwUnit,
+                                units: freqUnits,
+                                enabled: isEnabled,
+                                onSubmitted: null,
+                              );
+                            },
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('VBW模式：',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
+                              Expanded(
+                                child: ValueListenableBuilder<String>(
+                                  valueListenable: vbwMode,
+                                  builder: (context, value, child) =>
+                                      ComboBox<String>(
+                                    value: value,
+                                    isExpanded: true,
+                                    items: [
+                                      '手动',
+                                      'VBW=RBW',
+                                      'VBW=0.1*RBW',
+                                      'VBW=0.01*RBW',
+                                      'VBW=10*RBW'
+                                    ]
+                                        .map((o) => ComboBoxItem<String>(
+                                            value: o, child: Text(o)))
+                                        .toList(),
+                                    onChanged: (nv) =>
+                                        nv != null ? vbwMode.value = nv : null,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          ValueListenableBuilder<String>(
+                            valueListenable: vbwMode,
+                            builder: (context, mode, child) {
+                              final bool isEnabled = mode == '手动';
+                              return _buildInputRow(
+                                label: 'VBW：',
+                                controller: vbwController,
+                                unitNotifier: vbwUnit,
+                                units: freqUnits,
+                                enabled: isEnabled,
+                                onSubmitted:
+                                    isEnabled ? _submitBandwidthConfig : null,
+                              );
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                    Expander(
+                      header: const Text('检波'),
+                      content: Column(
+                        children: [
+                          Row(
+                            children: [
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('检波方式：',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
+                              Expanded(
+                                child: ValueListenableBuilder<String>(
+                                  valueListenable: detectMode,
+                                  builder: (context, value, child) =>
+                                      ComboBox<String>(
+                                    value: value,
+                                    isExpanded: true,
+                                    items: [
+                                      '取样',
+                                      '平均',
+                                      '正峰值',
+                                      '负峰值',
+                                      '最大功率',
+                                      '均方根值'
+                                    ]
+                                        .map((o) => ComboBoxItem<String>(
+                                            value: o, child: Text(o)))
+                                        .toList(),
+                                    onChanged: (nv) => nv != null
+                                        ? detectMode.value = nv
                                         : null,
                                   ),
                                 ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    Expander(
+                      header: const Text('游标'),
+                      content: Column(
+                        children: [
+                          ValueListenableBuilder<bool>(
+                            valueListenable: autoPeakEnabled,
+                            builder: (context, value, child) => Row(
+                              children: [
+                                const SizedBox(
+                                    width: 100,
+                                    child: Text('峰值搜索：',
+                                        style: TextStyle(
+                                            color: material.Colors.white))),
+                                ToggleSwitch(
+                                  checked: value,
+                                  onChanged: (v) =>
+                                      setState(() => autoPeakEnabled.value = v),
+                                ),
                               ],
-                            );
-                          },
-                        ),
-                        const SizedBox(height: 8),
-                        ValueListenableBuilder<bool>(
-                          valueListenable: autoPeakEnabled,
-                          builder: (context, autoEnabled, child) {
-                            final bool manualEnabled = !autoEnabled;
-                            return _buildInputRow(
-                              label: '游标频点：',
-                              controller: _markerFreqController,
-                              unitNotifier: _markerFreqUnit,
-                              units: freqUnits,
-                              enabled: manualEnabled,
-                              onSubmitted: manualEnabled
-                                  ? () {
-                                      final double? parsed = _parseFreq(
-                                          _markerFreqController.text,
-                                          _markerFreqUnit.value);
-                                      if (parsed != null &&
-                                          _currentMarker != null) {
-                                        _currentMarker!.freqHz = parsed;
-                                        setState(() {});
-                                      }
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('当前游标：',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
+                              Expanded(
+                                child: ComboBox<int?>(
+                                  value: _currentMarker?.id,
+                                  isExpanded: true,
+                                  items: _markers
+                                      .map((m) => ComboBoxItem<int?>(
+                                          value: m.id,
+                                          child: Text('游标 ${m.id}')))
+                                      .toList(),
+                                  placeholder: const Text('无'),
+                                  onChanged: (id) {
+                                    if (id == null) {
+                                      _selectMarker(null);
+                                    } else {
+                                      _selectMarker(_markers
+                                          .firstWhere((m) => m.id == id));
                                     }
-                                  : null,
-                            );
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                  const Expander(header: Text('测量'), content: Placeholder()),
-                  const Expander(header: Text('系统'), content: Placeholder()),
-                  Expander(
-                    header: const Text('图形'),
-                    content: Column(
-                      children: [
-                        Row(
-                          children: [
-                            const SizedBox(
-                                width: 100,
-                                child: Text('点数：',
-                                    style: TextStyle(
-                                        color: material.Colors.white))),
-                            Expanded(
-                              child: TextBox(
-                                controller: pointCountController,
-                                onSubmitted: (value) {
-                                  pointCountController.text =
-                                      (_getCurrentPointCount()).toString();
-                                  _sendSweepConfig();
-                                },
+                                  },
+                                ),
                               ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            const SizedBox(
-                                width: 100,
-                                child: Text('刻度/格：',
-                                    style: TextStyle(
-                                        color: material.Colors.white))),
-                            Expanded(
-                              child: TextBox(
-                                controller: scalePerGridController,
-                                onChanged: (value) => setState(() {}),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            const Text('dB',
-                                style: TextStyle(color: material.Colors.white)),
-                          ],
-                        ),
-                      ],
+                              const SizedBox(width: 8),
+                              if (_currentMarker != null) ...[
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.end,
+                                  children: [
+                                    ToggleSwitch(
+                                      checked: _currentMarker!.enabled,
+                                      onChanged: (v) => setState(
+                                          () => _currentMarker!.enabled = v),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                              ],
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          ValueListenableBuilder<bool>(
+                            valueListenable: autoPeakEnabled,
+                            builder: (context, autoEnabled, child) {
+                              final bool manualEnabled = !autoEnabled;
+                              return Row(
+                                children: [
+                                  const SizedBox(
+                                      width: 100,
+                                      child: Text('游标操作：',
+                                          style: TextStyle(
+                                              color: material.Colors.white))),
+                                  Expanded(
+                                    child: ComboBox<String>(
+                                      placeholder: const Text('选择操作'),
+                                      isExpanded: true,
+                                      items: [
+                                        '向左寻峰',
+                                        '向右寻峰',
+                                        '起始点',
+                                        '结束点',
+                                        '中间点'
+                                      ]
+                                          .map((o) => ComboBoxItem<String>(
+                                              value: o, child: Text(o)))
+                                          .toList(),
+                                      onChanged: manualEnabled
+                                          ? (action) {
+                                              if (action == null ||
+                                                  _currentMarker == null) {
+                                                return;
+                                              }
+                                              double newFreq =
+                                                  _currentMarker!.freqHz;
+                                              switch (action) {
+                                                case '起始点':
+                                                  newFreq =
+                                                      _getCurrentStartFreq();
+                                                  break;
+                                                case '结束点':
+                                                  newFreq =
+                                                      _getCurrentStopFreq();
+                                                  break;
+                                                case '向左寻峰':
+                                                  newFreq = _findLeftPeak(
+                                                      _currentMarker!.freqHz);
+                                                  break;
+                                                case '向右寻峰':
+                                                  newFreq = _findRightPeak(
+                                                      _currentMarker!.freqHz);
+                                                  break;
+                                                case '中间点':
+                                                  newFreq =
+                                                      _getCurrentCenterFreq();
+                                                  break;
+                                              }
+                                              _currentMarker!.freqHz = newFreq;
+                                              _markerFreqController.text =
+                                                  _formatFreq(newFreq,
+                                                      _markerFreqUnit.value);
+                                              setState(() {});
+                                            }
+                                          : null,
+                                    ),
+                                  ),
+                                ],
+                              );
+                            },
+                          ),
+                          const SizedBox(height: 8),
+                          ValueListenableBuilder<bool>(
+                            valueListenable: autoPeakEnabled,
+                            builder: (context, autoEnabled, child) {
+                              final bool manualEnabled = !autoEnabled;
+                              return _buildInputRow(
+                                label: '游标频点：',
+                                controller: _markerFreqController,
+                                unitNotifier: _markerFreqUnit,
+                                units: freqUnits,
+                                enabled: manualEnabled,
+                                onSubmitted: manualEnabled
+                                    ? () {
+                                        final double? parsed = _parseFreq(
+                                            _markerFreqController.text,
+                                            _markerFreqUnit.value);
+                                        if (parsed != null &&
+                                            _currentMarker != null) {
+                                          _currentMarker!.freqHz = parsed;
+                                          setState(() {});
+                                        }
+                                      }
+                                    : null,
+                              );
+                            },
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                    const Expander(header: Text('测量'), content: Placeholder()),
+                    const Expander(header: Text('系统'), content: Placeholder()),
+                    Expander(
+                      header: const Text('图形'),
+                      content: Column(
+                        children: [
+                          Row(
+                            children: [
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('点数：',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
+                              Expanded(
+                                child: TextBox(
+                                  controller: pointCountController,
+                                  onSubmitted: (value) {
+                                    pointCountController.text =
+                                        (_getCurrentPointCount()).toString();
+                                    _sendSweepConfig();
+                                  },
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('刻度/格：',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
+                              Expanded(
+                                child: TextBox(
+                                  controller: scalePerGridController,
+                                  onChanged: (value) => setState(() {}),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              const Text('dB',
+                                  style:
+                                      TextStyle(color: material.Colors.white)),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
+          ],
         ],
       ),
-      bottomBar: Container(
-        height: 30,
-        color: material.Colors.grey[900],
-        child: Row(
-          children: [
-            const SizedBox(width: 16),
-            Text(
-              '模式：${_sweepMode == SweepMode.standard ? "标准" : "实时"}      数据包速率：${_currentSweepSpeed.toStringAsFixed(1)} 包/秒      当前状态：正在扫描      系统温度：35℃',
+      bottomBar: _buildBottomBar(),
+    );
+  }
+
+  Widget _buildBottomBar() {
+    final modeLabel = _measurementMode == MeasurementMode.phaseNoise
+        ? '相位噪声'
+        : (_sweepMode == SweepMode.standard ? '标准' : '实时');
+    final scanningLabel = _spectrumRequestInFlight ? '正在扫描' : '空闲';
+
+    return Container(
+      height: 30,
+      color: material.Colors.grey[900],
+      child: Row(
+        children: [
+          const SizedBox(width: 16),
+          Expanded(
+            flex: 3,
+            child: Text(
+              '模式：$modeLabel      数据包速率：${_currentSweepSpeed.toStringAsFixed(1)} 包/秒      当前状态：$scanningLabel      系统温度：35℃',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: const TextStyle(color: material.Colors.white),
             ),
-          ],
-        ),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            flex: 4,
+            child: Text(
+              _profileStatusText,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.right,
+              style: const TextStyle(color: material.Colors.lightGreenAccent),
+            ),
+          ),
+          const SizedBox(width: 16),
+        ],
       ),
     );
   }
@@ -2268,8 +4164,8 @@ class _MyHomePageState extends State<MyHomePage> {
                     '30 dB',
                     '34 dB'
                   ]
-                      .map((o) =>
-                          ComboBoxItem<String>(value: o, child: Text(o)))
+                      .map(
+                          (o) => ComboBoxItem<String>(value: o, child: Text(o)))
                       .toList(),
                   onChanged: (nv) =>
                       nv != null ? vgaGainValue.value = nv : null,

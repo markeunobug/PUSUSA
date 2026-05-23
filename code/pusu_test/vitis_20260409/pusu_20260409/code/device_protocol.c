@@ -5,6 +5,7 @@
 
 #include "xuartps_hw.h"
 #include "../code/app_config.h"
+#include "../code/profile_timer.h"
 #include "../code/sweep_plan.h"
 
 void ad8370_set_gain_code(unsigned char code);
@@ -23,10 +24,12 @@ void ad8370_set_gain_code(unsigned char code);
 #define CMD_START_SWEEP    0x09U
 #define CMD_STOP_SWEEP     0x0AU
 #define CMD_SET_VGA_GAIN   0x0BU
+#define CMD_GET_PROFILE    0x0EU
 
 #define CMD_ACK            0x81U
 #define CMD_SPECTRUM_DATA  0x82U
 #define CMD_STATUS_DATA    0x83U
+#define CMD_PROFILE_DATA   0x85U
 
 #define ACK_OK             0x01U
 #define ACK_FAIL           0x00U
@@ -76,6 +79,7 @@ static void send_frame_inplace(unsigned char cmd, unsigned short length);
 static void send_ack(unsigned char original_cmd, unsigned char success, unsigned char error_code);
 static void send_status(void);
 static void send_spectrum(void);
+static void send_profile(void);
 static int start_sweep(void);
 static int stop_sweep(void);
 static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned short length);
@@ -350,6 +354,14 @@ static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned 
             send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
         }
         break;
+    case CMD_GET_PROFILE:
+        if (length == 0U) {
+            send_ack(cmd, ACK_OK, ERR_NONE);
+            send_profile();
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
     case CMD_RESET:
         if (length == 0U) {
             g_protocol.timestamp = 0U;
@@ -394,6 +406,20 @@ static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned 
         send_ack(cmd, ACK_FAIL, ERR_BAD_CMD);
         break;
     }
+}
+
+static void send_profile(void)
+{
+    unsigned short payload_length = 0U;
+
+    if (sweep_profile_build_payload(&g_protocol.tx_buffer[4],
+                                    (unsigned short)(TX_FRAME_MAX_SIZE - 7U),
+                                    &payload_length) != 0) {
+        send_ack(CMD_GET_PROFILE, ACK_FAIL, ERR_INTERNAL);
+        return;
+    }
+
+    send_frame_inplace(CMD_PROFILE_DATA, payload_length);
 }
 
 static void reset_default_config(void)

@@ -40,7 +40,7 @@ class SpectrumChart extends material.StatelessWidget {
     this.markers = const [],
   });
 
-  /// 核心：根据频点x值，精准获取对应的幅值y值（dBm）
+  /// 根据频点 x 值，获取最接近的幅度值（dBm）。
   double _getYAt(double x) {
     if (data.isEmpty) return minDbm;
     FlSpot closest = data[0];
@@ -56,26 +56,26 @@ class SpectrumChart extends material.StatelessWidget {
   }
 
   String _formatFreqAutoUnit(double freqHz, [int decimalPlaces = 3]) {
-    if (freqHz >= 1e9) return '${(freqHz / 1e9).toStringAsFixed(decimalPlaces)} GHz';
-    if (freqHz >= 1e6) return '${(freqHz / 1e6).toStringAsFixed(decimalPlaces)} MHz';
-    if (freqHz >= 1e3) return '${(freqHz / 1e3).toStringAsFixed(decimalPlaces)} kHz';
+    if (freqHz >= 1e9)
+      return '${(freqHz / 1e9).toStringAsFixed(decimalPlaces)} GHz';
+    if (freqHz >= 1e6)
+      return '${(freqHz / 1e6).toStringAsFixed(decimalPlaces)} MHz';
+    if (freqHz >= 1e3)
+      return '${(freqHz / 1e3).toStringAsFixed(decimalPlaces)} kHz';
     return '${freqHz.toStringAsFixed(decimalPlaces)} Hz';
   }
 
-  // 顶部Marker信息栏（强制左对齐 + 自动换行）
   material.Widget _buildMarkerInfoRow() {
     final enabledMarkers = markers.where((m) => m.enabled).toList();
 
     return material.Container(
-      width: double.infinity, // 强制容器充满父宽度，避免宽度不足导致对齐异常
+      width: double.infinity,
       padding: const material.EdgeInsets.only(top: 0, bottom: 15),
-      // 移除固定高度！固定高度会挤压Wrap布局，导致视觉上"居中"
-      // height: 32, 
       child: material.Wrap(
-        alignment: material.WrapAlignment.start, // 水平方向左对齐（核心）
-        crossAxisAlignment: material.WrapCrossAlignment.start, // 垂直方向左对齐（解决居中关键）
-        spacing: 32, // 子元素水平间距
-        runSpacing: 8, // 换行后垂直间距
+        alignment: material.WrapAlignment.start,
+        crossAxisAlignment: material.WrapCrossAlignment.start,
+        spacing: 32,
+        runSpacing: 8,
         children: enabledMarkers.map((m) {
           final freqStr = _formatFreqAutoUnit(m.freqHz);
           final y = _getYAt(m.freqHz);
@@ -92,76 +92,89 @@ class SpectrumChart extends material.StatelessWidget {
     );
   }
 
-  // 【横轴标记：VerticalLine 精确频率坐标 + 三角游标（精准对齐幅值）】
   List<VerticalLine> _buildMarkerVerticalLines() {
     final enabledMarkers = markers.where((m) => m.enabled).toList();
     return enabledMarkers
         .where((m) => m.freqHz >= minFreq && m.freqHz <= maxFreq)
         .map((m) {
-          final capturedM = m;
-          final yValue = _getYAt(m.freqHz); 
-          
-          final verticalOffsetRatio = (maxDbm - yValue) / (maxDbm - minDbm);
-          
-          return VerticalLine(
-            x: m.freqHz,
-            color: material.Colors.red.withOpacity(0.5),
-            strokeWidth: 1,
-            dashArray: null,
-            label: VerticalLineLabel(
-              show: true,
-              alignment: material.Alignment(0, -1 + (verticalOffsetRatio * 2)),
-              padding: const material.EdgeInsets.only(top: -40),
-              labelResolver: (line) => 'M${capturedM.id}\n ▼',
-              style: const material.TextStyle(
-                color: material.Colors.white,
-                fontSize: 15,
-                fontWeight: material.FontWeight.bold,
-                height: 1,
-              ),
-            ),
-          );
-        })
-        .toList();
+      final capturedM = m;
+      final yValue = _getYAt(m.freqHz);
+      final verticalOffsetRatio = (maxDbm - yValue) / (maxDbm - minDbm);
+
+      return VerticalLine(
+        x: m.freqHz,
+        color: material.Colors.red.withOpacity(0.5),
+        strokeWidth: 1,
+        dashArray: null,
+        label: VerticalLineLabel(
+          show: true,
+          alignment: material.Alignment(0, -1 + (verticalOffsetRatio * 2)),
+          padding: const material.EdgeInsets.only(top: -40),
+          labelResolver: (line) => 'M${capturedM.id}\n▲',
+          style: const material.TextStyle(
+            color: material.Colors.white,
+            fontSize: 15,
+            fontWeight: material.FontWeight.bold,
+            height: 1,
+          ),
+        ),
+      );
+    }).toList();
   }
 
-  // 【纵轴标记：HorizontalLine 精确幅值坐标 + '◀数值' 文本】
   List<HorizontalLine> _buildMarkerHorizontalLines() {
     final enabledMarkers = markers.where((m) => m.enabled).toList();
     return enabledMarkers
-        .where((m) => 
-          m.freqHz >= minFreq && m.freqHz <= maxFreq && 
-          _getYAt(m.freqHz) >= minDbm && _getYAt(m.freqHz) <= maxDbm
-        )
+        .where((m) =>
+            m.freqHz >= minFreq &&
+            m.freqHz <= maxFreq &&
+            _getYAt(m.freqHz) >= minDbm &&
+            _getYAt(m.freqHz) <= maxDbm)
         .map((m) {
-          final capturedM = m;
-          final yValue = _getYAt(m.freqHz);
-          return HorizontalLine(
-            y: yValue,
-            color: material.Colors.white.withOpacity(0.3),
-            strokeWidth: 0, 
-            dashArray: null,
-            label: HorizontalLineLabel(
-              show: false,
-              alignment: material.Alignment.centerRight,
-              padding: const material.EdgeInsets.only(right: 8),
-              labelResolver: (line) => '◀${yValue.toStringAsFixed(2)}',
-              style: const material.TextStyle(
-                color: material.Colors.white,
-                fontSize: 12,
-                fontWeight: material.FontWeight.bold,
-              ),
-            ),
-          );
-        })
-        .toList();
+      final yValue = _getYAt(m.freqHz);
+      return HorizontalLine(
+        y: yValue,
+        color: material.Colors.white.withOpacity(0.3),
+        strokeWidth: 0,
+        dashArray: null,
+        label: HorizontalLineLabel(
+          show: false,
+          alignment: material.Alignment.centerRight,
+          padding: const material.EdgeInsets.only(right: 8),
+          labelResolver: (line) => '◀${yValue.toStringAsFixed(2)}',
+          style: const material.TextStyle(
+            color: material.Colors.white,
+            fontSize: 12,
+            fontWeight: material.FontWeight.bold,
+          ),
+        ),
+      );
+    }).toList();
+  }
+
+  List<LineTooltipItem?> _buildTooltipItems(List<LineBarSpot> touchedSpots) {
+    return touchedSpots.map((spot) {
+      final freqStr = _formatFreqAutoUnit(spot.x);
+      final powerStr = spot.y.toStringAsFixed(3);
+      return LineTooltipItem(
+        '$freqStr\n$powerStr dBm',
+        const material.TextStyle(
+          color: material.Colors.white,
+          fontSize: 12,
+          fontWeight: material.FontWeight.w600,
+          height: 1.35,
+        ),
+        textAlign: material.TextAlign.left,
+      );
+    }).toList();
   }
 
   @override
   material.Widget build(material.BuildContext context) {
     if (data.isEmpty) {
       return const material.Center(
-        child: material.Text('无数据', style: material.TextStyle(color: material.Colors.white)),
+        child: material.Text('无数据',
+            style: material.TextStyle(color: material.Colors.white)),
       );
     }
 
@@ -175,13 +188,21 @@ class SpectrumChart extends material.StatelessWidget {
       ),
       child: material.Column(
         children: [
-          // 顶部Marker信息栏
           _buildMarkerInfoRow(),
-
-          // 图表 + 游标标记（横轴+纵轴）
           material.Expanded(
             child: LineChart(
               LineChartData(
+                lineTouchData: LineTouchData(
+                  handleBuiltInTouches: true,
+                  touchTooltipData: LineTouchTooltipData(
+                    maxContentWidth: 180,
+                    fitInsideHorizontally: true,
+                    fitInsideVertically: true,
+                    getTooltipColor: (_) =>
+                        material.Colors.black.withOpacity(0.85),
+                    getTooltipItems: _buildTooltipItems,
+                  ),
+                ),
                 gridData: FlGridData(
                   show: true,
                   drawVerticalLine: true,
@@ -201,8 +222,10 @@ class SpectrumChart extends material.StatelessWidget {
                 ),
                 titlesData: FlTitlesData(
                   show: true,
-                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
                   leftTitles: AxisTitles(
                     sideTitles: SideTitles(
                       showTitles: true,
@@ -210,7 +233,8 @@ class SpectrumChart extends material.StatelessWidget {
                       interval: scalePerGrid,
                       getTitlesWidget: (value, meta) => material.Text(
                         '${value.toInt()} dBm',
-                        style: const material.TextStyle(color: material.Colors.white, fontSize: 12),
+                        style: const material.TextStyle(
+                            color: material.Colors.white, fontSize: 12),
                       ),
                     ),
                   ),
@@ -229,7 +253,7 @@ class SpectrumChart extends material.StatelessWidget {
                     isCurved: false,
                     color: material.Colors.yellow,
                     barWidth: 2,
-                    dotData: const FlDotData(show: false),
+                    dotData: FlDotData(show: data.length == 1),
                   ),
                 ],
                 extraLinesData: ExtraLinesData(
@@ -240,16 +264,25 @@ class SpectrumChart extends material.StatelessWidget {
               duration: Duration.zero,
             ),
           ),
-
           const material.SizedBox(height: 8),
           material.Row(
             mainAxisAlignment: material.MainAxisAlignment.spaceBetween,
             children: [
-              material.Text('起始: $startFreqStr', style: const material.TextStyle(color: material.Colors.green, fontSize: 12)),
-              material.Text('中心: $centerFreqStr', style: const material.TextStyle(color: material.Colors.green, fontSize: 12)),
-              material.Text('扫宽: $spanStr', style: const material.TextStyle(color: material.Colors.green, fontSize: 12)),
-              material.Text('扫描速度: $sweepSpeedStr', style: const material.TextStyle(color: material.Colors.green, fontSize: 12)),
-              material.Text('终止: $stopFreqStr', style: const material.TextStyle(color: material.Colors.green, fontSize: 12)),
+              material.Text('起始: $startFreqStr',
+                  style: const material.TextStyle(
+                      color: material.Colors.green, fontSize: 12)),
+              material.Text('中心: $centerFreqStr',
+                  style: const material.TextStyle(
+                      color: material.Colors.green, fontSize: 12)),
+              material.Text('扫宽: $spanStr',
+                  style: const material.TextStyle(
+                      color: material.Colors.green, fontSize: 12)),
+              material.Text('扫描速度: $sweepSpeedStr',
+                  style: const material.TextStyle(
+                      color: material.Colors.green, fontSize: 12)),
+              material.Text('终止: $stopFreqStr',
+                  style: const material.TextStyle(
+                      color: material.Colors.green, fontSize: 12)),
             ],
           )
         ],

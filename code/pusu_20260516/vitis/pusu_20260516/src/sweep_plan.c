@@ -3,6 +3,8 @@
 static float sweep_plan_rbw_hz(rbw_mode_t mode, double requested_hz)
 {
     switch (mode) {
+    case RBW_MODE_1K:
+        return RBW_1K_HZ;
     case RBW_MODE_10K:
         return RBW_10K_HZ;
     case RBW_MODE_30K:

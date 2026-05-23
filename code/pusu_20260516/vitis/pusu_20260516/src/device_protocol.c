@@ -5,6 +5,7 @@
 
 #include "xuartps_hw.h"
 #include "app_config.h"
+#include "profile_timer.h"
 #include "rf_frontend.h"
 #include "sweep_plan.h"
 
@@ -26,12 +27,20 @@ void ad8370_set_gain_code(unsigned char code);
 #define CMD_SET_VGA_GAIN   0x0BU
 #define CMD_SET_RF_FRONTEND 0x0CU
 #define CMD_GET_RF_FRONTEND 0x0DU
+#define CMD_GET_PROFILE    0x0EU
+#define CMD_SET_PHASE_NOISE_CONFIG 0x0FU
+#define CMD_START_PHASE_NOISE      0x10U
+#define CMD_STOP_PHASE_NOISE       0x11U
+#define CMD_GET_PHASE_NOISE_STATUS 0x12U
 
 
 #define CMD_ACK            0x81U
 #define CMD_SPECTRUM_DATA  0x82U
 #define CMD_STATUS_DATA    0x83U
 #define CMD_RF_FRONTEND_STATUS 0x84U
+#define CMD_PROFILE_DATA   0x85U
+#define CMD_PHASE_NOISE_DATA   0x86U
+#define CMD_PHASE_NOISE_STATUS 0x87U
 
 
 #define ACK_OK             0x01U
@@ -45,6 +54,9 @@ void ad8370_set_gain_code(unsigned char code);
 #define RX_BUFFER_SIZE          2048U
 #define TX_FRAME_MAX_SIZE       16384U
 #define STATUS_PAYLOAD_SIZE     59U
+#define PHASE_NOISE_CONFIG_PAYLOAD_SIZE 36U
+#define PHASE_NOISE_DATA_PAYLOAD_SIZE   42U
+#define PHASE_NOISE_STATUS_PAYLOAD_SIZE 64U
 #define UART_RX_DRAIN_LIMIT     4096U
 #define DEFAULT_POINT_COUNT     256U
 #define MIN_POINT_COUNT         8U
@@ -64,6 +76,7 @@ typedef struct {
     device_protocol_status_provider_t status_provider;
     device_protocol_sweep_control_t sweep_control;
     device_protocol_rf_frontend_control_t rf_frontend_control;
+    device_protocol_phase_noise_control_t phase_noise_control;
     spectrum_point_t spectrum_points[MAX_POINT_COUNT];
     unsigned char tx_buffer[TX_FRAME_MAX_SIZE];
     unsigned int stream_timestamp;
@@ -84,6 +97,7 @@ static void send_ack(unsigned char original_cmd, unsigned char success, unsigned
 static void send_status(void);
 static void send_spectrum(void);
 static void send_rf_frontend_status(void);
+static void send_profile(void);
 
 static int start_sweep(void);
 static int stop_sweep(void);
@@ -242,6 +256,11 @@ void device_protocol_set_rf_frontend_handler(device_protocol_rf_frontend_control
     g_protocol.rf_frontend_control = handler;
 }
 
+void device_protocol_set_phase_noise_handler(device_protocol_phase_noise_control_t handler)
+{
+    g_protocol.phase_noise_control = handler;
+}
+
 void device_protocol_send_rf_frontend_status(void)
 {
     send_rf_frontend_status();
@@ -284,6 +303,97 @@ int device_protocol_stream_spectrum_point(uint32_t freq_hz,
     return 0;
 }
 
+int device_protocol_stream_phase_noise_point(const phase_noise_data_t *point)
+{
+    unsigned short payload_length = PHASE_NOISE_DATA_PAYLOAD_SIZE;
+    unsigned int offset = 4U;
+
+    if (point == 0) {
+        return -1;
+    }
+    if ((unsigned int)payload_length + 7U > TX_FRAME_MAX_SIZE) {
+        return -1;
+    }
+
+    g_protocol.tx_buffer[offset++] = point->version;
+    g_protocol.tx_buffer[offset++] = point->flags;
+    write_u16_be(&g_protocol.tx_buffer[offset], point->trace_id);
+    offset += 2U;
+    write_u16_be(&g_protocol.tx_buffer[offset], point->total_points);
+    offset += 2U;
+    write_u16_be(&g_protocol.tx_buffer[offset], point->current_index);
+    offset += 2U;
+    write_u16_be(&g_protocol.tx_buffer[offset], point->average_index);
+    offset += 2U;
+    write_f64_le(&g_protocol.tx_buffer[offset], point->carrier_hz);
+    offset += 8U;
+    write_f32_le(&g_protocol.tx_buffer[offset], point->carrier_level_dbm);
+    offset += 4U;
+    write_u32_le(&g_protocol.tx_buffer[offset], point->offset_hz);
+    offset += 4U;
+    write_f32_le(&g_protocol.tx_buffer[offset], point->noise_power_dbm);
+    offset += 4U;
+    write_f32_le(&g_protocol.tx_buffer[offset], point->phase_noise_dbc_hz);
+    offset += 4U;
+    write_u32_le(&g_protocol.tx_buffer[offset], point->rbw_hz);
+    offset += 4U;
+    g_protocol.tx_buffer[offset++] = point->error_code;
+    g_protocol.tx_buffer[offset++] = 0U;
+    g_protocol.tx_buffer[offset++] = 0U;
+    g_protocol.tx_buffer[offset++] = 0U;
+
+    send_frame_inplace(CMD_PHASE_NOISE_DATA, payload_length);
+    return 0;
+}
+
+int device_protocol_send_phase_noise_status(const phase_noise_status_t *status)
+{
+    unsigned short payload_length = PHASE_NOISE_STATUS_PAYLOAD_SIZE;
+    unsigned int offset = 4U;
+
+    if (status == 0) {
+        return -1;
+    }
+    if ((unsigned int)payload_length + 7U > TX_FRAME_MAX_SIZE) {
+        return -1;
+    }
+
+    g_protocol.tx_buffer[offset++] = status->version;
+    g_protocol.tx_buffer[offset++] = status->state;
+    g_protocol.tx_buffer[offset++] = status->flags;
+    g_protocol.tx_buffer[offset++] = status->error_code;
+    write_u16_be(&g_protocol.tx_buffer[offset], status->trace_id);
+    offset += 2U;
+    write_u16_be(&g_protocol.tx_buffer[offset], status->total_points);
+    offset += 2U;
+    write_u16_be(&g_protocol.tx_buffer[offset], status->current_index);
+    offset += 2U;
+    write_u16_be(&g_protocol.tx_buffer[offset], status->average_index);
+    offset += 2U;
+    write_f64_le(&g_protocol.tx_buffer[offset], status->nominal_carrier_hz);
+    offset += 8U;
+    write_f64_le(&g_protocol.tx_buffer[offset], status->measured_carrier_hz);
+    offset += 8U;
+    write_f32_le(&g_protocol.tx_buffer[offset], status->carrier_level_dbm);
+    offset += 4U;
+    write_f64_le(&g_protocol.tx_buffer[offset], status->start_offset_hz);
+    offset += 8U;
+    write_f64_le(&g_protocol.tx_buffer[offset], status->stop_offset_hz);
+    offset += 8U;
+    write_u32_le(&g_protocol.tx_buffer[offset], status->current_offset_hz);
+    offset += 4U;
+    write_u32_le(&g_protocol.tx_buffer[offset], status->current_rbw_hz);
+    offset += 4U;
+    write_u32_le(&g_protocol.tx_buffer[offset], status->elapsed_ms);
+    offset += 4U;
+    g_protocol.tx_buffer[offset++] = (unsigned char)(status->warning_code & 0xFFU);
+    g_protocol.tx_buffer[offset++] = (unsigned char)((status->warning_code >> 8U) & 0xFFU);
+    g_protocol.tx_buffer[offset++] = 0U;
+    g_protocol.tx_buffer[offset++] = 0U;
+
+    send_frame_inplace(CMD_PHASE_NOISE_STATUS, payload_length);
+    return 0;
+}
 //处理上位机下发 接收帧
 static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned short length)
 {
@@ -443,6 +553,80 @@ static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned 
             send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
         }
         break;
+    case CMD_GET_PROFILE:
+        if (length == 0U) {
+            send_ack(cmd, ACK_OK, ERR_NONE);
+            send_profile();
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_SET_PHASE_NOISE_CONFIG:
+        if (length == PHASE_NOISE_CONFIG_PAYLOAD_SIZE) {
+            phase_noise_config_t pn_config;
+
+            memset(&pn_config, 0, sizeof(pn_config));
+            pn_config.version = data[0];
+            pn_config.flags = data[1];
+            pn_config.carrier_mode = data[2];
+            pn_config.sideband_mode = data[3];
+            pn_config.nominal_carrier_hz = read_f64_le(&data[4]);
+            pn_config.start_offset_hz = read_f64_le(&data[12]);
+            pn_config.stop_offset_hz = read_f64_le(&data[20]);
+            pn_config.points_per_decade = read_u16_le(&data[28]);
+            pn_config.average_count = read_u16_le(&data[30]);
+            pn_config.carrier_search_span_hz =
+                (uint32_t)read_u16_le(&data[32]) * 1000U;
+            pn_config.minimum_carrier_level_dbm = (int8_t)data[34];
+
+            if ((g_protocol.phase_noise_control != 0) &&
+                (g_protocol.phase_noise_control(PHASE_NOISE_ENGINE_ACTION_CONFIGURE,
+                                                &pn_config) == 0)) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_START_PHASE_NOISE:
+        if (length == 0U) {
+            if ((g_protocol.phase_noise_control != 0) &&
+                (g_protocol.phase_noise_control(PHASE_NOISE_ENGINE_ACTION_START, 0) == 0)) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+                (void)g_protocol.phase_noise_control(PHASE_NOISE_ENGINE_ACTION_GET_STATUS, 0);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_STOP_PHASE_NOISE:
+        if (length == 0U) {
+            if (g_protocol.phase_noise_control != 0) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+                (void)g_protocol.phase_noise_control(PHASE_NOISE_ENGINE_ACTION_STOP, 0);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_GET_PHASE_NOISE_STATUS:
+        if (length == 0U) {
+            if (g_protocol.phase_noise_control != 0) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+                (void)g_protocol.phase_noise_control(PHASE_NOISE_ENGINE_ACTION_GET_STATUS, 0);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
     default:
         send_ack(cmd, ACK_FAIL, ERR_BAD_CMD);
         break;
@@ -538,6 +722,20 @@ static void send_rf_frontend_status(void)
     payload[3] = state->applied_gpio;
     payload[4] = state->last_error;
     send_frame(CMD_RF_FRONTEND_STATUS, payload, sizeof(payload));
+}
+
+static void send_profile(void)
+{
+    unsigned short payload_length = 0U;
+
+    if (sweep_profile_build_payload(&g_protocol.tx_buffer[4],
+                                    (unsigned short)(TX_FRAME_MAX_SIZE - 7U),
+                                    &payload_length) != 0) {
+        send_ack(CMD_GET_PROFILE, ACK_FAIL, ERR_INTERNAL);
+        return;
+    }
+
+    send_frame_inplace(CMD_PROFILE_DATA, payload_length);
 }
 
 //发送频谱
@@ -860,15 +1058,24 @@ static unsigned short sanitize_point_count(unsigned short value)
 
 static unsigned char sanitize_rbw_mode(unsigned char value)
 {
-    if (value > (unsigned char)RBW_MODE_1M) {
+    switch ((rbw_mode_t)value) {
+    case RBW_MODE_10K:
+    case RBW_MODE_30K:
+    case RBW_MODE_100K:
+    case RBW_MODE_300K:
+    case RBW_MODE_1M:
+    case RBW_MODE_1K:
+        return value;
+    default:
         return (unsigned char)RBW_MODE_1M;
     }
-    return value;
 }
 
 static double rbw_mode_to_hz(unsigned char mode, double fallback_hz)
 {
     switch ((rbw_mode_t)mode) {
+    case RBW_MODE_1K:
+        return (double)RBW_1K_HZ;
     case RBW_MODE_10K:
         return (double)RBW_10K_HZ;
     case RBW_MODE_30K:

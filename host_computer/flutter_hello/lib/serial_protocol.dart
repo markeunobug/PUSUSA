@@ -6,16 +6,34 @@ import 'package:fl_chart/fl_chart.dart';
 import 'device_models.dart';
 import 'serial_port_manager.dart';
 
+class SpectrumSegment {
+  final int timestamp;
+  final List<FlSpot> spots;
+
+  const SpectrumSegment({
+    required this.timestamp,
+    required this.spots,
+  });
+}
+
 class SerialProtocol {
   final SerialPortManager _manager;
-  final StreamController<List<FlSpot>> _spectrumStream = StreamController.broadcast();
+  final StreamController<SpectrumSegment> _spectrumStream =
+      StreamController.broadcast();
+  final StreamController<Map<String, dynamic>> _statusStream =
+      StreamController.broadcast();
   Uint8List _buffer = Uint8List(0);
 
   SerialProtocol(this._manager) {
     _manager.stream.listen(_parseIncomingData);
   }
 
-  Stream<List<FlSpot>> get spectrumStream => _spectrumStream.stream;
+  Stream<SpectrumSegment> get spectrumStream => _spectrumStream.stream;
+  Stream<Map<String, dynamic>> get statusStream => _statusStream.stream;
+
+  void resetReceiveBuffer() {
+    _buffer = Uint8List(0);
+  }
 
   int _calculateCrc16Modbus(Uint8List data) {
     int crc = 0xFFFF;
@@ -33,10 +51,12 @@ class SerialProtocol {
   }
 
   Uint8List _buildFrame(int cmd, Uint8List data) {
-    final length = Uint8List(2)..buffer.asByteData().setUint16(0, data.length, Endian.big);
+    final length = Uint8List(2)
+      ..buffer.asByteData().setUint16(0, data.length, Endian.big);
     final payload = Uint8List.fromList(length + [cmd] + data);
     final crcValue = _calculateCrc16Modbus(payload);
-    final crc = Uint8List(2)..buffer.asByteData().setUint16(0, crcValue, Endian.big);
+    final crc = Uint8List(2)
+      ..buffer.asByteData().setUint16(0, crcValue, Endian.big);
     return Uint8List.fromList([0xAA] + payload + crc + [0x55]);
   }
 
@@ -59,7 +79,8 @@ class SerialProtocol {
 
       final payload = frame.sublist(1, 1 + 2 + 1 + len);
       final calcCrc = _calculateCrc16Modbus(Uint8List.fromList(payload));
-      final rxCrc = frame.buffer.asByteData(1 + 2 + 1 + len).getUint16(0, Endian.big);
+      final rxCrc =
+          frame.buffer.asByteData(1 + 2 + 1 + len).getUint16(0, Endian.big);
       if (calcCrc != rxCrc || frame.last != 0x55) {
         continue;
       }
@@ -83,18 +104,28 @@ class SerialProtocol {
         final timestamp = byteData.getUint32(2, Endian.big);
         final spots = <FlSpot>[];
         for (int i = 0; i < pointCount; i++) {
-          final offset = 6 + i * 16;
-          final freq = byteData.getFloat64(offset, Endian.little);
-          final amp = byteData.getFloat64(offset + 8, Endian.little);
+          final offset = 6 + i * 8;
+          final freq = byteData.getUint32(offset, Endian.little).toDouble();
+          final amp = byteData.getFloat32(offset + 4, Endian.little).toDouble();
           spots.add(FlSpot(freq, amp));
         }
-        _spectrumStream.add(spots);
+        _spectrumStream.add(
+          SpectrumSegment(
+            timestamp: timestamp,
+            spots: spots,
+          ),
+        );
         print('Received spectrum: points=$pointCount timestamp=$timestamp');
         break;
       case 0x83:
         final temp = byteData.getFloat64(0, Endian.little);
         final battery = data[8];
         final error = data[9];
+        _statusStream.add({
+          'temperatureC': temp,
+          'batteryPercent': battery,
+          'errorCode': error,
+        });
         print('Status: Temp=$temp C, Battery=$battery%, Error=$error');
         break;
       default:
@@ -203,8 +234,12 @@ class SerialProtocol {
     setSweep(speed, mode, pointCount);
   }
 
-  void getSpectrum() {
-    _manager.sendData(_buildFrame(0x06, Uint8List(0)));
+  void getSpectrum([int? pointCount]) {
+    final data = Uint8List(pointCount == null ? 0 : 2);
+    if (pointCount != null) {
+      data.buffer.asByteData().setUint16(0, pointCount & 0xFFFF, Endian.little);
+    }
+    _manager.sendData(_buildFrame(0x06, data));
   }
 
   void getStatus() {
@@ -217,5 +252,6 @@ class SerialProtocol {
 
   void dispose() {
     _spectrumStream.close();
+    _statusStream.close();
   }
 }

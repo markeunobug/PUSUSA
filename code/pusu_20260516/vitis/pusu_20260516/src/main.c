@@ -4,6 +4,7 @@
 #include "lock_indicator.h"
 #include "lo_control.h"
 #include "platform.h"
+#include "phase_noise_engine.h"
 #include "rf_frontend.h"
 #include "signal_processing.h"
 #include "sweep_engine.h"
@@ -26,6 +27,12 @@ static int protocol_sweep_point_callback(uint32_t freq_hz,
                                          void *context);
 static int protocol_sweep_control_handler(unsigned char action, const device_control_config_t *config);
 static int protocol_rf_frontend_handler(const device_rf_frontend_config_t *config);
+static int protocol_phase_noise_handler(phase_noise_engine_action_t action,
+                                        const phase_noise_config_t *config);
+static int protocol_phase_noise_data_callback(const phase_noise_data_t *point,
+                                              void *context);
+static int protocol_phase_noise_status_callback(const phase_noise_status_t *status,
+                                                void *context);
 
 typedef struct {
     spectrum_point_t *points;
@@ -39,6 +46,7 @@ static unsigned int g_frame_ready_count = 0U;
 static unsigned int g_process_frame_count = 0U;
 static int g_background_dma_armed = 0;
 static sweep_engine_t g_sweep_engine;//扫描相关参数，包括扫描计划、扫频后结果
+static phase_noise_engine_t g_phase_noise_engine;
 static protocol_sweep_stream_context_t g_sweep_stream_context;
 static int g_last_sweep_error = 0;
 static unsigned char g_background_dma_error_code = 0U;
@@ -49,6 +57,7 @@ static unsigned char g_background_dma_error_code = 0U;
 int main(void)
 {
     int status;
+    int pn_status;
     rbw_mode_t applied_rbw_mode = RBW_MODE_100K;
 
     init_platform();
@@ -96,6 +105,17 @@ int main(void)
         return -1;
     }
 
+    status = phase_noise_engine_init(&g_phase_noise_engine);
+    if (status != 0) {
+        cleanup_platform();
+        return -1;
+    }
+    phase_noise_engine_set_callbacks(&g_phase_noise_engine,
+                                     protocol_phase_noise_data_callback,
+                                     0,
+                                     protocol_phase_noise_status_callback,
+                                     0);
+
     status = dma_capture_init();
     if (status != XST_SUCCESS) {
         cleanup_platform();
@@ -106,11 +126,22 @@ int main(void)
     device_protocol_set_status_provider(protocol_status_provider);//频谱状态配置
     device_protocol_set_sweep_control_handler(protocol_sweep_control_handler);
     device_protocol_set_rf_frontend_handler(protocol_rf_frontend_handler);
+    device_protocol_set_phase_noise_handler(protocol_phase_noise_handler);
 
     (void)start_background_capture();
 
     while (1) {
         device_protocol_poll();
+
+        if (phase_noise_engine_is_active(&g_phase_noise_engine) != 0) {
+            pn_status = phase_noise_engine_poll(&g_phase_noise_engine);
+            if ((pn_status != 0) ||
+                (phase_noise_engine_is_active(&g_phase_noise_engine) == 0)) {
+                lock_indicator_toggle_activity();
+                reset_and_resume_background_capture_if_idle();
+            }
+            continue;
+        }
 
         if (sweep_engine_is_active(&g_sweep_engine) != 0) {
             g_last_sweep_error = sweep_engine_poll(&g_sweep_engine);
@@ -137,8 +168,17 @@ int main(void)
             const device_control_config_t *config = device_protocol_get_config();
             rbw_mode_t requested_mode = (rbw_mode_t)config->bandwidth.rbw_mode;
 
-            if (requested_mode > RBW_MODE_1M) {
+            switch (requested_mode) {
+            case RBW_MODE_10K:
+            case RBW_MODE_30K:
+            case RBW_MODE_100K:
+            case RBW_MODE_300K:
+            case RBW_MODE_1M:
+            case RBW_MODE_1K:
+                break;
+            default:
                 requested_mode = RBW_MODE_100K;
+                break;
             }
 
             if (requested_mode != applied_rbw_mode) {
@@ -217,6 +257,10 @@ static int protocol_spectrum_provider(const device_control_config_t *config,
                                       unsigned short max_points,
                                       unsigned short *out_point_count)
 {
+    if (phase_noise_engine_is_active(&g_phase_noise_engine) != 0) {
+        return -1;
+    }
+
     protocol_sweep_stream_context_t stream_context;
 
     if ((points == 0) || (out_point_count == 0)) {
@@ -290,8 +334,13 @@ static int protocol_sweep_point_callback(uint32_t freq_hz,
 static int protocol_sweep_control_handler(unsigned char action, const device_control_config_t *config)
 {
     if (action == DEVICE_PROTOCOL_SWEEP_STOP) {
-        int was_active = sweep_engine_is_active(&g_sweep_engine);
+        int was_active;
 
+        if (phase_noise_engine_is_active(&g_phase_noise_engine) != 0) {
+            return -1;
+        }
+
+        was_active = sweep_engine_is_active(&g_sweep_engine);
         sweep_engine_stop(&g_sweep_engine);
         if (was_active == 0) {
             resume_background_capture_if_idle();
@@ -300,6 +349,10 @@ static int protocol_sweep_control_handler(unsigned char action, const device_con
     }
 
     if (action != DEVICE_PROTOCOL_SWEEP_START) {
+        return -1;
+    }
+
+    if (phase_noise_engine_is_active(&g_phase_noise_engine) != 0) {
         return -1;
     }
 
@@ -361,6 +414,63 @@ static int protocol_status_provider(device_status_t *status)
     status->uart_rx_overrun_count = 0U;
     status->uart_rx_resync_count = 0U;
     return 0;
+}
+static int protocol_phase_noise_handler(phase_noise_engine_action_t action,
+                                        const phase_noise_config_t *config)
+{
+    phase_noise_status_t status;
+
+    switch (action) {
+    case PHASE_NOISE_ENGINE_ACTION_CONFIGURE:
+        return phase_noise_engine_configure(&g_phase_noise_engine, config);
+
+    case PHASE_NOISE_ENGINE_ACTION_START:
+        if (sweep_engine_is_active(&g_sweep_engine) != 0) {
+            return -1;
+        }
+        release_background_capture();
+        if (dma_capture_reset() != XST_SUCCESS) {
+            g_dma_error_count++;
+            g_background_dma_error_code = BACKGROUND_DMA_ERR_RESET;
+            reset_and_resume_background_capture_if_idle();
+            return -1;
+        }
+        if (phase_noise_engine_start(&g_phase_noise_engine) != 0) {
+            reset_and_resume_background_capture_if_idle();
+            return -1;
+        }
+        return 0;
+
+    case PHASE_NOISE_ENGINE_ACTION_STOP:
+        phase_noise_engine_stop(&g_phase_noise_engine);
+        if (phase_noise_engine_is_active(&g_phase_noise_engine) == 0) {
+            phase_noise_engine_get_status(&g_phase_noise_engine, &status);
+            (void)device_protocol_send_phase_noise_status(&status);
+            reset_and_resume_background_capture_if_idle();
+        }
+        return 0;
+
+    case PHASE_NOISE_ENGINE_ACTION_GET_STATUS:
+        phase_noise_engine_get_status(&g_phase_noise_engine, &status);
+        return device_protocol_send_phase_noise_status(&status);
+
+    default:
+        return -1;
+    }
+}
+
+static int protocol_phase_noise_data_callback(const phase_noise_data_t *point,
+                                              void *context)
+{
+    (void)context;
+    return device_protocol_stream_phase_noise_point(point);
+}
+
+static int protocol_phase_noise_status_callback(const phase_noise_status_t *status,
+                                                void *context)
+{
+    (void)context;
+    return device_protocol_send_phase_noise_status(status);
 }
 static int protocol_rf_frontend_handler(const device_rf_frontend_config_t *config)
 {

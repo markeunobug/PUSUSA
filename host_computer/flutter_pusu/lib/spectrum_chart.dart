@@ -429,10 +429,10 @@ class SpectrumChart extends material.StatelessWidget {
                     material.Text('起始: $startFreqStr',
                         style: const material.TextStyle(
                             color: material.Colors.green, fontSize: 12)),
-                    material.Text('中心: $centerFreqStr',
+                    material.Text('扫宽: $spanStr',
                         style: const material.TextStyle(
                             color: material.Colors.green, fontSize: 12)),
-                    material.Text('扫宽: $spanStr',
+                    material.Text('中心: $centerFreqStr',
                         style: const material.TextStyle(
                             color: material.Colors.green, fontSize: 12)),
                     material.Text('扫描速度: $sweepSpeedStr',

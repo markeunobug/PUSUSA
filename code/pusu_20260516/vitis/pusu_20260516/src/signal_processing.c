@@ -5,6 +5,7 @@
 #include <string.h>
 #include "arm_const_structs.h"
 #include "arm_math.h"
+#include "profile_timer.h"
 #include "xil_printf.h"
 
 /* ── FFT-path static buffers (unchanged) ─────────────────────────── */
@@ -27,8 +28,8 @@ static int       accum_count;
 static int       accum_target;
 static u32       current_dma_samples = FFT_SIZE;
 
-static float32_t comp_fir_coeffs[RBW_10K_FIR_TAPS];
-static float32_t comp_fir_state[ACCUM_BUFFER_SIZE + RBW_10K_FIR_TAPS];
+static float32_t comp_fir_coeffs[RBW_1K_FIR_TAPS];
+static float32_t comp_fir_state[ACCUM_BUFFER_SIZE + RBW_1K_FIR_TAPS];
 static arm_fir_instance_f32 comp_fir_instance;
 static int       comp_fir_taps;
 static int       comp_fir_skip;
@@ -170,13 +171,17 @@ void signal_processing_accumulate_dma(volatile u16 *rx_buffer, u32 dma_samples)
     int produced;
 
     for (offset = 0; offset < dma_samples; offset += FFT_SIZE) {
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_ACC_DDC);
         ddc_mix_to_time_domain_sweep(rx_buffer + offset);
+        sweep_profile_end(SWEEP_PROFILE_SECTION_ACC_DDC);
 
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_ACC_CIC);
         produced = cic_decimator_process(time_domain_real, time_domain_imag,
                                          (int)FFT_SIZE,
                                          accum_i + accum_count,
                                          accum_q + accum_count,
                                          (int)ACCUM_BUFFER_SIZE - accum_count);
+        sweep_profile_end(SWEEP_PROFILE_SECTION_ACC_CIC);
         accum_count += produced;
     }
 }
@@ -259,26 +264,55 @@ typedef struct {
 
 static const rbw_mode_config_t *get_rbw_config(rbw_mode_t mode)
 {
-    static const rbw_mode_config_t table[] = {
-        { RBW_10K_CIC_R,  RBW_10K_CIC_N,  RBW_10K_FIR_TAPS,  RBW_10K_OBSERVE_POINTS  },
-        { RBW_30K_CIC_R,  RBW_30K_CIC_N,  RBW_30K_FIR_TAPS,  RBW_30K_OBSERVE_POINTS  },
-        { RBW_100K_CIC_R, RBW_100K_CIC_N, RBW_100K_FIR_TAPS, RBW_100K_OBSERVE_POINTS },
-        { RBW_300K_CIC_R, RBW_300K_CIC_N, RBW_300K_FIR_TAPS, RBW_300K_OBSERVE_POINTS },
-        { RBW_1M_CIC_R,   RBW_1M_CIC_N,   RBW_1M_FIR_TAPS,   RBW_1M_OBSERVE_POINTS   },
-    };
-    return &table[(int)mode];
+    static const rbw_mode_config_t cfg_1k =
+        { RBW_1K_CIC_R,   RBW_1K_CIC_N,   RBW_1K_FIR_TAPS,   RBW_1K_OBSERVE_POINTS   };
+    static const rbw_mode_config_t cfg_10k =
+        { RBW_10K_CIC_R,  RBW_10K_CIC_N,  RBW_10K_FIR_TAPS,  RBW_10K_OBSERVE_POINTS  };
+    static const rbw_mode_config_t cfg_30k =
+        { RBW_30K_CIC_R,  RBW_30K_CIC_N,  RBW_30K_FIR_TAPS,  RBW_30K_OBSERVE_POINTS  };
+    static const rbw_mode_config_t cfg_100k =
+        { RBW_100K_CIC_R, RBW_100K_CIC_N, RBW_100K_FIR_TAPS, RBW_100K_OBSERVE_POINTS };
+    static const rbw_mode_config_t cfg_300k =
+        { RBW_300K_CIC_R, RBW_300K_CIC_N, RBW_300K_FIR_TAPS, RBW_300K_OBSERVE_POINTS };
+    static const rbw_mode_config_t cfg_1m =
+        { RBW_1M_CIC_R,   RBW_1M_CIC_N,   RBW_1M_FIR_TAPS,   RBW_1M_OBSERVE_POINTS   };
+
+    switch (mode) {
+    case RBW_MODE_1K:
+        return &cfg_1k;
+    case RBW_MODE_10K:
+        return &cfg_10k;
+    case RBW_MODE_30K:
+        return &cfg_30k;
+    case RBW_MODE_100K:
+        return &cfg_100k;
+    case RBW_MODE_300K:
+        return &cfg_300k;
+    case RBW_MODE_1M:
+        return &cfg_1m;
+    default:
+        return &cfg_100k;
+    }
 }
 
 static int get_rbw_skip_points(rbw_mode_t mode)
 {
-    static const int table[] = {
-        RBW_10K_SKIP_POINTS,
-        RBW_30K_SKIP_POINTS,
-        RBW_100K_SKIP_POINTS,
-        RBW_300K_SKIP_POINTS,
-        RBW_1M_SKIP_POINTS,
-    };
-    return table[(int)mode];
+    switch (mode) {
+    case RBW_MODE_1K:
+        return RBW_1K_SKIP_POINTS;
+    case RBW_MODE_10K:
+        return RBW_10K_SKIP_POINTS;
+    case RBW_MODE_30K:
+        return RBW_30K_SKIP_POINTS;
+    case RBW_MODE_100K:
+        return RBW_100K_SKIP_POINTS;
+    case RBW_MODE_300K:
+        return RBW_300K_SKIP_POINTS;
+    case RBW_MODE_1M:
+        return RBW_1M_SKIP_POINTS;
+    default:
+        return RBW_100K_SKIP_POINTS;
+    }
 }
 
 /* ── Static: sweep-path configuration ────────────────────────────── */
@@ -366,12 +400,23 @@ static void compensating_fir_init(float32_t cutoff_hz, int taps)
 
 static void apply_compensating_fir(void)
 {
-    int fir_out_len = accum_count - comp_fir_taps + 1;
+    int first_valid;
+    int out_len;
     int i;
 
-    if (fir_out_len <= 0 || accum_count == 0) {
+    if (accum_count <= 0 || comp_fir_taps <= 0) {
         return;
     }
+
+    /* arm_fir_f32() emits one output per input sample with zero initial
+     * history.  stage[0..taps-2] are startup transient; apply the configured
+     * skip after the first complete FIR window. */
+    first_valid = (comp_fir_taps - 1) + comp_fir_skip;
+    if (first_valid >= accum_count) {
+        accum_count = 0;
+        return;
+    }
+    out_len = accum_count - first_valid;
 
     /* Process I channel */
     {
@@ -382,8 +427,8 @@ static void apply_compensating_fir(void)
                          comp_fir_state, (uint32_t)accum_count);
         arm_fir_f32(&inst, accum_i, stage_real, (uint32_t)accum_count);
 
-        for (i = comp_fir_skip; i < fir_out_len && (i - comp_fir_skip) < accum_count; i++) {
-            accum_i[i - comp_fir_skip] = stage_real[i];
+        for (i = 0; i < out_len; i++) {
+            accum_i[i] = stage_real[first_valid + i];
         }
     }
 
@@ -396,15 +441,12 @@ static void apply_compensating_fir(void)
                          comp_fir_state, (uint32_t)accum_count);
         arm_fir_f32(&inst, accum_q, stage_imag, (uint32_t)accum_count);
 
-        for (i = comp_fir_skip; i < fir_out_len && (i - comp_fir_skip) < accum_count; i++) {
-            accum_q[i - comp_fir_skip] = stage_imag[i];
+        for (i = 0; i < out_len; i++) {
+            accum_q[i] = stage_imag[first_valid + i];
         }
     }
 
-    accum_count = fir_out_len - comp_fir_skip;
-    if (accum_count < 0) {
-        accum_count = 0;
-    }
+    accum_count = out_len;
 }
 
 /* ── Static: power measurement on accumulated (FIR-filtered) data ── */
@@ -533,6 +575,7 @@ static void rbw_lpf_init(float32_t cutoff_hz)
 
 static const char *rbw_mode_name(rbw_mode_t mode)
 {
+    if (mode == RBW_MODE_1K)   return "1K";
     if (mode == RBW_MODE_10K)  return "10K";
     if (mode == RBW_MODE_30K)  return "30K";
     if (mode == RBW_MODE_100K) return "100K";
@@ -543,6 +586,7 @@ static const char *rbw_mode_name(rbw_mode_t mode)
 
 static float32_t rbw_mode_cutoff_hz(rbw_mode_t mode)
 {
+    if (mode == RBW_MODE_1K)   return RBW_1K_HZ;
     if (mode == RBW_MODE_10K)  return RBW_10K_HZ;
     if (mode == RBW_MODE_30K)  return RBW_30K_HZ;
     if (mode == RBW_MODE_100K) return RBW_100K_HZ;

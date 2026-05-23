@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/learning/pusu_V2/CMSIS-DSP-main/bulid/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:fl_chart/fl_chart.dart';
 
 import 'device_models.dart';
+import 'phase_noise_models.dart';
 import 'serial_port_manager.dart';
 
 class SpectrumSegment {
@@ -22,9 +23,56 @@ class SpectrumSegment {
   });
 }
 
+class SweepProfileSection {
+  final int id;
+  final int count;
+  final int totalTicks;
+  final int minTicks;
+  final int maxTicks;
+
+  const SweepProfileSection({
+    required this.id,
+    required this.count,
+    required this.totalTicks,
+    required this.minTicks,
+    required this.maxTicks,
+  });
+
+  double get averageTicks => count == 0 ? 0.0 : totalTicks / count;
+}
+
+class SweepProfileReport {
+  final int version;
+  final bool enabled;
+  final int rbwMode;
+  final int countsPerSecond;
+  final int sweepCount;
+  final int pointCount;
+  final int dmaRearmCount;
+  final List<SweepProfileSection> sections;
+
+  const SweepProfileReport({
+    required this.version,
+    required this.enabled,
+    required this.rbwMode,
+    required this.countsPerSecond,
+    required this.sweepCount,
+    required this.pointCount,
+    required this.dmaRearmCount,
+    required this.sections,
+  });
+
+  double ticksToMs(num ticks) {
+    if (countsPerSecond <= 0) return 0.0;
+    return ticks * 1000.0 / countsPerSecond;
+  }
+}
+
 class SerialProtocol {
   static const int _minFrameLength = 7;
   static const int _maxPayloadLength = 16384;
+  static const int _phaseNoiseVersion = 1;
+  static const int _phaseNoiseFlagAllowEstimatedEnbw = 1 << 1;
 
   final SerialPortManager _manager;
   final StreamController<SpectrumSegment> _spectrumStream =
@@ -32,6 +80,12 @@ class SerialProtocol {
   final StreamController<Map<String, dynamic>> _statusStream =
       StreamController.broadcast();
   final StreamController<RfFrontendStatus> _rfFrontendStatusStream =
+      StreamController.broadcast();
+  final StreamController<SweepProfileReport> _sweepProfileStream =
+      StreamController.broadcast();
+  final StreamController<PhaseNoiseDataFrame> _phaseNoiseStream =
+      StreamController.broadcast();
+  final StreamController<PhaseNoiseStatusFrame> _phaseNoiseStatusStream =
       StreamController.broadcast();
   Uint8List _buffer = Uint8List(0);
   Completer<bool>? _handshakeCompleter;
@@ -49,6 +103,11 @@ class SerialProtocol {
   Stream<Map<String, dynamic>> get statusStream => _statusStream.stream;
   Stream<RfFrontendStatus> get rfFrontendStatusStream =>
       _rfFrontendStatusStream.stream;
+  Stream<SweepProfileReport> get sweepProfileStream =>
+      _sweepProfileStream.stream;
+  Stream<PhaseNoiseDataFrame> get phaseNoiseStream => _phaseNoiseStream.stream;
+  Stream<PhaseNoiseStatusFrame> get phaseNoiseStatusStream =>
+      _phaseNoiseStatusStream.stream;
 
   void resetReceiveBuffer() {
     _buffer = Uint8List(0);
@@ -339,6 +398,57 @@ class SerialProtocol {
           'error=${status.error}',
         );
         break;
+      case 0x85:
+        final report = parseSweepProfile(data);
+        if (report == null) {
+          badFrameCount++;
+          print(
+            'Sweep profile frame invalid: len=${data.length} '
+            '(bad=$badFrameCount, crc=$crcErrorCount, resync=$resyncCount)',
+          );
+          break;
+        }
+        _sweepProfileStream.add(report);
+        _printSweepProfile(report);
+        break;
+      case 0x86:
+        final point = parsePhaseNoiseData(data);
+        if (point == null) {
+          badFrameCount++;
+          print(
+            'Phase-noise data frame invalid: len=${data.length} '
+            '(bad=$badFrameCount, crc=$crcErrorCount, resync=$resyncCount)',
+          );
+          break;
+        }
+        _phaseNoiseStream.add(point);
+        print(
+          'Phase-noise data: trace=${point.traceId} '
+          'progress=${point.receivedPoints}/${point.plannedTotalPoints} '
+          'avg=${point.averageIndex} offset=${point.offsetHz}Hz '
+          'pn=${point.phaseNoiseDbcHz.toStringAsFixed(2)}dBc/Hz '
+          'done=${point.done}',
+        );
+        break;
+      case 0x87:
+        final status = parsePhaseNoiseStatus(data);
+        if (status == null) {
+          badFrameCount++;
+          print(
+            'Phase-noise status frame invalid: len=${data.length} '
+            '(bad=$badFrameCount, crc=$crcErrorCount, resync=$resyncCount)',
+          );
+          break;
+        }
+        _phaseNoiseStatusStream.add(status);
+        print(
+          'Phase-noise status: state=${status.state} trace=${status.traceId} '
+          'progress=${status.receivedPoints}/${status.plannedTotalPoints} '
+          'avg=${status.averageIndex} offset=${status.currentOffsetHz}Hz '
+          'rbw=${status.currentRbwHz}Hz error=${status.errorCode} '
+          'warning=${status.warningCode}',
+        );
+        break;
       default:
         unknownFrameCount++;
         print(
@@ -624,6 +734,136 @@ class SerialProtocol {
     _manager.sendData(_buildFrame(0x0D, Uint8List(0)));
   }
 
+  void getSweepProfile() {
+    _manager.sendData(_buildFrame(0x0E, Uint8List(0)));
+  }
+
+  int _encodePhaseNoiseCarrierMode(PhaseNoiseCarrierMode mode) {
+    switch (mode) {
+      case PhaseNoiseCarrierMode.manual:
+        return 0;
+      case PhaseNoiseCarrierMode.auto:
+        return 1;
+    }
+  }
+
+  int _encodePhaseNoiseSidebandMode(PhaseNoiseSidebandMode mode) {
+    switch (mode) {
+      case PhaseNoiseSidebandMode.upper:
+        return 0;
+      case PhaseNoiseSidebandMode.lower:
+        return 1;
+      case PhaseNoiseSidebandMode.both:
+        return 2;
+    }
+  }
+
+  Uint8List _buildPhaseNoiseConfigData(
+    PhaseNoiseConfig config, {
+    bool continuous = false,
+    bool emitIntermediateAverages = true,
+  }) {
+    final data = Uint8List(36);
+    final byteData = data.buffer.asByteData();
+    var flags = _phaseNoiseFlagAllowEstimatedEnbw;
+    if (continuous) {
+      flags |= 1 << 0;
+    }
+    if (emitIntermediateAverages) {
+      flags |= 1 << 2;
+    }
+
+    data[0] = _phaseNoiseVersion;
+    data[1] = flags & 0xFF;
+    data[2] = _encodePhaseNoiseCarrierMode(config.carrierMode);
+    // v1 firmware currently accepts upper sideband only.
+    data[3] = _encodePhaseNoiseSidebandMode(PhaseNoiseSidebandMode.upper);
+    byteData.setFloat64(
+      4,
+      config.protocolNominalCarrierHz,
+      Endian.little,
+    );
+    byteData.setFloat64(12, config.startOffsetHz, Endian.little);
+    byteData.setFloat64(20, config.stopOffsetHz, Endian.little);
+    byteData.setUint16(
+      28,
+      config.pointsPerDecade.clamp(1, 0xFFFF).toInt(),
+      Endian.little,
+    );
+    byteData.setUint16(
+      30,
+      config.averageTarget.clamp(1, 0xFFFF).toInt(),
+      Endian.little,
+    );
+    byteData.setUint16(
+      32,
+      (config.carrierSearchSpanHz / 1000.0).round().clamp(0, 0xFFFF).toInt(),
+      Endian.little,
+    );
+    byteData.setInt8(
+      34,
+      config.minimumCarrierLevelDbm.round().clamp(-128, 127).toInt(),
+    );
+    data[35] = 0;
+    return data;
+  }
+
+  void setPhaseNoiseConfig(
+    PhaseNoiseConfig config, {
+    bool continuous = false,
+    bool emitIntermediateAverages = true,
+  }) {
+    _manager.sendData(
+      _buildFrame(
+        0x0F,
+        _buildPhaseNoiseConfigData(
+          config,
+          continuous: continuous,
+          emitIntermediateAverages: emitIntermediateAverages,
+        ),
+      ),
+    );
+  }
+
+  Future<bool> setPhaseNoiseConfigConfirmed(
+    PhaseNoiseConfig config, {
+    bool continuous = false,
+    bool emitIntermediateAverages = true,
+  }) {
+    return _sendAndWaitAck(
+      0x0F,
+      _buildPhaseNoiseConfigData(
+        config,
+        continuous: continuous,
+        emitIntermediateAverages: emitIntermediateAverages,
+      ),
+    );
+  }
+
+  void startPhaseNoise() {
+    _manager.sendData(_buildFrame(0x10, Uint8List(0)));
+  }
+
+  Future<bool> startPhaseNoiseConfirmed() {
+    return _sendAndWaitAck(0x10, Uint8List(0));
+  }
+
+  void stopPhaseNoise() {
+    _manager.sendData(_buildFrame(0x11, Uint8List(0)));
+  }
+
+  Future<bool> stopPhaseNoiseConfirmed() {
+    return _sendAndWaitAck(0x11, Uint8List(0));
+  }
+
+  void getPhaseNoiseStatus() {
+    _manager.sendData(_buildFrame(0x12, Uint8List(0)));
+  }
+
+  Future<bool> getPhaseNoiseStatusConfirmed() {
+    return _sendAndWaitAck(0x12, Uint8List(0));
+  }
+
   RfFrontendStatus? parseRfFrontendStatus(Uint8List data) {
     if (data.length < 5) {
       return null;
@@ -640,6 +880,167 @@ class SerialProtocol {
     );
   }
 
+  SweepProfileReport? parseSweepProfile(Uint8List data) {
+    const headerLength = 24;
+    const sectionLength = 30;
+
+    if (data.length < headerLength) {
+      return null;
+    }
+
+    final byteData = data.buffer.asByteData(data.offsetInBytes, data.length);
+    final sectionCount = byteData.getUint16(20, Endian.big);
+    final expectedLength = headerLength + sectionCount * sectionLength;
+    if (data.length < expectedLength) {
+      return null;
+    }
+
+    final sections = <SweepProfileSection>[];
+    for (int i = 0; i < sectionCount; i++) {
+      final offset = headerLength + i * sectionLength;
+      sections.add(
+        SweepProfileSection(
+          id: data[offset],
+          count: byteData.getUint32(offset + 2, Endian.big),
+          totalTicks: byteData.getUint64(offset + 6, Endian.big),
+          minTicks: byteData.getUint64(offset + 14, Endian.big),
+          maxTicks: byteData.getUint64(offset + 22, Endian.big),
+        ),
+      );
+    }
+
+    return SweepProfileReport(
+      version: data[0],
+      enabled: data[1] != 0,
+      rbwMode: data[2],
+      countsPerSecond: byteData.getUint32(4, Endian.big),
+      sweepCount: byteData.getUint32(8, Endian.big),
+      pointCount: byteData.getUint32(12, Endian.big),
+      dmaRearmCount: byteData.getUint32(16, Endian.big),
+      sections: sections,
+    );
+  }
+
+  PhaseNoiseDataFrame? parsePhaseNoiseData(Uint8List data) {
+    const payloadLength = 42;
+    if (data.length != payloadLength || data[0] != _phaseNoiseVersion) {
+      return null;
+    }
+
+    final byteData = data.buffer.asByteData(data.offsetInBytes, data.length);
+    final plannedTotalPoints = byteData.getUint16(4, Endian.big);
+    final currentIndex = byteData.getUint16(6, Endian.big);
+    final averageIndex = byteData.getUint16(8, Endian.big);
+    final receivedPoints = plannedTotalPoints == 0
+        ? 0
+        : (currentIndex + 1).clamp(0, plannedTotalPoints).toInt();
+
+    return PhaseNoiseDataFrame(
+      version: data[0],
+      flags: data[1],
+      traceId: byteData.getUint16(2, Endian.big),
+      plannedTotalPoints: plannedTotalPoints,
+      receivedPoints: receivedPoints,
+      currentIndex: currentIndex,
+      averageIndex: averageIndex,
+      carrierHz: byteData.getFloat64(10, Endian.little),
+      carrierLevelDbm: byteData.getFloat32(18, Endian.little),
+      offsetHz: byteData.getUint32(22, Endian.little),
+      noisePowerDbm: byteData.getFloat32(26, Endian.little),
+      phaseNoiseDbcHz: byteData.getFloat32(30, Endian.little),
+      rbwHz: byteData.getUint32(34, Endian.little),
+      errorCode: data[38],
+    );
+  }
+
+  PhaseNoiseStatusFrame? parsePhaseNoiseStatus(Uint8List data) {
+    const payloadLength = 64;
+    if (data.length != payloadLength || data[0] != _phaseNoiseVersion) {
+      return null;
+    }
+
+    final byteData = data.buffer.asByteData(data.offsetInBytes, data.length);
+    final plannedTotalPoints = byteData.getUint16(6, Endian.big);
+    final currentIndex = byteData.getUint16(8, Endian.big);
+    final averageIndex = byteData.getUint16(10, Endian.big);
+    final receivedPoints = plannedTotalPoints == 0
+        ? 0
+        : (currentIndex + 1).clamp(0, plannedTotalPoints).toInt();
+
+    return PhaseNoiseStatusFrame(
+      version: data[0],
+      state: data[1],
+      flags: data[2],
+      errorCode: data[3],
+      traceId: byteData.getUint16(4, Endian.big),
+      plannedTotalPoints: plannedTotalPoints,
+      receivedPoints: receivedPoints,
+      currentIndex: currentIndex,
+      averageIndex: averageIndex,
+      nominalCarrierHz: byteData.getFloat64(12, Endian.little),
+      measuredCarrierHz: byteData.getFloat64(20, Endian.little),
+      carrierLevelDbm: byteData.getFloat32(28, Endian.little),
+      startOffsetHz: byteData.getFloat64(32, Endian.little),
+      stopOffsetHz: byteData.getFloat64(40, Endian.little),
+      currentOffsetHz: byteData.getUint32(48, Endian.little),
+      currentRbwHz: byteData.getUint32(52, Endian.little),
+      elapsedMs: byteData.getUint32(56, Endian.little),
+      warningCode: byteData.getUint16(60, Endian.little),
+    );
+  }
+
+  String _sweepProfileSectionName(int id) {
+    switch (id) {
+      case 0:
+        return 'point_total';
+      case 1:
+        return 'set_lo1';
+      case 2:
+        return 'wait_lock';
+      case 3:
+        return 'dma_reset';
+      case 4:
+        return 'dma_start';
+      case 5:
+        return 'dma_wait';
+      case 6:
+        return 'accumulate_dma';
+      case 7:
+        return 'measure';
+      case 8:
+        return 'emit_uart';
+      case 9:
+        return 'acc_ddc';
+      case 10:
+        return 'acc_cic';
+      default:
+        return 'section_$id';
+    }
+  }
+
+  void _printSweepProfile(SweepProfileReport report) {
+    print(
+      'Sweep profile: enabled=${report.enabled}, version=${report.version}, '
+      'rbwMode=${report.rbwMode}, points=${report.pointCount}, '
+      'dmaRearms=${report.dmaRearmCount}, ticksPerSec=${report.countsPerSecond}',
+    );
+
+    for (final section in report.sections) {
+      final perPointMs = report.pointCount > 0
+          ? report.ticksToMs(section.totalTicks / report.pointCount)
+          : 0.0;
+
+      print(
+        '  ${_sweepProfileSectionName(section.id)}: '
+        'count=${section.count}, '
+        'avg/call=${report.ticksToMs(section.averageTicks).toStringAsFixed(3)}ms, '
+        'per_point=${perPointMs.toStringAsFixed(3)}ms, '
+        'min=${report.ticksToMs(section.minTicks).toStringAsFixed(3)}ms, '
+        'max=${report.ticksToMs(section.maxTicks).toStringAsFixed(3)}ms',
+      );
+    }
+  }
+
   void getStatus() {
     _manager.sendData(_buildFrame(0x07, Uint8List(0)));
   }
@@ -652,5 +1053,8 @@ class SerialProtocol {
     _spectrumStream.close();
     _statusStream.close();
     _rfFrontendStatusStream.close();
+    _sweepProfileStream.close();
+    _phaseNoiseStream.close();
+    _phaseNoiseStatusStream.close();
   }
 }

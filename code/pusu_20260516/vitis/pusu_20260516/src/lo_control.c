@@ -86,6 +86,12 @@ int lo_control_wait_lock(uint8_t device_index, uint32_t timeout_loops)
 
 int lo_control_is_locked(uint8_t device_index)
 {
+
+//	if (device_index == LO_CONTROL_DEVICE_LO1) {
+//	        return XST_SUCCESS;
+//	    }
+
+
     if (lmx2572_board_is_locked(device_index)) {
         lo_control_update_lock_indicator(device_index, 1);
         return XST_SUCCESS;

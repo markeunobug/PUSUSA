@@ -1,11 +1,13 @@
+import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_libserialport/flutter_libserialport.dart';
-import 'dart:async';
 
 enum ConnectionStatus {
-  connected,    // 绿色
-  disconnected, // 红色
-  noPorts       // 灰色
+  connected,
+  disconnected,
+  noPorts,
 }
 
 class SerialPortManager extends ChangeNotifier {
@@ -14,16 +16,19 @@ class SerialPortManager extends ChangeNotifier {
   bool isConnected = false;
   SerialPort? _serialPort;
   Timer? _refreshTimer;
-  final ValueNotifier<ConnectionStatus> connectionStatus = ValueNotifier<ConnectionStatus>(ConnectionStatus.noPorts);
+  final ValueNotifier<ConnectionStatus> connectionStatus =
+      ValueNotifier<ConnectionStatus>(ConnectionStatus.noPorts);
 
-  final StreamController<Uint8List> _rxStreamController = StreamController.broadcast();
+  final StreamController<Uint8List> _rxStreamController =
+      StreamController.broadcast();
   Stream<Uint8List> get stream => _rxStreamController.stream;
 
   Timer? _readTimer;
 
   void init() {
     _refreshPorts();
-    _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) => _refreshPorts());
+    _refreshTimer =
+        Timer.periodic(const Duration(seconds: 5), (_) => _refreshPorts());
   }
 
   @override
@@ -63,27 +68,24 @@ class SerialPortManager extends ChangeNotifier {
     if (selectedPort == null || isConnected) return;
     try {
       _serialPort = SerialPort(selectedPort!);
-      _serialPort!.config.baudRate = 921600; // 固定波特率
-      _serialPort!.config.bits = 8;
-      _serialPort!.config.stopBits = 1;
-      _serialPort!.config.parity = SerialPortParity.none;
+      final config = SerialPortConfig()
+        ..baudRate = 921600
+        ..bits = 8
+        ..stopBits = 1
+        ..parity = SerialPortParity.none;
+      _serialPort!.config = config;
+
       if (_serialPort!.openReadWrite()) {
-        // 清空缓冲区：读取所有可用字节并丢弃
-        int bytes = _serialPort!.bytesAvailable;
-        if (bytes > 0) {
-          _serialPort!.read(bytes);  // 丢弃
-          print('Cleared $bytes residual bytes on connect');
-        }
+        clearInputBuffer();
         isConnected = true;
         _updateStatus();
         notifyListeners();
-        _refreshPorts(); // 连接后刷新
+        _refreshPorts();
         _startReading();
       } else {
-        throw Exception('无法打开端口: ${SerialPort.lastError}');
+        throw Exception('Failed to open serial port: ${SerialPort.lastError}');
       }
     } catch (e) {
-      // 错误处理在UI层
       rethrow;
     }
   }
@@ -100,7 +102,7 @@ class SerialPortManager extends ChangeNotifier {
         }
       } catch (e) {
         print('Serial error: $e');
-        disconnect(); // 检测到错误时自动断开
+        disconnect();
       }
     });
   }
@@ -111,14 +113,32 @@ class SerialPortManager extends ChangeNotifier {
         _serialPort!.write(data);
       } catch (e) {
         print('Write error: $e');
-        disconnect(); // 写入失败时也断开
+        disconnect();
       }
+    }
+  }
+
+  void clearInputBuffer() {
+    if (_serialPort == null || !_serialPort!.isOpen) return;
+
+    int totalCleared = 0;
+    for (int attempt = 0; attempt < 8; attempt++) {
+      final int bytes = _serialPort!.bytesAvailable;
+      if (bytes <= 0) break;
+
+      final data = _serialPort!.read(bytes);
+      totalCleared += data.length;
+      if (data.isEmpty) break;
+    }
+
+    if (totalCleared > 0) {
+      print('Cleared $totalCleared residual bytes from serial input buffer');
     }
   }
 
   void disconnect() {
     _disconnect();
-    _refreshPorts(); // 断开后刷新
+    _refreshPorts();
   }
 
   void _disconnect() {
@@ -146,7 +166,6 @@ class SerialPortManager extends ChangeNotifier {
   }
 }
 
-// 辅助函数
 bool setEquals<T>(Set<T> a, Set<T> b) {
   if (a.length != b.length) return false;
   return a.every(b.contains);

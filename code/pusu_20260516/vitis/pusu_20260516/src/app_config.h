@@ -111,10 +111,12 @@
 #define AMPLITUDE_FREQ_CAL_DB_3       0.0f
 
 #define SIGNAL_PROCESSING_VERBOSE 0
+#define SWEEP_PROFILE_ENABLE 1
 
-/* ADC full-scale reference: LTC2208 2.25 Vpp diff 鈫� 1:2 balun 鈫� 50惟 */
+/* ADC full-scale reference: LTC2208 2.25 Vpp diff 閳拷 1:2 balun 閳拷 50鎯� */
 #define ADC_INPUT_FULL_SCALE_DBM  8.02f
 
+#define RBW_1K_HZ           1000.0f
 #define RBW_10K_HZ          10000.0f
 #define RBW_30K_HZ          30000.0f
 #define RBW_100K_HZ         100000.0f
@@ -133,6 +135,8 @@
 #define RBW_30K_CIC_N         5U
 #define RBW_10K_CIC_R         1300U
 #define RBW_10K_CIC_N         5U
+#define RBW_1K_CIC_R          13000U
+#define RBW_1K_CIC_N          5U
 
 /* Compensating FIR filter taps per RBW mode */
 #define RBW_1M_FIR_TAPS       64U
@@ -140,15 +144,17 @@
 #define RBW_100K_FIR_TAPS     128U
 #define RBW_30K_FIR_TAPS      256U
 #define RBW_10K_FIR_TAPS      256U
+#define RBW_1K_FIR_TAPS       256U
 
 /* Decimated output target per sweep point (post-CIC, post-FIR-transient).
- * Chosen for ~0.6-1.0 dB power measurement accuracy (蟽 鈮� 4.34/鈭歂_indep).
- * Effective independent samples 鈮� T_measure 脳 RBW 鈮� observe_pts 脳 RBW/fs_out. */
+ * Chosen for ~0.6-1.0 dB power measurement accuracy (锜� 閳拷 4.34/閳瓊_indep).
+ * Effective independent samples 閳拷 T_measure 鑴� RBW 閳拷 observe_pts 鑴� RBW/fs_out. */
 #define RBW_1M_OBSERVE_POINTS   384U
 #define RBW_300K_OBSERVE_POINTS 384U
 #define RBW_100K_OBSERVE_POINTS 384U
 #define RBW_30K_OBSERVE_POINTS  256U
 #define RBW_10K_OBSERVE_POINTS  256U
+#define RBW_1K_OBSERVE_POINTS   256U
 
 /* FIR transient skip: ceil(fir_taps/2) per mode */
 #define RBW_1M_SKIP_POINTS      32U
@@ -156,10 +162,12 @@
 #define RBW_100K_SKIP_POINTS    64U
 #define RBW_30K_SKIP_POINTS     128U
 #define RBW_10K_SKIP_POINTS     128U
+#define RBW_1K_SKIP_POINTS      128U
 
 /* Accumulation buffer: holds decimated CIC output across DMA transfers.
  * Max needed = observe + skip + fir_taps:
- *   RBW_10K: 256 + 128 + 256 = 640 鈫� 768 for margin */
+ *   RBW_10K: 256 + 128 + 256 = 640
+ *   RBW_1K:  256 + 128 + 256 = 640 */
 #define ACCUM_BUFFER_SIZE     768U
 
 typedef enum {
@@ -167,7 +175,8 @@ typedef enum {
     RBW_MODE_30K = 1,
     RBW_MODE_100K = 2,
     RBW_MODE_300K = 3,
-    RBW_MODE_1M = 4
+    RBW_MODE_1M = 4,
+    RBW_MODE_1K = 5
 } rbw_mode_t;
 
 #endif

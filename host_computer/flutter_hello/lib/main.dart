@@ -5,16 +5,16 @@ import 'dart:math' as math;
 import 'dart:async';
 import 'package:fl_chart/fl_chart.dart';
 
-// 导入串口相关
+// 瀵煎叆涓插彛鐩稿叧
 import 'serial_port_manager.dart';
 import 'serial_port_selector.dart';
 import 'serial_protocol.dart';
 import 'device_models.dart';
 
-// 导入自定义频谱图组件
+// 瀵煎叆鑷畾涔夐璋卞浘缁勪欢
 import 'spectrum_chart.dart';
 
-// ==================== 扫描模式枚举（顶层） ====================
+// ==================== 鎵弿模式鏋氫妇锛堥《灞傦級 ====================
 enum SweepMode { standard, realTime }
 
 void main() {
@@ -27,7 +27,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return FluentApp(
-      title: 'Spectrum Analyzer BUILD 2026-04-13 SF1',
+      title: 'Spectrum Analyzer BUILD 2026-04-27 DEFAULT50M',
       theme: FluentThemeData(
         brightness: Brightness.dark,
         accentColor: Colors.blue,
@@ -46,7 +46,7 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   static const int _defaultSpectrumPointCount = 128;
-  static const String _buildTag = 'BUILD 2026-04-13 SF1';
+  static const String _buildTag = 'BUILD 2026-04-27 DEFAULT50M';
 
   final FocusNode startFreqFocus = FocusNode();
   final FocusNode stopFreqFocus = FocusNode();
@@ -57,87 +57,105 @@ class _MyHomePageState extends State<MyHomePage> {
   final FocusNode vbwFocus = FocusNode();
   final FocusNode scaleFocus = FocusNode();
 
-  // 单位选项列表
+  // 鍗曚綅閫夐」鍒楄〃
   final List<String> freqUnits = ['Hz', 'kHz', 'MHz', 'GHz'];
 
-  // Frequency 参数控制器和单位
-  final TextEditingController startFreqController = TextEditingController(text: '0');
-  final TextEditingController stopFreqController = TextEditingController(text: '10');
-  final TextEditingController centerFreqController = TextEditingController(text: '5');
-  final TextEditingController spanController = TextEditingController(text: '10');
-  final ValueNotifier<String> startFreqUnit = ValueNotifier<String>('GHz');
+  // 频率 鍙傛暟鎺у埗鍣ㄥ拰鍗曚綅
+  final TextEditingController startFreqController =
+      TextEditingController(text: '50');
+  final TextEditingController stopFreqController =
+      TextEditingController(text: '1.5');
+  final TextEditingController centerFreqController =
+      TextEditingController(text: '775');
+  final TextEditingController spanController =
+      TextEditingController(text: '1450');
+  final ValueNotifier<String> startFreqUnit = ValueNotifier<String>('MHz');
   final ValueNotifier<String> stopFreqUnit = ValueNotifier<String>('GHz');
-  final ValueNotifier<String> centerFreqUnit = ValueNotifier<String>('GHz');
-  final ValueNotifier<String> spanUnit = ValueNotifier<String>('GHz');
+  final ValueNotifier<String> centerFreqUnit = ValueNotifier<String>('MHz');
+  final ValueNotifier<String> spanUnit = ValueNotifier<String>('MHz');
 
-  // Amplitude 参数
-  final TextEditingController refLevelController = TextEditingController(text: '0');
+  // 幅度 鍙傛暟
+  final TextEditingController refLevelController =
+      TextEditingController(text: '0');
   final ValueNotifier<String> attenuatorValue = ValueNotifier<String>('自动');
   final ValueNotifier<String> preAmpValue = ValueNotifier<String>('自动');
 
-  // BW 参数状态
-  final ValueNotifier<String> rbwMode = ValueNotifier<String>('自动');
-  final ValueNotifier<String> rbwUnit = ValueNotifier<String>('Hz');
-  final TextEditingController rbwController = TextEditingController(text: '0');
+  // BW 鍙傛暟鐘舵€?
+  final ValueNotifier<String> rbwMode = ValueNotifier<String>('1 MHz');
+  final ValueNotifier<String> rbwUnit = ValueNotifier<String>('MHz');
+  final TextEditingController rbwController = TextEditingController(text: '1');
   final ValueNotifier<String> vbwMode = ValueNotifier<String>('VBW=RBW');
   final ValueNotifier<String> vbwUnit = ValueNotifier<String>('Hz');
   final TextEditingController vbwController = TextEditingController(text: '0');
 
-  // Detect 参数状态
+  // 检波 鍙傛暟鐘舵€?
   final ValueNotifier<String> detectMode = ValueNotifier<String>('平均');
 
-  // Graph 参数
-  final TextEditingController scalePerGridController = TextEditingController(text: '10');
-  final TextEditingController pointCountController = TextEditingController(text: '128');
+  // 图形 鍙傛暟
+  final TextEditingController scalePerGridController =
+      TextEditingController(text: '10');
+  final TextEditingController pointCountController =
+      TextEditingController(text: '128');
 
-  // 扫描速度（设置值）
+  // 鎵弿閫熷害锛堣缃€硷級
   final ValueNotifier<double> sweepSpeed = ValueNotifier<double>(30.0);
 
-  // 扫描模式（默认标准模式）
+  // 鎵弿模式锛堥粯璁ゆ爣鍑嗘ā寮忥級
   SweepMode _sweepMode = SweepMode.standard;
   final FlyoutController _modeFlyoutController = FlyoutController();
+  ConnectionStatus? _lastConnectionStatus;
 
-  // 串口管理
+  // 涓插彛绠＄悊
   late SerialPortManager _serialManager;
   late SerialProtocol _protocol;
 
   final FlyoutController _serialFlyoutController = FlyoutController();
 
-  // 频谱数据
+  // 棰戣氨鏁版嵁
   List<FlSpot> _spectrumData = [];
 
-  // 连续扫描定时器
+  // 连续鎵弿瀹氭椂鍣?
   Timer? _continuousSweepTimer;
   Timer? _spectrumRequestTimeoutTimer;
+  Timer? _sweepAssembleTimer;
+  Timer? _startupSyncTimer;
   bool _spectrumRequestInFlight = false;
+  bool _isContinuousSweepRunning = false;
+  bool _deviceResponsive = false;
+  int _startupSyncAttempts = 0;
+  int? _activeSweepTimestamp;
+  final Map<double, double> _displaySweepPoints = {};
+  final Map<double, double> _pendingSweepPoints = {};
 
-  // Marker 管理
+  // 游标 绠＄悊
   List<Marker> _markers = [];
   Marker? _currentMarker;
   final TextEditingController _markerFreqController = TextEditingController();
   final ValueNotifier<String> _markerFreqUnit = ValueNotifier<String>('GHz');
 
-  // 自动峰值标注开关
+  // 自动宄板€兼爣娉ㄥ紑鍏?
   final ValueNotifier<bool> autoPeakEnabled = ValueNotifier<bool>(true);
 
-  // 最小峰间距系数（专业频谱仪通常1~3倍RBW）
+  // 鏈€灏忓嘲闂磋窛绯绘暟锛堜笓涓氶璋变华閫氬父1~3鍊峈BW锛?
   final double _minPeakSpacingRatio = 1.0;
 
-  // 扫描计数相关（新增）
-  int _scanCount = 0; // 扫描次数计数器
-  DateTime? _lastScanTime; // 上次统计时间
-  double _currentSweepSpeed = 0.0; // 当前实际扫描速度（次/秒）
-  Timer? _speedCalculationTimer; // 每秒计算一次扫描速度
-  DateTime? _lastSpectrumArrivalTime; // 最近一帧频谱到达时间
+  // 鎵弿璁℃暟鐩稿叧锛堟柊澧烇級
+  int _scanCount = 0; // 鎵弿娆℃暟璁℃暟鍣?
+  DateTime? _lastScanTime; // 涓婃缁熻鏃堕棿
+  double _currentSweepSpeed = 0.0; // 褰撳墠瀹為檯鎵弿閫熷害锛堟/绉掞級
+  Timer? _speedCalculationTimer; // 姣忕璁＄畻涓€娆℃壂鎻忛€熷害
+  DateTime? _lastSpectrumArrivalTime; // 鏈€杩戜竴甯ч璋卞埌杈炬椂闂?
 
   @override
   void initState() {
     super.initState();
     _serialManager = SerialPortManager()..init();
     _protocol = SerialProtocol(_serialManager);
+    _lastConnectionStatus = _serialManager.connectionStatus.value;
 
     _protocol.spectrumStream.listen(_handleSpectrumData);
-    _protocol.getStatus();
+    _protocol.statusStream.listen(_handleStatusData);
+    _serialManager.connectionStatus.addListener(_handleConnectionStatusChanged);
 
     sweepSpeed.addListener(_sendSweepConfig);
     attenuatorValue.addListener(_sendAmplitudeConfig);
@@ -153,20 +171,22 @@ class _MyHomePageState extends State<MyHomePage> {
     });
     detectMode.addListener(_sendDetectConfig);
 
-    // 初始化固定8个Marker，初始禁用，频率为中心频率
-    _markers = List.generate(8, (index) => Marker(index + 1, _getCurrentCenterFreq(), enabled: false));
+    // 鍒濆鍖栧浐瀹?涓狹arker锛屽垵濮嬬鐢紝棰戠巼涓轰腑蹇冮鐜?
+    _markers = List.generate(8,
+        (index) => Marker(index + 1, _getCurrentCenterFreq(), enabled: false));
 
-    // 默认开启游标1，并选中
+    // 榛樿寮€鍚父鏍?锛屽苟閫変腑
     _markers[0].enabled = true;
     _selectMarker(_markers[0]);
 
-    // 初始化扫描计数相关（新增）
+    // 鍒濆鍖栨壂鎻忚鏁扮浉鍏筹紙鏂板锛?
     _lastScanTime = DateTime.now();
-    _speedCalculationTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+    _speedCalculationTimer =
+        Timer.periodic(const Duration(seconds: 1), (timer) {
       if (_lastScanTime != null) {
         final duration = DateTime.now().difference(_lastScanTime!);
         if (duration.inMilliseconds > 0) {
-          // 计算每秒扫描次数
+          // 璁＄畻姣忕鎵弿娆℃暟
           _currentSweepSpeed = _scanCount / (duration.inMilliseconds / 1000);
         } else {
           _currentSweepSpeed = 0.0;
@@ -174,16 +194,16 @@ class _MyHomePageState extends State<MyHomePage> {
       } else {
         _currentSweepSpeed = 0.0;
       }
-      // 重置计数和时间
+      // 閲嶇疆璁℃暟鍜屾椂闂?
       _scanCount = 0;
       _lastScanTime = DateTime.now();
-      setState(() {}); // 更新UI显示
+      setState(() {}); // 鏇存柊UI鏄剧ず
     });
   }
 
   @override
   void dispose() {
-    //九个 FocusNode
+    //涔濅釜 FocusNode
     startFreqFocus.dispose();
     stopFreqFocus.dispose();
     centerFreqFocus.dispose();
@@ -204,13 +224,17 @@ class _MyHomePageState extends State<MyHomePage> {
     pointCountController.dispose();
     _markerFreqController.dispose();
     _markerFreqUnit.dispose();
+    _serialManager.connectionStatus
+        .removeListener(_handleConnectionStatusChanged);
     _serialManager.dispose();
     _protocol.dispose();
     _serialFlyoutController.dispose();
     _modeFlyoutController.dispose();
     _continuousSweepTimer?.cancel();
     _spectrumRequestTimeoutTimer?.cancel();
-    _speedCalculationTimer?.cancel(); // 销毁扫描速度计算定时器
+    _sweepAssembleTimer?.cancel();
+    _startupSyncTimer?.cancel();
+    _speedCalculationTimer?.cancel(); // 閿€姣佹壂鎻忛€熷害璁＄畻瀹氭椂鍣?
     sweepSpeed.removeListener(_sendSweepConfig);
     attenuatorValue.removeListener(_sendAmplitudeConfig);
     preAmpValue.removeListener(_sendAmplitudeConfig);
@@ -227,13 +251,51 @@ class _MyHomePageState extends State<MyHomePage> {
     super.dispose();
   }
 
-  // 计算最小峰间距（基于RBW，单位：Hz）
+  void _handleConnectionStatusChanged() {
+    final status = _serialManager.connectionStatus.value;
+    final previous = _lastConnectionStatus;
+    _lastConnectionStatus = status;
+
+    if (status == ConnectionStatus.connected &&
+        previous != ConnectionStatus.connected) {
+      _serialManager.clearInputBuffer();
+      _protocol.resetReceiveBuffer();
+      _deviceResponsive = false;
+      _startupSyncAttempts = 0;
+      _startupSyncTimer?.cancel();
+      _startupSyncTimer =
+          Timer.periodic(const Duration(milliseconds: 300), (timer) {
+        if (!_serialManager.isConnected || _deviceResponsive) {
+          timer.cancel();
+          return;
+        }
+        _serialManager.clearInputBuffer();
+        _protocol.resetReceiveBuffer();
+        _startupSyncAttempts++;
+        _syncCurrentDeviceConfig();
+        _protocol.getStatus();
+        if (_startupSyncAttempts >= 8) {
+          timer.cancel();
+        }
+      });
+    }
+
+    if (status != ConnectionStatus.connected) {
+      _protocol.resetReceiveBuffer();
+      _startupSyncTimer?.cancel();
+      _deviceResponsive = false;
+      _stopContinuousSweep();
+    }
+  }
+
+  // 璁＄畻鏈€灏忓嘲闂磋窛锛堝熀浜嶳BW锛屽崟浣嶏細Hz锛?
   double _getMinPeakSpacing() {
-    double rbwHz = _parseFreq(rbwController.text, rbwUnit.value) ?? 1e6; // 默认1MHz兜底
+    double rbwHz =
+        _parseFreq(rbwController.text, rbwUnit.value) ?? 1e6; // 榛樿1MHz鍏滃簳
     return rbwHz * _minPeakSpacingRatio;
   }
 
-  // 筛选不重叠的独立峰值（间距≥最小峰间距）
+  // 绛涢€変笉閲嶅彔鐨勭嫭绔嬪嘲鍊硷紙闂磋窛鈮ユ渶灏忓嘲闂磋窛锛?
   List<FlSpot> _getNonOverlappingPeaks(List<FlSpot> sortedPeaks) {
     if (sortedPeaks.isEmpty) return [];
 
@@ -242,10 +304,9 @@ class _MyHomePageState extends State<MyHomePage> {
 
     for (int i = 1; i < sortedPeaks.length; i++) {
       FlSpot currentPeak = sortedPeaks[i];
-      // 检查与已选峰值的最小间距
-      bool isOverlapping = nonOverlappingPeaks.any((peak) => 
-        (currentPeak.x - peak.x).abs() < minSpacing
-      );
+      // 妫€鏌ヤ笌宸查€夊嘲鍊肩殑鏈€灏忛棿璺?
+      bool isOverlapping = nonOverlappingPeaks
+          .any((peak) => (currentPeak.x - peak.x).abs() < minSpacing);
       if (!isOverlapping) {
         nonOverlappingPeaks.add(currentPeak);
       }
@@ -253,11 +314,46 @@ class _MyHomePageState extends State<MyHomePage> {
     return nonOverlappingPeaks;
   }
 
-  void _handleSpectrumData(List<FlSpot> segment) {
+  void _handleSpectrumData(SpectrumSegment segment) {
+    _deviceResponsive = true;
+    _startupSyncTimer?.cancel();
+    if (segment.spots.isEmpty) {
+      setState(() {});
+      return;
+    }
+
+    if (_activeSweepTimestamp != segment.timestamp) {
+      _activeSweepTimestamp = segment.timestamp;
+      _pendingSweepPoints.clear();
+    }
+
+    final sortedSegment = List<FlSpot>.from(segment.spots)
+      ..sort((a, b) => a.x.compareTo(b.x));
+
+    for (var spot in sortedSegment) {
+      _pendingSweepPoints[spot.x] = spot.y;
+      _displaySweepPoints[spot.x] = spot.y;
+    }
+
+    setState(() {
+      _spectrumData = _displaySweepPoints.entries
+          .map((e) => FlSpot(e.key, e.value))
+          .toList()
+        ..sort((a, b) => a.x.compareTo(b.x));
+    });
+
+    _sweepAssembleTimer?.cancel();
+    _sweepAssembleTimer =
+        Timer(const Duration(milliseconds: 1000), _completeSweepAssembly);
+  }
+
+  void _completeSweepAssembly() {
+    final now = DateTime.now();
+
     _spectrumRequestInFlight = false;
     _spectrumRequestTimeoutTimer?.cancel();
+    _activeSweepTimestamp = null;
 
-    final now = DateTime.now();
     if (_lastSpectrumArrivalTime != null) {
       final dtMs = now.difference(_lastSpectrumArrivalTime!).inMilliseconds;
       if (dtMs > 0) {
@@ -265,68 +361,51 @@ class _MyHomePageState extends State<MyHomePage> {
         if (_currentSweepSpeed <= 0.0) {
           _currentSweepSpeed = instantSpeed;
         } else {
-          // Use a light smoothing factor so the displayed speed is stable
-          // but still follows the actual frame rate closely.
           _currentSweepSpeed = _currentSweepSpeed * 0.7 + instantSpeed * 0.3;
         }
       }
     }
     _lastSpectrumArrivalTime = now;
 
-    if (segment.isEmpty) {
-      setState(() {});
-      return;
-    }
-
-    final sortedSegment = List<FlSpot>.from(segment)..sort((a, b) => a.x.compareTo(b.x));
-
-    // 频率映射表（频率 -> 幅值），用于合并新旧数据点
-    final Map<double, double> freqMap = {};
-
-    // 1. 保留所有已有数据点
-    for (var spot in _spectrumData) {
-      freqMap[spot.x] = spot.y;
-    }
-
-    // 2. 新接收到的段数据覆盖对应频率点（更新 Y 值）
-    for (var spot in sortedSegment) {
-      freqMap[spot.x] = spot.y;
-    }
-
-    // 3. 生成排序后的新列表
     setState(() {
-      _spectrumData = freqMap.entries
+      _displaySweepPoints
+        ..clear()
+        ..addAll(_pendingSweepPoints);
+      _spectrumData = _displaySweepPoints.entries
           .map((e) => FlSpot(e.key, e.value))
           .toList()
         ..sort((a, b) => a.x.compareTo(b.x));
 
-      // 当前下位机每次返回的都是一整帧频谱，因此收到一帧就计为一次刷新。
       _scanCount++;
 
       if (autoPeakEnabled.value) {
-        var enabledMarkers = _markers.where((m) => m.enabled).toList()..sort((a, b) => a.id.compareTo(b.id));
+        var enabledMarkers = _markers.where((m) => m.enabled).toList()
+          ..sort((a, b) => a.id.compareTo(b.id));
         if (enabledMarkers.isNotEmpty && _spectrumData.isNotEmpty) {
-          // 按幅值降序排序所有数据点
-          var sortedPeaks = List<FlSpot>.from(_spectrumData)..sort((a, b) => b.y.compareTo(a.y));
-          // 筛选不重叠的独立峰值
+          var sortedPeaks = List<FlSpot>.from(_spectrumData)
+            ..sort((a, b) => b.y.compareTo(a.y));
           var nonOverlappingPeaks = _getNonOverlappingPeaks(sortedPeaks);
-          // 分配峰值到启用的游标
           for (int i = 0; i < enabledMarkers.length; i++) {
             if (i < nonOverlappingPeaks.length) {
               enabledMarkers[i].freqHz = nonOverlappingPeaks[i].x;
             } else {
-              // 峰值数量不足时，保留最后一个有效峰值
-              enabledMarkers[i].freqHz = nonOverlappingPeaks.isNotEmpty 
-                  ? nonOverlappingPeaks.last.x 
+              enabledMarkers[i].freqHz = nonOverlappingPeaks.isNotEmpty
+                  ? nonOverlappingPeaks.last.x
                   : _getCurrentCenterFreq();
             }
           }
           if (_currentMarker != null && _currentMarker!.enabled) {
-            _markerFreqController.text = _formatFreq(_currentMarker!.freqHz, _markerFreqUnit.value);
+            _markerFreqController.text =
+                _formatFreq(_currentMarker!.freqHz, _markerFreqUnit.value);
           }
         }
       }
     });
+  }
+
+  void _handleStatusData(Map<String, dynamic> status) {
+    _deviceResponsive = true;
+    _startupSyncTimer?.cancel();
   }
 
   double _getCurrentStartFreq() {
@@ -361,9 +440,12 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   String _formatFreqAutoUnit(double freqHz, [int decimalPlaces = 2]) {
-    if (freqHz >= 1e9) return '${(freqHz / 1e9).toStringAsFixed(decimalPlaces)} GHz';
-    if (freqHz >= 1e6) return '${(freqHz / 1e6).toStringAsFixed(decimalPlaces)} MHz';
-    if (freqHz >= 1e3) return '${(freqHz / 1e3).toStringAsFixed(decimalPlaces)} kHz';
+    if (freqHz >= 1e9)
+      return '${(freqHz / 1e9).toStringAsFixed(decimalPlaces)} GHz';
+    if (freqHz >= 1e6)
+      return '${(freqHz / 1e6).toStringAsFixed(decimalPlaces)} MHz';
+    if (freqHz >= 1e3)
+      return '${(freqHz / 1e3).toStringAsFixed(decimalPlaces)} kHz';
     return '${freqHz.toStringAsFixed(decimalPlaces)} Hz';
   }
 
@@ -372,7 +454,8 @@ class _MyHomePageState extends State<MyHomePage> {
     return (freqHz / factor).toStringAsFixed(decimalPlaces);
   }
 
-  void _setFreqField(TextEditingController controller, ValueNotifier<String> unitNotifier, double freqHz) {
+  void _setFreqField(TextEditingController controller,
+      ValueNotifier<String> unitNotifier, double freqHz) {
     String bestUnit;
     double value;
     if (freqHz >= 1e9) {
@@ -392,20 +475,29 @@ class _MyHomePageState extends State<MyHomePage> {
     controller.text = value.toStringAsFixed(2);
   }
 
+  double _getSelectedRbwHz() {
+    switch (rbwMode.value) {
+      case '10 kHz':
+        return 10e3;
+      case '30 kHz':
+        return 30e3;
+      case '100 kHz':
+        return 100e3;
+      case '300 kHz':
+        return 300e3;
+      case '1 MHz':
+      default:
+        return 1e6;
+    }
+  }
+
   void _updateRbwField() {
-    if (rbwMode.value == '手动') return;
-    final double? spanHz = _parseFreq(spanController.text, spanUnit.value);
-    if (spanHz == null || spanHz <= 0) return;
-    double rbwHz = spanHz * 0.01;
-    if (rbwMode.value == '0.001*Span') rbwHz = spanHz * 0.001;
-    if (rbwMode.value == '0.01*Span') rbwHz = spanHz * 0.01;
-    _setFreqField(rbwController, rbwUnit, rbwHz);
+    _setFreqField(rbwController, rbwUnit, _getSelectedRbwHz());
   }
 
   void _updateVbwField() {
-    if (vbwMode.value == '手动') return;
-    final double? rbwHz = _parseFreq(rbwController.text, rbwUnit.value);
-    if (rbwHz == null || rbwHz <= 0) return;
+    if (!vbwMode.value.startsWith('VBW=')) return;
+    final double rbwHz = _getSelectedRbwHz();
     double vbwHz = rbwHz;
     switch (vbwMode.value) {
       case 'VBW=0.1*RBW':
@@ -427,20 +519,25 @@ class _MyHomePageState extends State<MyHomePage> {
       builder: (context) => ContentDialog(
         title: const Text('参数错误'),
         content: Text(message),
-        actions: [Button(child: const Text('确定'), onPressed: () => Navigator.pop(context))],
+        actions: [
+          Button(
+              child: const Text('确定'), onPressed: () => Navigator.pop(context))
+        ],
       ),
     );
   }
 
   void _updateFreqFromStartStop() {
-    final double? startHz = _parseFreq(startFreqController.text, startFreqUnit.value);
-    final double? stopHz = _parseFreq(stopFreqController.text, stopFreqUnit.value);
+    final double? startHz =
+        _parseFreq(startFreqController.text, startFreqUnit.value);
+    final double? stopHz =
+        _parseFreq(stopFreqController.text, stopFreqUnit.value);
     if (startHz == null || stopHz == null) {
       _showErrorDialog('起始/终止频率输入无效');
       return;
     }
-    if (startHz >= stopHz) {
-      _showErrorDialog('起始频率不能大于等于终止频率');
+    if (startHz > stopHz) {
+      _showErrorDialog('起始频率不能大于终止频率');
       return;
     }
 
@@ -460,21 +557,22 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   void _updateFreqFromCenterSpan() {
-    final double? centerHz = _parseFreq(centerFreqController.text, centerFreqUnit.value);
+    final double? centerHz =
+        _parseFreq(centerFreqController.text, centerFreqUnit.value);
     final double? spanHz = _parseFreq(spanController.text, spanUnit.value);
     if (centerHz == null || spanHz == null) {
-      _showErrorDialog('中心频率/扫宽输入无效');
+      _showErrorDialog('中心频率/扫描宽度输入无效');
       return;
     }
-    if (spanHz <= 0) {
-      _showErrorDialog('扫宽必须大于0');
+    if (spanHz < 0) {
+      _showErrorDialog('扫描宽度不能小于0');
       return;
     }
 
     final double startHz = centerHz - spanHz / 2;
     final double stopHz = centerHz + spanHz / 2;
     if (startHz < 0) {
-      _showErrorDialog('起始频率为负数');
+      _showErrorDialog('起始频率不能为负数');
       return;
     }
 
@@ -499,7 +597,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
   void _sendBwConfig() {
     int rbwModeInt = _mapRbwModeStringToInt(rbwMode.value);
-    double rbwHz = _parseFreq(rbwController.text, rbwUnit.value) ?? 0;
+    double rbwHz = _getSelectedRbwHz();
     int vbwModeInt = _mapVbwModeStringToInt(vbwMode.value);
     double vbwHz = _parseFreq(vbwController.text, vbwUnit.value) ?? 0;
     _protocol.setBw(rbwModeInt, rbwHz, vbwModeInt, vbwHz);
@@ -510,7 +608,8 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   int _getCurrentPointCount() {
-    final parsed = int.tryParse(pointCountController.text.trim()) ?? _defaultSpectrumPointCount;
+    final parsed = int.tryParse(pointCountController.text.trim()) ??
+        _defaultSpectrumPointCount;
     if (parsed < 8) {
       return 8;
     }
@@ -524,7 +623,8 @@ class _MyHomePageState extends State<MyHomePage> {
     final startHz = _getCurrentStartFreq();
     final stopHz = _getCurrentStopFreq();
     final centerHz = _getCurrentCenterFreq();
-    final spanHz = _parseFreq(spanController.text, spanUnit.value) ?? (stopHz - startHz);
+    final spanHz =
+        _parseFreq(spanController.text, spanUnit.value) ?? (stopHz - startHz);
 
     return DeviceControlConfig(
       frequency: FrequencyConfig(
@@ -540,7 +640,7 @@ class _MyHomePageState extends State<MyHomePage> {
       ),
       bandwidth: BandwidthConfig(
         rbwMode: _mapRbwModeStringToInt(rbwMode.value),
-        rbwHz: _parseFreq(rbwController.text, rbwUnit.value) ?? 0,
+        rbwHz: _getSelectedRbwHz(),
         vbwMode: _mapVbwModeStringToInt(vbwMode.value),
         vbwHz: _parseFreq(vbwController.text, vbwUnit.value) ?? 0,
       ),
@@ -560,10 +660,11 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   void _sendSweepConfig() {
-    _protocol.setSweep(sweepSpeed.value, _sweepMode == SweepMode.standard ? 0 : 1, _getCurrentPointCount());
+    _protocol.setSweep(sweepSpeed.value,
+        _sweepMode == SweepMode.standard ? 0 : 1, _getCurrentPointCount());
   }
 
-  // ====================== 传统 switch 语句（兼容旧 Dart 版本） ======================
+  // ====================== 浼犵粺 switch 璇彞锛堝吋瀹规棫 Dart 鐗堟湰锛?======================
   int _mapAttenuatorStringToInt(String value) {
     switch (value) {
       case '自动':
@@ -606,16 +707,17 @@ class _MyHomePageState extends State<MyHomePage> {
 
   int _mapRbwModeStringToInt(String value) {
     switch (value) {
-      case '自动':
+      case '10 kHz':
         return 0;
-      case '手动':
+      case '30 kHz':
         return 1;
-      case '0.001*Span':
+      case '100 kHz':
         return 2;
-      case '0.01*Span':
+      case '300 kHz':
         return 3;
+      case '1 MHz':
       default:
-        return 0;
+        return 4;
     }
   }
 
@@ -659,19 +761,39 @@ class _MyHomePageState extends State<MyHomePage> {
     if (_spectrumRequestInFlight) {
       return;
     }
+    if (!_serialManager.isConnected) {
+      return;
+    }
+    if (!_deviceResponsive) {
+      _syncCurrentDeviceConfig();
+    }
 
     _spectrumRequestInFlight = true;
-    _protocol.getSpectrum();
+    _activeSweepTimestamp = null;
+    _pendingSweepPoints.clear();
+    _protocol.getSpectrum(_getCurrentPointCount());
 
     _spectrumRequestTimeoutTimer?.cancel();
-    _spectrumRequestTimeoutTimer = Timer(const Duration(milliseconds: 500), () {
+    _spectrumRequestTimeoutTimer =
+        Timer(const Duration(milliseconds: 4000), () {
       _spectrumRequestInFlight = false;
+      _activeSweepTimestamp = null;
+      _pendingSweepPoints.clear();
+      setState(() {
+        _spectrumData = _displaySweepPoints.entries
+            .map((e) => FlSpot(e.key, e.value))
+            .toList()
+          ..sort((a, b) => a.x.compareTo(b.x));
+      });
     });
   }
 
   void _startContinuousSweep() {
     _continuousSweepTimer?.cancel();
     _syncCurrentDeviceConfig();
+    setState(() {
+      _isContinuousSweepRunning = true;
+    });
     _requestSpectrumIfIdle();
     _continuousSweepTimer = Timer.periodic(
       Duration(milliseconds: (1000 / sweepSpeed.value).round()),
@@ -682,7 +804,17 @@ class _MyHomePageState extends State<MyHomePage> {
   void _stopContinuousSweep() {
     _continuousSweepTimer?.cancel();
     _spectrumRequestTimeoutTimer?.cancel();
+    _sweepAssembleTimer?.cancel();
     _spectrumRequestInFlight = false;
+    _activeSweepTimestamp = null;
+    _pendingSweepPoints.clear();
+    _displaySweepPoints.clear();
+    if (_isContinuousSweepRunning) {
+      setState(() {
+        _spectrumData = [];
+        _isContinuousSweepRunning = false;
+      });
+    }
   }
 
   void _showModeFlyout() {
@@ -696,7 +828,9 @@ class _MyHomePageState extends State<MyHomePage> {
               ListTile(
                 title: const Text('标准模式'),
                 subtitle: const Text('分段扫描，显示扫频进度（大扫宽推荐）'),
-                trailing: _sweepMode == SweepMode.standard ? const Icon(FluentIcons.check_mark) : const SizedBox.shrink(),
+                trailing: _sweepMode == SweepMode.standard
+                    ? const Icon(FluentIcons.check_mark)
+                    : const SizedBox.shrink(),
                 onPressed: () {
                   setState(() {
                     _sweepMode = SweepMode.standard;
@@ -708,7 +842,9 @@ class _MyHomePageState extends State<MyHomePage> {
               ListTile(
                 title: const Text('实时模式'),
                 subtitle: const Text('全帧实时刷新（小扫宽推荐）'),
-                trailing: _sweepMode == SweepMode.realTime ? const Icon(FluentIcons.check_mark) : const SizedBox.shrink(),
+                trailing: _sweepMode == SweepMode.realTime
+                    ? const Icon(FluentIcons.check_mark)
+                    : const SizedBox.shrink(),
                 onPressed: () {
                   setState(() => _sweepMode = SweepMode.realTime);
                   Navigator.pop(context);
@@ -721,33 +857,33 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // 向左寻峰（跳过最小峰间距）
+  // 鍚戝乏瀵诲嘲锛堣烦杩囨渶灏忓嘲闂磋窛锛?
   double _findLeftPeak(double currentFreq) {
     if (_spectrumData.isEmpty) return currentFreq;
-    
+
     final double minSpacing = _getMinPeakSpacing();
-    // 筛选当前频率左侧且间距≥最小间距的点
+    // 绛涢€夊綋鍓嶉鐜囧乏渚т笖闂磋窛鈮ユ渶灏忛棿璺濈殑鐐?
     var leftData = _spectrumData
         .where((spot) => spot.x < currentFreq - minSpacing)
         .toList();
-    
+
     if (leftData.isEmpty) return currentFreq;
-    // 找到左侧最大幅值的点
+    // 鎵惧埌宸︿晶鏈€澶у箙鍊肩殑鐐?
     return leftData.reduce((a, b) => a.y > b.y ? a : b).x;
   }
 
-  // 向右寻峰（跳过最小峰间距）
+  // 鍚戝彸瀵诲嘲锛堣烦杩囨渶灏忓嘲闂磋窛锛?
   double _findRightPeak(double currentFreq) {
     if (_spectrumData.isEmpty) return currentFreq;
-    
+
     final double minSpacing = _getMinPeakSpacing();
-    // 筛选当前频率右侧且间距≥最小间距的点
+    // 绛涢€夊綋鍓嶉鐜囧彸渚т笖闂磋窛鈮ユ渶灏忛棿璺濈殑鐐?
     var rightData = _spectrumData
         .where((spot) => spot.x > currentFreq + minSpacing)
         .toList();
-    
+
     if (rightData.isEmpty) return currentFreq;
-    // 找到右侧最大幅值的点
+    // 鎵惧埌鍙充晶鏈€澶у箙鍊肩殑鐐?
     return rightData.reduce((a, b) => a.y > b.y ? a : b).x;
   }
 
@@ -756,7 +892,8 @@ class _MyHomePageState extends State<MyHomePage> {
       _currentMarker = marker;
     });
     if (marker != null) {
-      _markerFreqController.text = _formatFreq(marker.freqHz, _markerFreqUnit.value);
+      _markerFreqController.text =
+          _formatFreq(marker.freqHz, _markerFreqUnit.value);
     } else {
       _markerFreqController.clear();
     }
@@ -764,13 +901,25 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final double startFreq = _parseFreq(startFreqController.text, startFreqUnit.value) ?? 0;
-    final double stopFreq = _parseFreq(stopFreqController.text, stopFreqUnit.value) ?? 10e9;
-    final double centerFreq = _parseFreq(centerFreqController.text, centerFreqUnit.value) ?? 5e9;
+    final double startFreq =
+        _parseFreq(startFreqController.text, startFreqUnit.value) ?? 0;
+    final double stopFreq =
+        _parseFreq(stopFreqController.text, stopFreqUnit.value) ?? 10e9;
+    final double centerFreq =
+        _parseFreq(centerFreqController.text, centerFreqUnit.value) ?? 5e9;
     final double span = _parseFreq(spanController.text, spanUnit.value) ?? 10e9;
+    final bool isZeroSpan = span == 0 || startFreq == stopFreq;
+    final double zeroSpanHalfWidth = math.max(_getSelectedRbwHz() * 0.5, 1.0);
+    final double chartMinFreq =
+        isZeroSpan ? math.max(0.0, centerFreq - zeroSpanHalfWidth) : startFreq;
+    final double chartMaxFreq =
+        isZeroSpan ? centerFreq + zeroSpanHalfWidth : stopFreq;
 
     final double refLevel = double.tryParse(refLevelController.text) ?? 0;
-    final double scalePerGrid = (double.tryParse(scalePerGridController.text) ?? 10).abs().clamp(0.1, 1e6);
+    final double scalePerGrid =
+        (double.tryParse(scalePerGridController.text) ?? 10)
+            .abs()
+            .clamp(0.1, 1e6);
     final double maxDbmDisplay = refLevel;
     final double minDbmDisplay = refLevel - 10 * scalePerGrid;
 
@@ -783,9 +932,12 @@ class _MyHomePageState extends State<MyHomePage> {
             icon: Image.asset('assets/imgs/logo6.png', width: 127, height: 35),
             onPressed: null,
           ),
-          CommandBarButton(icon: const Icon(FluentIcons.document), label: const Text('文件'), onPressed: () {}),
+          CommandBarButton(
+              icon: const Icon(FluentIcons.document),
+              label: const Text('文件'),
+              onPressed: () {}),
 
-          // 模式按钮（只显示“模式”）
+          // 模式鎸夐挳锛堝彧鏄剧ず鈥滄ā寮忊€濓級
           CommandBarButton(
             icon: FlyoutTarget(
               controller: _modeFlyoutController,
@@ -795,23 +947,45 @@ class _MyHomePageState extends State<MyHomePage> {
             onPressed: _showModeFlyout,
           ),
 
-          CommandBarButton(icon: const Icon(FluentIcons.toolbox), label: const Text('系统'), onPressed: () {}),
-          CommandBarButton(icon: const Icon(FluentIcons.refresh), label: const Text('预设'), onPressed: () {
-            _protocol.reset();
-            _spectrumData.clear();
-          }),
+          CommandBarButton(
+              icon: const Icon(FluentIcons.toolbox),
+              label: const Text('系统'),
+              onPressed: () {}),
+          CommandBarButton(
+              icon: const Icon(FluentIcons.refresh),
+              label: const Text('预设'),
+              onPressed: () {
+                _protocol.reset();
+                _spectrumData.clear();
+              }),
           CommandBarButton(
             icon: const Icon(FluentIcons.play),
             label: const Text('单次'),
             onPressed: () {
+              _stopContinuousSweep();
               _syncCurrentDeviceConfig();
               _requestSpectrumIfIdle();
             },
           ),
-          CommandBarButton(icon: const Icon(FluentIcons.play_resume), label: const Text('连续'), onPressed: _startContinuousSweep),
-          CommandBarButton(icon: const Icon(FluentIcons.record2), label: const Text('记录'), onPressed: _stopContinuousSweep),
-          CommandBarButton(icon: const Icon(FluentIcons.repeat_all), label: const Text('回放'), onPressed: () {}),
-          CommandBarButton(icon: const Icon(FluentIcons.camera), label: const Text('截图'), onPressed: () {}),
+          CommandBarButton(
+              icon: const Icon(FluentIcons.play_resume),
+              label: const Text('连续'),
+              onPressed: _startContinuousSweep),
+          CommandBarButton(
+            icon: Icon(_isContinuousSweepRunning
+                ? FluentIcons.stop
+                : FluentIcons.record2),
+            label: const Text('停止'),
+            onPressed: _stopContinuousSweep,
+          ),
+          CommandBarButton(
+              icon: const Icon(FluentIcons.repeat_all),
+              label: const Text('回放'),
+              onPressed: () {}),
+          CommandBarButton(
+              icon: const Icon(FluentIcons.camera),
+              label: const Text('截图'),
+              onPressed: () {}),
           const CommandBarSeparator(),
           CommandBarButton(
             icon: FlyoutTarget(
@@ -820,7 +994,8 @@ class _MyHomePageState extends State<MyHomePage> {
                 valueListenable: _serialManager.connectionStatus,
                 builder: (context, status, child) {
                   Color color;
-                  switch (status) {                    // 传统 switch
+                  switch (status) {
+                    // 浼犵粺 switch
                     case ConnectionStatus.connected:
                       color = material.Colors.green;
                       break;
@@ -834,12 +1009,13 @@ class _MyHomePageState extends State<MyHomePage> {
                   return Container(
                     width: 12,
                     height: 12,
-                    decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+                    decoration:
+                        BoxDecoration(shape: BoxShape.circle, color: color),
                   );
                 },
               ),
             ),
-            label: const Text('Serial Port'),
+            label: const Text('串口'),
             onPressed: () => _serialFlyoutController.showFlyout(
               builder: (context) => SerialPortSelector(manager: _serialManager),
             ),
@@ -854,8 +1030,8 @@ class _MyHomePageState extends State<MyHomePage> {
               tint: material.Colors.black.withOpacity(0.8),
               child: SpectrumChart(
                 data: _spectrumData,
-                minFreq: startFreq,
-                maxFreq: stopFreq,
+                minFreq: chartMinFreq,
+                maxFreq: chartMaxFreq,
                 minDbm: minDbmDisplay,
                 maxDbm: maxDbmDisplay,
                 scalePerGrid: scalePerGrid,
@@ -863,7 +1039,8 @@ class _MyHomePageState extends State<MyHomePage> {
                 stopFreqStr: _formatFreqAutoUnit(stopFreq),
                 centerFreqStr: _formatFreqAutoUnit(centerFreq),
                 spanStr: _formatFreqAutoUnit(span),
-                sweepSpeedStr: '${_currentSweepSpeed.toStringAsFixed(1)} 次/秒', // 修改单位为次/秒
+                sweepSpeedStr:
+                    '${_currentSweepSpeed.toStringAsFixed(1)} scans/s',
                 markers: _markers,
               ),
             ),
@@ -877,43 +1054,90 @@ class _MyHomePageState extends State<MyHomePage> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Expander(
-                    header: const Text('Frequency'),
+                    header: const Text('频率'),
                     content: Column(
                       children: [
-                        _buildInputRow(label: '起始频率：', controller: startFreqController, unitNotifier: startFreqUnit, units: freqUnits, onSubmitted: _updateFreqFromStartStop),
+                        _buildInputRow(
+                            label: '起始频率：',
+                            controller: startFreqController,
+                            unitNotifier: startFreqUnit,
+                            units: freqUnits,
+                            onSubmitted: _updateFreqFromStartStop),
                         const SizedBox(height: 8),
-                        _buildInputRow(label: '终止频率：', controller: stopFreqController, unitNotifier: stopFreqUnit, units: freqUnits, onSubmitted: _updateFreqFromStartStop),
+                        _buildInputRow(
+                            label: '终止频率：',
+                            controller: stopFreqController,
+                            unitNotifier: stopFreqUnit,
+                            units: freqUnits,
+                            onSubmitted: _updateFreqFromStartStop),
                         const SizedBox(height: 8),
-                        _buildInputRow(label: '中心频率：', controller: centerFreqController, unitNotifier: centerFreqUnit, units: freqUnits, onSubmitted: _updateFreqFromCenterSpan),
+                        _buildInputRow(
+                            label: '中心频率：',
+                            controller: centerFreqController,
+                            unitNotifier: centerFreqUnit,
+                            units: freqUnits,
+                            onSubmitted: _updateFreqFromCenterSpan),
                         const SizedBox(height: 8),
-                        _buildInputRow(label: '扫描宽度：', controller: spanController, unitNotifier: spanUnit, units: freqUnits, onSubmitted: _updateFreqFromCenterSpan),
+                        _buildInputRow(
+                            label: '扫描宽度：',
+                            controller: spanController,
+                            unitNotifier: spanUnit,
+                            units: freqUnits,
+                            onSubmitted: _updateFreqFromCenterSpan),
                       ],
                     ),
                   ),
                   Expander(
-                    header: const Text('Amplitude'),
+                    header: const Text('幅度'),
                     content: Column(
                       children: [
                         Row(
                           children: [
-                            const SizedBox(width: 100, child: Text('参考电平：', style: TextStyle(color: material.Colors.white))),
-                            Expanded(child: TextBox(controller: refLevelController, onSubmitted: (v) => _sendAmplitudeConfig())),
+                            const SizedBox(
+                                width: 100,
+                                child: Text('参考电平：',
+                                    style: TextStyle(
+                                        color: material.Colors.white))),
+                            Expanded(
+                                child: TextBox(
+                                    controller: refLevelController,
+                                    onSubmitted: (v) =>
+                                        _sendAmplitudeConfig())),
                           ],
                         ),
                         const SizedBox(height: 8),
                         Row(
                           children: [
-                            const SizedBox(width: 100, child: Text('衰减器：', style: TextStyle(color: material.Colors.white))),
+                            const SizedBox(
+                                width: 100,
+                                child: Text('衰减器：',
+                                    style: TextStyle(
+                                        color: material.Colors.white))),
                             Expanded(
                               child: ValueListenableBuilder<String>(
                                 valueListenable: attenuatorValue,
-                                builder: (context, value, child) => ComboBox<String>(
+                                builder: (context, value, child) =>
+                                    ComboBox<String>(
                                   value: value,
                                   isExpanded: true,
-                                  items: ['自动', '0dB', '0.25dB', '0.5dB', '1dB', '2dB', '4dB', '8dB', '16dB', '31.75dB']
-                                      .map((o) => ComboBoxItem<String>(value: o, child: Text(o)))
+                                  items: [
+                                    '自动',
+                                    '0dB',
+                                    '0.25dB',
+                                    '0.5dB',
+                                    '1dB',
+                                    '2dB',
+                                    '4dB',
+                                    '8dB',
+                                    '16dB',
+                                    '31.75dB'
+                                  ]
+                                      .map((o) => ComboBoxItem<String>(
+                                          value: o, child: Text(o)))
                                       .toList(),
-                                  onChanged: (nv) => nv != null ? attenuatorValue.value = nv : null,
+                                  onChanged: (nv) => nv != null
+                                      ? attenuatorValue.value = nv
+                                      : null,
                                 ),
                               ),
                             ),
@@ -922,17 +1146,25 @@ class _MyHomePageState extends State<MyHomePage> {
                         const SizedBox(height: 8),
                         Row(
                           children: [
-                            const SizedBox(width: 100, child: Text('预放：', style: TextStyle(color: material.Colors.white))),
+                            const SizedBox(
+                                width: 100,
+                                child: Text('预放：',
+                                    style: TextStyle(
+                                        color: material.Colors.white))),
                             Expanded(
                               child: ValueListenableBuilder<String>(
                                 valueListenable: preAmpValue,
-                                builder: (context, value, child) => ComboBox<String>(
+                                builder: (context, value, child) =>
+                                    ComboBox<String>(
                                   value: value,
                                   isExpanded: true,
                                   items: ['使能', '关闭', '自动']
-                                      .map((o) => ComboBoxItem<String>(value: o, child: Text(o)))
+                                      .map((o) => ComboBoxItem<String>(
+                                          value: o, child: Text(o)))
                                       .toList(),
-                                  onChanged: (nv) => nv != null ? preAmpValue.value = nv : null,
+                                  onChanged: (nv) => nv != null
+                                      ? preAmpValue.value = nv
+                                      : null,
                                 ),
                               ),
                             ),
@@ -947,17 +1179,24 @@ class _MyHomePageState extends State<MyHomePage> {
                       children: [
                         Row(
                           children: [
-                            const SizedBox(width: 100, child: Text('RBW模式：', style: TextStyle(color: material.Colors.white))),
+                            const SizedBox(
+                                width: 100,
+                                child: Text('RBW模式：',
+                                    style: TextStyle(
+                                        color: material.Colors.white))),
                             Expanded(
                               child: ValueListenableBuilder<String>(
                                 valueListenable: rbwMode,
-                                builder: (context, value, child) => ComboBox<String>(
+                                builder: (context, value, child) =>
+                                    ComboBox<String>(
                                   value: value,
                                   isExpanded: true,
-                                  items: ['手动', '自动', '0.001*Span', '0.01*Span']
-                                      .map((o) => ComboBoxItem<String>(value: o, child: Text(o)))
+                                  items: ['10 kHz', '30 kHz', '100 kHz', '300 kHz', '1 MHz']
+                                      .map((o) => ComboBoxItem<String>(
+                                          value: o, child: Text(o)))
                                       .toList(),
-                                  onChanged: (nv) => nv != null ? rbwMode.value = nv : null,
+                                  onChanged: (nv) =>
+                                      nv != null ? rbwMode.value = nv : null,
                                 ),
                               ),
                             ),
@@ -967,7 +1206,7 @@ class _MyHomePageState extends State<MyHomePage> {
                         ValueListenableBuilder<String>(
                           valueListenable: rbwMode,
                           builder: (context, mode, child) {
-                            final bool isEnabled = mode == '手动';
+                            const bool isEnabled = false;
                             return _buildInputRow(
                               label: 'RBW：',
                               controller: rbwController,
@@ -981,17 +1220,30 @@ class _MyHomePageState extends State<MyHomePage> {
                         const SizedBox(height: 8),
                         Row(
                           children: [
-                            const SizedBox(width: 100, child: Text('VBW模式：', style: TextStyle(color: material.Colors.white))),
+                            const SizedBox(
+                                width: 100,
+                                child: Text('VBW模式：',
+                                    style: TextStyle(
+                                        color: material.Colors.white))),
                             Expanded(
                               child: ValueListenableBuilder<String>(
                                 valueListenable: vbwMode,
-                                builder: (context, value, child) => ComboBox<String>(
+                                builder: (context, value, child) =>
+                                    ComboBox<String>(
                                   value: value,
                                   isExpanded: true,
-                                  items: ['手动', 'VBW=RBW', 'VBW=0.1*RBW', 'VBW=0.01*RBW', 'VBW=10*RBW']
-                                      .map((o) => ComboBoxItem<String>(value: o, child: Text(o)))
+                                  items: [
+                                    '手动',
+                                    'VBW=RBW',
+                                    'VBW=0.1*RBW',
+                                    'VBW=0.01*RBW',
+                                    'VBW=10*RBW'
+                                  ]
+                                      .map((o) => ComboBoxItem<String>(
+                                          value: o, child: Text(o)))
                                       .toList(),
-                                  onChanged: (nv) => nv != null ? vbwMode.value = nv : null,
+                                  onChanged: (nv) =>
+                                      nv != null ? vbwMode.value = nv : null,
                                 ),
                               ),
                             ),
@@ -1016,22 +1268,36 @@ class _MyHomePageState extends State<MyHomePage> {
                     ),
                   ),
                   Expander(
-                    header: const Text('Detect'),
+                    header: const Text('检波'),
                     content: Column(
                       children: [
                         Row(
                           children: [
-                            const SizedBox(width: 100, child: Text('检波方式：', style: TextStyle(color: material.Colors.white))),
+                            const SizedBox(
+                                width: 100,
+                                child: Text('检波方式：',
+                                    style: TextStyle(
+                                        color: material.Colors.white))),
                             Expanded(
                               child: ValueListenableBuilder<String>(
                                 valueListenable: detectMode,
-                                builder: (context, value, child) => ComboBox<String>(
+                                builder: (context, value, child) =>
+                                    ComboBox<String>(
                                   value: value,
                                   isExpanded: true,
-                                  items: ['取样', '平均', '正峰值', '负峰值', '最大功率', '均方根值']
-                                      .map((o) => ComboBoxItem<String>(value: o, child: Text(o)))
+                                  items: [
+                                    '取样',
+                                    '平均',
+                                    '正峰值',
+                                    '负峰值',
+                                    '最大功率',
+                                    '均方根值'
+                                  ]
+                                      .map((o) => ComboBoxItem<String>(
+                                          value: o, child: Text(o)))
                                       .toList(),
-                                  onChanged: (nv) => nv != null ? detectMode.value = nv : null,
+                                  onChanged: (nv) =>
+                                      nv != null ? detectMode.value = nv : null,
                                 ),
                               ),
                             ),
@@ -1041,14 +1307,18 @@ class _MyHomePageState extends State<MyHomePage> {
                     ),
                   ),
                   Expander(
-                    header: const Text('Marker'),
+                    header: const Text('游标'),
                     content: Column(
                       children: [
                         ValueListenableBuilder<bool>(
                           valueListenable: autoPeakEnabled,
                           builder: (context, value, child) => Row(
                             children: [
-                              const SizedBox(width: 100, child: Text('峰值搜索：', style: TextStyle(color: material.Colors.white))),
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('峰值搜索：',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
                               ToggleSwitch(
                                 checked: value,
                                 onChanged: (v) => autoPeakEnabled.value = v,
@@ -1059,18 +1329,26 @@ class _MyHomePageState extends State<MyHomePage> {
                         const SizedBox(height: 8),
                         Row(
                           children: [
-                            const SizedBox(width: 100, child: Text('当前游标：', style: TextStyle(color: material.Colors.white))),
+                            const SizedBox(
+                                width: 100,
+                                child: Text('当前游标：',
+                                    style: TextStyle(
+                                        color: material.Colors.white))),
                             Expanded(
                               child: ComboBox<int?>(
                                 value: _currentMarker?.id,
                                 isExpanded: true,
-                                items: _markers.map((m) => ComboBoxItem<int?>(value: m.id, child: Text('Marker ${m.id}'))).toList(),
+                                items: _markers
+                                    .map((m) => ComboBoxItem<int?>(
+                                        value: m.id, child: Text('游标 ${m.id}')))
+                                    .toList(),
                                 placeholder: const Text('无'),
                                 onChanged: (id) {
                                   if (id == null) {
                                     _selectMarker(null);
                                   } else {
-                                    _selectMarker(_markers.firstWhere((m) => m.id == id));
+                                    _selectMarker(
+                                        _markers.firstWhere((m) => m.id == id));
                                   }
                                 },
                               ),
@@ -1082,7 +1360,8 @@ class _MyHomePageState extends State<MyHomePage> {
                                 children: [
                                   ToggleSwitch(
                                     checked: _currentMarker!.enabled,
-                                    onChanged: (v) => setState(() => _currentMarker!.enabled = v),
+                                    onChanged: (v) => setState(
+                                        () => _currentMarker!.enabled = v),
                                   ),
                                 ],
                               ),
@@ -1097,37 +1376,50 @@ class _MyHomePageState extends State<MyHomePage> {
                             final bool manualEnabled = !autoEnabled;
                             return Row(
                               children: [
-                                const SizedBox(width: 100, child: Text('游标操作：', style: TextStyle(color: material.Colors.white))),
+                                const SizedBox(
+                                    width: 100,
+                                    child: Text('游标操作：',
+                                        style: TextStyle(
+                                            color: material.Colors.white))),
                                 Expanded(
                                   child: ComboBox<String>(
                                     placeholder: const Text('选择操作'),
                                     isExpanded: true,
                                     items: ['向左寻峰', '向右寻峰', '起始点', '结束点', '中间点']
-                                        .map((o) => ComboBoxItem<String>(value: o, child: Text(o)))
+                                        .map((o) => ComboBoxItem<String>(
+                                            value: o, child: Text(o)))
                                         .toList(),
                                     onChanged: manualEnabled
                                         ? (action) {
-                                            if (action == null || _currentMarker == null) return;
-                                            double newFreq = _currentMarker!.freqHz;
+                                            if (action == null ||
+                                                _currentMarker == null) return;
+                                            double newFreq =
+                                                _currentMarker!.freqHz;
                                             switch (action) {
                                               case '起始点':
-                                                newFreq = _getCurrentStartFreq();
+                                                newFreq =
+                                                    _getCurrentStartFreq();
                                                 break;
                                               case '结束点':
                                                 newFreq = _getCurrentStopFreq();
                                                 break;
                                               case '向左寻峰':
-                                                newFreq = _findLeftPeak(_currentMarker!.freqHz);
+                                                newFreq = _findLeftPeak(
+                                                    _currentMarker!.freqHz);
                                                 break;
                                               case '向右寻峰':
-                                                newFreq = _findRightPeak(_currentMarker!.freqHz);
+                                                newFreq = _findRightPeak(
+                                                    _currentMarker!.freqHz);
                                                 break;
                                               case '中间点':
-                                                newFreq = _getCurrentCenterFreq();
+                                                newFreq =
+                                                    _getCurrentCenterFreq();
                                                 break;
                                             }
                                             _currentMarker!.freqHz = newFreq;
-                                            _markerFreqController.text = _formatFreq(newFreq, _markerFreqUnit.value);
+                                            _markerFreqController.text =
+                                                _formatFreq(newFreq,
+                                                    _markerFreqUnit.value);
                                             setState(() {});
                                           }
                                         : null,
@@ -1150,8 +1442,11 @@ class _MyHomePageState extends State<MyHomePage> {
                               enabled: manualEnabled,
                               onSubmitted: manualEnabled
                                   ? () {
-                                      final double? parsed = _parseFreq(_markerFreqController.text, _markerFreqUnit.value);
-                                      if (parsed != null && _currentMarker != null) {
+                                      final double? parsed = _parseFreq(
+                                          _markerFreqController.text,
+                                          _markerFreqUnit.value);
+                                      if (parsed != null &&
+                                          _currentMarker != null) {
                                         _currentMarker!.freqHz = parsed;
                                         setState(() {});
                                       }
@@ -1163,20 +1458,25 @@ class _MyHomePageState extends State<MyHomePage> {
                       ],
                     ),
                   ),
-                  const Expander(header: Text('Measure'), content: Placeholder()),
-                  const Expander(header: Text('System'), content: Placeholder()),
+                  const Expander(header: Text('测量'), content: Placeholder()),
+                  const Expander(header: Text('系统'), content: Placeholder()),
                   Expander(
-                    header: const Text('Graph'),
+                    header: const Text('图形'),
                     content: Column(
                       children: [
                         Row(
                           children: [
-                            const SizedBox(width: 100, child: Text('点数：', style: TextStyle(color: material.Colors.white))),
+                            const SizedBox(
+                                width: 100,
+                                child: Text('点数：',
+                                    style: TextStyle(
+                                        color: material.Colors.white))),
                             Expanded(
                               child: TextBox(
                                 controller: pointCountController,
                                 onSubmitted: (value) {
-                                  pointCountController.text = (_getCurrentPointCount()).toString();
+                                  pointCountController.text =
+                                      (_getCurrentPointCount()).toString();
                                   _sendSweepConfig();
                                 },
                               ),
@@ -1186,7 +1486,11 @@ class _MyHomePageState extends State<MyHomePage> {
                         const SizedBox(height: 8),
                         Row(
                           children: [
-                            const SizedBox(width: 100, child: Text('刻度/格：', style: TextStyle(color: material.Colors.white))),
+                            const SizedBox(
+                                width: 100,
+                                child: Text('刻度/格：',
+                                    style: TextStyle(
+                                        color: material.Colors.white))),
                             Expanded(
                               child: TextBox(
                                 controller: scalePerGridController,
@@ -1194,7 +1498,8 @@ class _MyHomePageState extends State<MyHomePage> {
                               ),
                             ),
                             const SizedBox(width: 8),
-                            const Text('dB', style: TextStyle(color: material.Colors.white)),
+                            const Text('dB',
+                                style: TextStyle(color: material.Colors.white)),
                           ],
                         ),
                       ],
@@ -1213,7 +1518,7 @@ class _MyHomePageState extends State<MyHomePage> {
           children: [
             const SizedBox(width: 16),
             Text(
-              '模式：${_sweepMode == SweepMode.standard ? "标准" : "实时"}      扫描速度：${_currentSweepSpeed.toStringAsFixed(1)} 次/秒      当前状态：正在扫描      系统温度：25℃',
+              '模式：${_sweepMode == SweepMode.standard ? "标准" : "实时"}      扫描速度：${_currentSweepSpeed.toStringAsFixed(1)} 次/秒      当前状态：正在扫描      系统温度：35℃',
               style: const TextStyle(color: material.Colors.white),
             ),
           ],
@@ -1233,7 +1538,10 @@ class _MyHomePageState extends State<MyHomePage> {
   }) {
     return Row(
       children: [
-        SizedBox(width: 100, child: Text(label, style: const TextStyle(color: material.Colors.white))),
+        SizedBox(
+            width: 100,
+            child: Text(label,
+                style: const TextStyle(color: material.Colors.white))),
         Expanded(
           child: TextBox(
             controller: controller,
@@ -1254,11 +1562,13 @@ class _MyHomePageState extends State<MyHomePage> {
             valueListenable: unitNotifier,
             builder: (context, value, child) => ComboBox<String>(
               value: value,
-              items: units.map((u) => ComboBoxItem<String>(value: u, child: Text(u))).toList(),
+              items: units
+                  .map((u) => ComboBoxItem<String>(value: u, child: Text(u)))
+                  .toList(),
               onChanged: (nv) {
                 if (nv != null) {
                   unitNotifier.value = nv;
-                  // 单位切换建议也立即生效（专业仪器习惯），如果想严格只回车，可删掉下面这行
+                  // 鍗曚綅鍒囨崲寤鸿涔熺珛鍗崇敓鏁堬紙涓撲笟浠櫒涔犳儻锛夛紝濡傛灉鎯充弗鏍煎彧鍥炶溅锛屽彲鍒犳帀涓嬮潰杩欒
                   onSubmitted?.call();
                 }
               },

@@ -67,6 +67,22 @@
 | 下位机 -> 上位机 | `0x82` | `SPECTRUM_DATA` | `pointCount(2B) + timestamp(4B) + N * [freq(8B) + amp(8B)]` | `pointCount/timestamp` 为 big-endian，`freq/amp` 为 `float64 little-endian` | 前 6B 为头信息，后续每个点占 `16B` |
 | 下位机 -> 上位机 | `0x83` | `STATUS_DATA` | `temp(8B) + battery(1B) + error(1B)` | `temp` 端序代码中未显式指定，`battery/error` 为 `uint8` | 温度字段需与下位机实机再确认字节序 |
 
+### 2.5 相位噪声专用协议
+
+相位噪声专用测量不复用 `SPECTRUM_DATA(0x82)` 承载全部字段，协议契约见
+[phase_noise_protocol.md](/C:/learning/pusu_V2/docs/phase_noise_protocol.md)。
+
+当前第一版命令号如下；固件侧已接入命令和响应帧，Host 真实 parser/UI 绑定仍待接入：
+
+| 方向 | 命令字 | 名称 | 数据区格式 | 字节序 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| 上位机 -> 下位机 | `0x0F` | `SET_PHASE_NOISE_CONFIG` | 固定 `36B` 配置 | payload 内数值以 little-endian 为主 | 设置相噪版本、flags、carrier/sideband 模式、nominal carrier、offset 范围、points/decade、average count |
+| 上位机 -> 下位机 | `0x10` | `START_PHASE_NOISE` | 无 | 无 | 使用最近一次有效配置启动相噪测量 |
+| 上位机 -> 下位机 | `0x11` | `STOP_PHASE_NOISE` | 无 | 无 | 请求停止当前相噪测量 |
+| 上位机 -> 下位机 | `0x12` | `GET_PHASE_NOISE_STATUS` | 无 | 无 | 请求 `PHASE_NOISE_STATUS` |
+| 下位机 -> 上位机 | `0x86` | `PHASE_NOISE_DATA` | 固定 `42B`，第一版每帧一个 offset 点 | 流式头字段 big-endian，测量数值 little-endian | 返回 trace_id、进度、carrier、offset、noise power、dBc/Hz、RBW 和点错误码 |
+| 下位机 -> 上位机 | `0x87` | `PHASE_NOISE_STATUS` | 固定 `64B` 状态 | 流式头字段 big-endian，测量数值 little-endian | 返回状态机状态、配置摘要、进度、当前 offset/RBW、错误码和警告码 |
+
 ## 3. 当前下位机已验证文本协议
 
 | 方向 | 命令字/文本 | 名称 | 数据区格式 | 字节序 | 说明 |

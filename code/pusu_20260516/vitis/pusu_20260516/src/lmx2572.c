@@ -624,6 +624,9 @@ int lmx2572_board_init(void)
     LMX2572_SetOutputChannel(&lmx2572_dev0, 2U);
     LMX2572_SetOutputChannel(&lmx2572_dev1, 0U);
     LMX2572_SetOutputChannel(&lmx2572_dev2, 0U);
+
+//    LMX2572_SetEnabled(&lmx2572_dev1, false);//!!!!!
+
     return XST_SUCCESS;
 }
 

@@ -5,6 +5,8 @@
 
 #include "xstatus.h"
 
+#include "phase_noise_engine.h"
+
 typedef struct {
     double start_hz;
     double stop_hz;
@@ -87,6 +89,9 @@ typedef int (*device_protocol_sweep_control_t)(
     const device_control_config_t *config);
 typedef int (*device_protocol_rf_frontend_control_t)(
     const device_rf_frontend_config_t *config);
+typedef int (*device_protocol_phase_noise_control_t)(
+    phase_noise_engine_action_t action,
+    const phase_noise_config_t *config);
 
 #define DEVICE_PROTOCOL_SWEEP_START 1U
 #define DEVICE_PROTOCOL_SWEEP_STOP  2U
@@ -100,11 +105,14 @@ void device_protocol_set_spectrum_provider(device_protocol_spectrum_provider_t p
 void device_protocol_set_status_provider(device_protocol_status_provider_t provider);
 void device_protocol_set_sweep_control_handler(device_protocol_sweep_control_t handler);
 void device_protocol_set_rf_frontend_handler(device_protocol_rf_frontend_control_t handler);
+void device_protocol_set_phase_noise_handler(device_protocol_phase_noise_control_t handler);
 int device_protocol_stream_spectrum_point(uint32_t freq_hz,
                                           float amp_dbm,
                                           uint16_t total_points,
                                           uint16_t current_index,
                                           uint8_t done);
+int device_protocol_stream_phase_noise_point(const phase_noise_data_t *point);
+int device_protocol_send_phase_noise_status(const phase_noise_status_t *status);
 void device_protocol_send_rf_frontend_status(void);
 
 #endif

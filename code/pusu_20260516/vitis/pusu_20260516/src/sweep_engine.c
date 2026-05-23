@@ -5,6 +5,7 @@
 #include "amplitude_correction.h"
 #include "dma_capture.h"
 #include "lo_control.h"
+#include "profile_timer.h"
 #include "signal_processing.h"
 
 #define SWEEP_ENGINE_LOCK_TIMEOUT_LOOPS   500000U
@@ -61,6 +62,7 @@ int sweep_engine_prepare(sweep_engine_t *engine, const device_control_config_t *
     engine->stop_requested = 0;
     engine->last_error = SWEEP_ENGINE_OK;
     g_last_error = SWEEP_ENGINE_OK;
+    sweep_profile_reset((uint8_t)engine->plan.rbw_mode);
     return SWEEP_ENGINE_OK;
 }
 
@@ -123,6 +125,7 @@ int sweep_engine_poll(sweep_engine_t *engine)
     case SWEEP_ENGINE_STATE_PREPARE:
         signal_processing_set_if_hz((float)LO_CONTROL_IF2_HZ);
         signal_processing_apply_rbw_mode(engine->plan.rbw_mode);
+        sweep_profile_set_rbw_mode((uint8_t)engine->plan.rbw_mode);
         engine->current_point = 0U;
         engine->state = SWEEP_ENGINE_STATE_SET_LO1;
         return SWEEP_ENGINE_OK;
@@ -136,62 +139,91 @@ int sweep_engine_poll(sweep_engine_t *engine)
         }
 
         engine->current_rf_hz = sweep_plan_get_rf_hz(&engine->plan, engine->current_point);
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_POINT_TOTAL);
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_SET_LO1);
         if (lo_control_set_lo1_for_rf_hz(engine->current_rf_hz) != XST_SUCCESS) {
+            sweep_profile_end(SWEEP_PROFILE_SECTION_SET_LO1);
+            sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_LO1_SET);
             return SWEEP_ENGINE_ERR_LO1_SET;
         }
+        sweep_profile_end(SWEEP_PROFILE_SECTION_SET_LO1);
 
         engine->wait_counter = 0U;
         engine->state = SWEEP_ENGINE_STATE_WAIT_LO1_LOCK;
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_WAIT_LOCK);
         return SWEEP_ENGINE_OK;
 
     case SWEEP_ENGINE_STATE_WAIT_LO1_LOCK:
         if (lo_control_is_locked(LO_CONTROL_DEVICE_LO1) == XST_SUCCESS) {
+            sweep_profile_end(SWEEP_PROFILE_SECTION_WAIT_LOCK);
             engine->state = SWEEP_ENGINE_STATE_ARM_DMA;
             return SWEEP_ENGINE_OK;
         }
 
         engine->wait_counter++;
         if (engine->wait_counter >= SWEEP_ENGINE_LOCK_TIMEOUT_LOOPS) {
+            sweep_profile_end(SWEEP_PROFILE_SECTION_WAIT_LOCK);
+            sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_LO1_LOCK_TIMEOUT);
             return SWEEP_ENGINE_ERR_LO1_LOCK_TIMEOUT;
         }
         return SWEEP_ENGINE_OK;
 
     case SWEEP_ENGINE_STATE_ARM_DMA:
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_DMA_RESET);
         if (dma_capture_reset() != XST_SUCCESS) {
+            sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_RESET);
+            sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_FRAME_TIMEOUT);
             return SWEEP_ENGINE_ERR_FRAME_TIMEOUT;
         }
+        sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_RESET);
 
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_DMA_START);
         if (dma_capture_start((u32)(signal_processing_get_dma_samples() * 2U)) != XST_SUCCESS) {
+            sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_START);
+            sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_FRAME_TIMEOUT);
             return SWEEP_ENGINE_ERR_FRAME_TIMEOUT;
         }
+        sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_START);
 
         engine->wait_counter = 0U;
         engine->state = SWEEP_ENGINE_STATE_WAIT_FRAME;
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_DMA_WAIT);
         return SWEEP_ENGINE_OK;
 
     case SWEEP_ENGINE_STATE_REARM_DMA:
+        sweep_profile_note_dma_rearm();
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_DMA_START);
         if (dma_capture_start((u32)(signal_processing_get_dma_samples() * 2U)) != XST_SUCCESS) {
+            sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_START);
+            sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_FRAME_TIMEOUT);
             return SWEEP_ENGINE_ERR_FRAME_TIMEOUT;
         }
+        sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_START);
 
         engine->wait_counter = 0U;
         engine->state = SWEEP_ENGINE_STATE_WAIT_FRAME;
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_DMA_WAIT);
         return SWEEP_ENGINE_OK;
 
     case SWEEP_ENGINE_STATE_WAIT_FRAME:
         if (dma_capture_take_error() != 0) {
+            sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_WAIT);
+            sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_FRAME_TIMEOUT);
             return SWEEP_ENGINE_ERR_FRAME_TIMEOUT;
         }
 
         if (dma_capture_frame_ready() != 0) {
+            sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_WAIT);
+            sweep_profile_begin(SWEEP_PROFILE_SECTION_ACCUMULATE);
             signal_processing_accumulate_dma(dma_capture_get_rx_buffer(),
                                              signal_processing_get_dma_samples());
+            sweep_profile_end(SWEEP_PROFILE_SECTION_ACCUMULATE);
 
             if (signal_processing_accumulation_ready() != 0) {
                 engine->state = SWEEP_ENGINE_STATE_MEASURE;
@@ -203,14 +235,19 @@ int sweep_engine_poll(sweep_engine_t *engine)
 
         engine->wait_counter++;
         if (engine->wait_counter >= SWEEP_ENGINE_FRAME_TIMEOUT_LOOPS) {
+            sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_WAIT);
+            sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_FRAME_TIMEOUT);
             return SWEEP_ENGINE_ERR_FRAME_TIMEOUT;
         }
         return SWEEP_ENGINE_OK;
 
     case SWEEP_ENGINE_STATE_MEASURE:
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_MEASURE);
         if (signal_processing_measure_accumulated_power_dbm(
                 &engine->current_raw_power_dbm) != 0) {
+            sweep_profile_end(SWEEP_PROFILE_SECTION_MEASURE);
+            sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_POWER_MEASURE);
             return SWEEP_ENGINE_ERR_POWER_MEASURE;
         }
@@ -219,9 +256,12 @@ int sweep_engine_poll(sweep_engine_t *engine)
                                        engine->current_raw_power_dbm,
                                        &engine->current_power_dbm,
                                        &engine->current_correction_db) != 0) {
+            sweep_profile_end(SWEEP_PROFILE_SECTION_MEASURE);
+            sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_POWER_MEASURE);
             return SWEEP_ENGINE_ERR_POWER_MEASURE;
         }
+        sweep_profile_end(SWEEP_PROFILE_SECTION_MEASURE);
 
         engine->points[engine->current_point].freq_hz = (double)engine->current_rf_hz;
         engine->points[engine->current_point].power_dbm = engine->current_power_dbm;
@@ -230,17 +270,23 @@ int sweep_engine_poll(sweep_engine_t *engine)
 
     case SWEEP_ENGINE_STATE_EMIT_POINT:
         if (engine->point_callback != 0) {
+            sweep_profile_begin(SWEEP_PROFILE_SECTION_EMIT_UART);
             if (engine->point_callback((uint32_t)engine->current_rf_hz,
                                        engine->current_power_dbm,
                                        engine->point_count,
                                        engine->current_point,
                                        (engine->current_point + 1U >= engine->point_count) ? 1 : 0,
                                        engine->point_callback_context) != 0) {
+                sweep_profile_end(SWEEP_PROFILE_SECTION_EMIT_UART);
+                sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
                 sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_STREAM_CALLBACK);
                 return SWEEP_ENGINE_ERR_STREAM_CALLBACK;
             }
+            sweep_profile_end(SWEEP_PROFILE_SECTION_EMIT_UART);
         }
 
+        sweep_profile_note_point();
+        sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
         engine->state = SWEEP_ENGINE_STATE_NEXT_POINT;
         return SWEEP_ENGINE_OK;
 
