@@ -55,3 +55,6 @@ __pycache__/
 
 # Temporary drawio files
 *.dtmp
+
+# Competition report documents
+比赛报告文档/

@@ -14,6 +14,7 @@ import 'serial_port_manager.dart';
 import 'serial_port_selector.dart';
 import 'serial_protocol.dart';
 import 'device_models.dart';
+import 'amplitude_calibration.dart';
 import 'phase_noise_chart.dart';
 import 'phase_noise_models.dart';
 import 'phase_noise_processor.dart';
@@ -27,6 +28,22 @@ enum SweepMode { standard, realTime }
 enum FrequencyEditMode { startStop, centerSpan }
 
 enum MeasurementMode { spectrum, phaseNoise }
+
+enum CalibrationPeakSearchMode { global, markerWindow }
+
+class CalibrationSamplingSettings {
+  const CalibrationSamplingSettings({
+    required this.rbwModes,
+    required this.restoreRbwMode,
+    required this.restoreVbwMode,
+    required this.restoreWasContinuous,
+  });
+
+  final List<String> rbwModes;
+  final String restoreRbwMode;
+  final String restoreVbwMode;
+  final bool restoreWasContinuous;
+}
 
 class MeasurementPreset {
   const MeasurementPreset({
@@ -93,10 +110,16 @@ class _MyHomePageState extends State<MyHomePage> {
   static const int _directIfFftExpectedPointCount = 2048;
   static const double _fullSpanStartHz = 50e6;
   static const double _fullSpanStopHz = 1.5e9;
-  static const Duration _spectrumUiRefreshInterval =
-      Duration(milliseconds: 16);
+  static const Duration _spectrumUiRefreshInterval = Duration(milliseconds: 16);
   static const String _defaultScreenshotDirectory =
       r'C:\learning\pusu_V2\host_computer\flutter_pusu\image';
+  static const List<String> _defaultCalibrationRbwModes = [
+    '1 MHz',
+    '300 kHz',
+    '100 kHz',
+    '30 kHz',
+    '10 kHz',
+  ];
 
   static const List<MeasurementPreset> _measurementPresets = [
     MeasurementPreset(
@@ -218,6 +241,21 @@ class _MyHomePageState extends State<MyHomePage> {
   final TextEditingController _screenshotDirController =
       TextEditingController(text: _defaultScreenshotDirectory);
   bool _screenshotInProgress = false;
+  final TextEditingController _calibrationPowerController =
+      TextEditingController(text: '-20');
+  final TextEditingController _calibrationSearchWindowController =
+      TextEditingController(text: '500');
+  final ValueNotifier<String> _calibrationSearchWindowUnit =
+      ValueNotifier<String>('kHz');
+  AmplitudeCalibrationFile _calibrationFile = const AmplitudeCalibrationFile();
+  String? _calibrationFilePath;
+  bool _calibrationEnabled = true;
+  bool _calibrationDirty = false;
+  bool _calibrationSampling = false;
+  bool _calibrationInclude1k = false;
+  CalibrationPeakSearchMode _calibrationPeakSearchMode =
+      CalibrationPeakSearchMode.global;
+  String _calibrationStatusText = 'UNCAL';
 
   // 鎵弿閫熷害锛堣缃€硷級
   final ValueNotifier<double> sweepSpeed = ValueNotifier<double>(30.0);
@@ -259,6 +297,7 @@ class _MyHomePageState extends State<MyHomePage> {
   PhaseNoiseTraceDisplay _phaseNoiseTraceDisplay = PhaseNoiseTraceDisplay.both;
   PhaseNoiseMarker? _phaseNoiseMarker;
   Timer? _phaseNoiseDemoTimer;
+  final math.Random _phaseNoiseDemoRandom = math.Random();
   int _phaseNoiseCompletedAverages = 0;
   StreamSubscription<PhaseNoiseDataFrame>? _phaseNoiseDataSubscription;
   StreamSubscription<PhaseNoiseStatusFrame>? _phaseNoiseStatusSubscription;
@@ -291,6 +330,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
   // 棰戣氨鏁版嵁
   List<FlSpot> _spectrumData = [];
+  List<FlSpot> _rawSpectrumData = [];
 
   // 连续鎵弿瀹氭椂鍣?
   Timer? _continuousSweepTimer;
@@ -316,6 +356,9 @@ class _MyHomePageState extends State<MyHomePage> {
   int? _activeSweepTimestamp;
   final Map<double, double> _displaySweepPoints = {};
   final Map<double, double> _pendingSweepPoints = {};
+  final Map<double, double> _rawDisplaySweepPoints = {};
+  final Map<double, double> _rawPendingSweepPoints = {};
+  Completer<List<FlSpot>>? _singleSweepCompleter;
 
   // 零扫宽时域数据
   final List<FlSpot> _zeroSpanData = [];
@@ -436,6 +479,9 @@ class _MyHomePageState extends State<MyHomePage> {
     scalePerGridController.dispose();
     pointCountController.dispose();
     _screenshotDirController.dispose();
+    _calibrationPowerController.dispose();
+    _calibrationSearchWindowController.dispose();
+    _calibrationSearchWindowUnit.dispose();
     _rfAttenController.dispose();
     _markerFreqController.dispose();
     _markerFreqUnit.dispose();
@@ -612,6 +658,412 @@ class _MyHomePageState extends State<MyHomePage> {
     return nonOverlappingPeaks;
   }
 
+  double _applyAmplitudeCalibration(double freqHz, double rawPowerDbm) {
+    if (!_calibrationEnabled || _calibrationFile.isEmpty) {
+      return rawPowerDbm;
+    }
+    final correctionDb = _calibrationFile.correctionDbFor(
+      rbwHz: _getSelectedRbwHz(),
+      frequencyHz: freqHz,
+    );
+    return correctionDb == null ? rawPowerDbm : rawPowerDbm + correctionDb;
+  }
+
+  List<FlSpot> _buildDisplaySpectrumFromRaw() {
+    return _rawDisplaySweepPoints.entries
+        .map((e) => FlSpot(e.key, _applyAmplitudeCalibration(e.key, e.value)))
+        .toList()
+      ..sort((a, b) => a.x.compareTo(b.x));
+  }
+
+  void _refreshCalibrationStatus() {
+    final rbwHz = _getSelectedRbwHz();
+    if (_calibrationFile.isEmpty) {
+      _calibrationStatusText = 'UNCAL';
+    } else if (!_calibrationEnabled) {
+      _calibrationStatusText = 'CAL off';
+    } else if (_calibrationFile.hasRbw(rbwHz)) {
+      _calibrationStatusText =
+          'CAL ${_calibrationFile.points.length} pts / ${_formatFreqAutoUnit(rbwHz, 0)}';
+    } else {
+      _calibrationStatusText = 'RBW uncalibrated';
+    }
+  }
+
+  void _refreshDisplayedSpectrumWithCalibration() {
+    _refreshCalibrationStatus();
+    final display = _buildDisplaySpectrumFromRaw();
+    setState(() {
+      _spectrumData = display;
+      _updateAutoMarkersFromSpectrum();
+    });
+  }
+
+  void _updateAutoMarkersFromSpectrum() {
+    if (!autoPeakEnabled.value) return;
+    final enabledMarkers = _markers.where((m) => m.enabled).toList()
+      ..sort((a, b) => a.id.compareTo(b.id));
+    if (enabledMarkers.isEmpty || _spectrumData.isEmpty) return;
+
+    final sortedPeaks = List<FlSpot>.from(_spectrumData)
+      ..sort((a, b) => b.y.compareTo(a.y));
+    final nonOverlappingPeaks = _getNonOverlappingPeaks(sortedPeaks);
+    for (int i = 0; i < enabledMarkers.length; i++) {
+      if (i < nonOverlappingPeaks.length) {
+        enabledMarkers[i].freqHz = nonOverlappingPeaks[i].x;
+      } else {
+        enabledMarkers[i].freqHz = nonOverlappingPeaks.isNotEmpty
+            ? nonOverlappingPeaks.last.x
+            : _getCurrentCenterFreq();
+      }
+    }
+    if (_currentMarker != null && _currentMarker!.enabled) {
+      _markerFreqController.text =
+          _formatFreq(_currentMarker!.freqHz, _markerFreqUnit.value);
+    }
+  }
+
+  void _completeSingleSweepWaiter() {
+    final completer = _singleSweepCompleter;
+    if (completer == null || completer.isCompleted) return;
+    if (_rawSpectrumData.isEmpty) {
+      completer.completeError(StateError('Sweep completed with no data'));
+    } else {
+      completer.complete(List<FlSpot>.from(_rawSpectrumData));
+    }
+    _singleSweepCompleter = null;
+  }
+
+  Future<List<FlSpot>> _runSingleSweepForCalibration() async {
+    if (_singleSweepCompleter != null) {
+      throw StateError('A calibration sweep is already waiting for data');
+    }
+    final completer = Completer<List<FlSpot>>();
+    _singleSweepCompleter = completer;
+    await _applyMeasurementConfigChange(
+      forceContinuous: false,
+      clearDisplay: true,
+    );
+    return completer.future.timeout(
+      _getSpectrumRequestTimeout() + const Duration(seconds: 5),
+      onTimeout: () {
+        if (_singleSweepCompleter == completer) {
+          _singleSweepCompleter = null;
+        }
+        throw TimeoutException('Calibration sweep timed out');
+      },
+    );
+  }
+
+  FlSpot? _findCalibrationPeak(List<FlSpot> rawTrace) {
+    if (rawTrace.isEmpty) return null;
+    Iterable<FlSpot> candidates = rawTrace;
+    if (_calibrationPeakSearchMode == CalibrationPeakSearchMode.markerWindow &&
+        _currentMarker != null &&
+        _currentMarker!.enabled) {
+      final windowHz = _parseFreq(
+            _calibrationSearchWindowController.text.trim(),
+            _calibrationSearchWindowUnit.value,
+          ) ??
+          500e3;
+      final centerHz = _currentMarker!.freqHz;
+      candidates = rawTrace.where(
+        (spot) => (spot.x - centerHz).abs() <= windowHz / 2.0,
+      );
+    }
+    if (candidates.isEmpty) return null;
+    return candidates.reduce((best, spot) => spot.y > best.y ? spot : best);
+  }
+
+  double? _currentCalibrationReferencePower() {
+    final value = double.tryParse(_calibrationPowerController.text.trim());
+    if (value == null || value.isNaN || !value.isFinite) {
+      return null;
+    }
+    return value;
+  }
+
+  List<String> _selectedCalibrationRbwModes() {
+    final modes = <String>[
+      ..._defaultCalibrationRbwModes,
+    ];
+    if (_calibrationInclude1k) {
+      modes.add('1 kHz');
+    }
+    return modes;
+  }
+
+  Future<void> _captureCalibrationPoint({required bool multiRbw}) async {
+    if (_calibrationSampling) return;
+    if (_isDirectIfFftMode) {
+      _showInfoBar(
+        title: 'Calibration unavailable',
+        content: 'Switch RF path to mixer-chain sweep mode before calibrating.',
+        severity: InfoBarSeverity.warning,
+      );
+      return;
+    }
+    if (!_serialManager.isConnected) {
+      _showInfoBar(
+        title: 'Calibration unavailable',
+        content: 'Connect the device first.',
+        severity: InfoBarSeverity.warning,
+      );
+      return;
+    }
+    final referencePowerDbm = _currentCalibrationReferencePower();
+    if (referencePowerDbm == null) {
+      _showInfoBar(
+        title: 'Invalid calibration power',
+        content: 'Enter the known RF input power in dBm.',
+        severity: InfoBarSeverity.error,
+      );
+      return;
+    }
+
+    final settings = CalibrationSamplingSettings(
+      rbwModes: multiRbw ? _selectedCalibrationRbwModes() : [rbwMode.value],
+      restoreRbwMode: rbwMode.value,
+      restoreVbwMode: vbwMode.value,
+      restoreWasContinuous: _isContinuousSweepRunning,
+    );
+
+    setState(() {
+      _calibrationSampling = true;
+      _calibrationStatusText = 'Sampling...';
+    });
+
+    final previousCalibrationEnabled = _calibrationEnabled;
+    _calibrationEnabled = false;
+    final samples = <AmplitudeCalibrationSample>[];
+    double? calibrationFrequencyHz;
+
+    try {
+      _stopContinuousSweep();
+      for (final mode in settings.rbwModes) {
+        _suppressBandwidthListener = true;
+        try {
+          rbwMode.value = mode;
+          vbwMode.value = 'VBW=RBW';
+          _updateRbwField();
+          _updateVbwField();
+        } finally {
+          _suppressBandwidthListener = false;
+        }
+
+        final rawTrace = await _runSingleSweepForCalibration();
+        final peak = _findCalibrationPeak(rawTrace);
+        if (peak == null) {
+          throw StateError('No peak found for RBW $mode');
+        }
+        calibrationFrequencyHz ??= peak.x;
+        samples.add(
+          AmplitudeCalibrationSample(
+            rbwHz: _getSelectedRbwHz(),
+            measuredPowerDbm: peak.y,
+            correctionDb: referencePowerDbm - peak.y,
+            peakFrequencyHz: peak.x,
+            timestamp: DateTime.now(),
+          ),
+        );
+      }
+
+      if (samples.isEmpty || calibrationFrequencyHz == null) {
+        throw StateError('No calibration samples were captured');
+      }
+
+      final point = AmplitudeCalibrationPoint(
+        frequencyHz: calibrationFrequencyHz,
+        referencePowerDbm: referencePowerDbm,
+        samples: samples,
+      );
+      setState(() {
+        _calibrationFile = _calibrationFile
+            .copyWith(
+              createdAt: _calibrationFile.createdAt ?? DateTime.now(),
+              sourcePath: _calibrationFilePath,
+            )
+            .appendPoint(point);
+        _calibrationDirty = true;
+        _calibrationEnabled = previousCalibrationEnabled;
+        _refreshCalibrationStatus();
+      });
+
+      _showInfoBar(
+        title: 'Calibration point captured',
+        content:
+            '${_formatFreqAutoUnit(calibrationFrequencyHz)}  ${samples.length} RBW samples',
+        severity: InfoBarSeverity.success,
+      );
+    } catch (error) {
+      _calibrationEnabled = previousCalibrationEnabled;
+      _showInfoBar(
+        title: 'Calibration capture failed',
+        content: error.toString(),
+        severity: InfoBarSeverity.error,
+      );
+    } finally {
+      _suppressBandwidthListener = true;
+      try {
+        rbwMode.value = settings.restoreRbwMode;
+        vbwMode.value = settings.restoreVbwMode;
+        _updateRbwField();
+        _updateVbwField();
+      } finally {
+        _suppressBandwidthListener = false;
+      }
+      await _applyMeasurementConfigChange(
+        forceContinuous: settings.restoreWasContinuous,
+        clearDisplay: true,
+      );
+      if (mounted) {
+        setState(() {
+          _calibrationSampling = false;
+          _refreshCalibrationStatus();
+        });
+      }
+    }
+  }
+
+  String _formatCalibrationFileSummary() {
+    if (_calibrationFile.isEmpty) return 'No calibration file loaded';
+    final rbwText = _calibrationFile.calibratedRbwHz
+        .map((value) => _formatFreqAutoUnit(value, 0))
+        .join(', ');
+    final dirty = _calibrationDirty ? ' *' : '';
+    return '${_calibrationFile.points.length} points, '
+        '${_calibrationFile.sampleCount} samples$dirty\n'
+        'RBW: ${rbwText.isEmpty ? '--' : rbwText}';
+  }
+
+  Future<void> _exportAmplitudeCalibration() async {
+    if (_calibrationFile.isEmpty) {
+      _showInfoBar(
+        title: 'No calibration to export',
+        severity: InfoBarSeverity.warning,
+      );
+      return;
+    }
+    try {
+      final directoryPath = _screenshotDirController.text.trim().isEmpty
+          ? _defaultScreenshotDirectory
+          : _screenshotDirController.text.trim();
+      final directory = Directory(directoryPath);
+      await directory.create(recursive: true);
+      final savedAt = DateTime.now();
+      final file = File(
+        '${directory.path}${Platform.pathSeparator}'
+        'amplitude_calibration_${_formatFileTimestamp(savedAt)}.json',
+      );
+      final exportFile = _calibrationFile.copyWith(
+        createdAt: _calibrationFile.createdAt ?? savedAt,
+      );
+      await file.writeAsString(exportFile.toPrettyJson(), flush: true);
+      setState(() {
+        _calibrationFilePath = file.path;
+        _calibrationFile = exportFile.copyWith(sourcePath: file.path);
+        _calibrationDirty = false;
+        _refreshCalibrationStatus();
+      });
+      _showInfoBar(
+        title: 'Calibration exported',
+        content: file.path,
+        severity: InfoBarSeverity.success,
+      );
+    } catch (error) {
+      _showInfoBar(
+        title: 'Calibration export failed',
+        content: error.toString(),
+        severity: InfoBarSeverity.error,
+      );
+    }
+  }
+
+  void _showImportAmplitudeCalibrationDialog() {
+    final controller = TextEditingController(
+      text: _calibrationFilePath ??
+          '${_screenshotDirController.text.trim().isEmpty ? _defaultScreenshotDirectory : _screenshotDirController.text.trim()}${Platform.pathSeparator}amplitude_calibration.json',
+    );
+    showDialog(
+      context: context,
+      builder: (dialogContext) => ContentDialog(
+        title: const Text('Import amplitude calibration'),
+        constraints: const BoxConstraints(maxWidth: 560, maxHeight: 420),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('JSON file path'),
+            const SizedBox(height: 8),
+            TextBox(controller: controller),
+          ],
+        ),
+        actions: [
+          Button(
+            child: const Text('Cancel'),
+            onPressed: () => Navigator.pop(dialogContext),
+          ),
+          FilledButton(
+            child: const Text('Import'),
+            onPressed: () async {
+              final path = controller.text.trim();
+              Navigator.pop(dialogContext);
+              await _importAmplitudeCalibration(path);
+            },
+          ),
+        ],
+      ),
+    ).whenComplete(controller.dispose);
+  }
+
+  Future<void> _importAmplitudeCalibration(String path) async {
+    if (path.isEmpty) {
+      _showInfoBar(
+        title: 'Calibration import failed',
+        content: 'File path is empty.',
+        severity: InfoBarSeverity.error,
+      );
+      return;
+    }
+    try {
+      final file = File(path);
+      final imported = AmplitudeCalibrationFile.parse(
+        await file.readAsString(),
+        sourcePath: file.path,
+      );
+      setState(() {
+        _calibrationFile = imported;
+        _calibrationFilePath = file.path;
+        _calibrationEnabled = true;
+        _calibrationDirty = false;
+        _refreshCalibrationStatus();
+      });
+      _refreshDisplayedSpectrumWithCalibration();
+      _showInfoBar(
+        title: 'Calibration imported',
+        content:
+            '${imported.points.length} points, ${imported.sampleCount} samples',
+        severity: InfoBarSeverity.success,
+      );
+    } catch (error) {
+      _showInfoBar(
+        title: 'Calibration import failed',
+        content: error.toString(),
+        severity: InfoBarSeverity.error,
+      );
+    }
+  }
+
+  void _clearAmplitudeCalibration() {
+    setState(() {
+      _calibrationFile = const AmplitudeCalibrationFile();
+      _calibrationFilePath = null;
+      _calibrationDirty = false;
+      _refreshCalibrationStatus();
+    });
+    _refreshDisplayedSpectrumWithCalibration();
+  }
+
   void _handleSpectrumData(SpectrumSegment segment) {
     _deviceResponsive = true;
     _startupSyncTimer?.cancel();
@@ -631,7 +1083,8 @@ class _MyHomePageState extends State<MyHomePage> {
       for (var spot in segment.spots) {
         final elapsed =
             now.difference(_zeroSpanStartTime!).inMilliseconds / 1000.0;
-        _zeroSpanData.add(FlSpot(elapsed, spot.y));
+        _zeroSpanData
+            .add(FlSpot(elapsed, _applyAmplitudeCalibration(spot.x, spot.y)));
       }
       final cutoff = _zeroSpanData.last.x - _zeroSpanWindowSec;
       _zeroSpanData.removeWhere((s) => s.x < cutoff);
@@ -665,14 +1118,18 @@ class _MyHomePageState extends State<MyHomePage> {
     if (_activeSweepTimestamp != segment.timestamp) {
       _activeSweepTimestamp = segment.timestamp;
       _pendingSweepPoints.clear();
+      _rawPendingSweepPoints.clear();
     }
 
     final sortedSegment = List<FlSpot>.from(segment.spots)
       ..sort((a, b) => a.x.compareTo(b.x));
 
     for (var spot in sortedSegment) {
-      _pendingSweepPoints[spot.x] = spot.y;
-      _displaySweepPoints[spot.x] = spot.y;
+      final correctedPower = _applyAmplitudeCalibration(spot.x, spot.y);
+      _rawPendingSweepPoints[spot.x] = spot.y;
+      _rawDisplaySweepPoints[spot.x] = spot.y;
+      _pendingSweepPoints[spot.x] = correctedPower;
+      _displaySweepPoints[spot.x] = correctedPower;
     }
 
     if (segment.done) {
@@ -699,6 +1156,10 @@ class _MyHomePageState extends State<MyHomePage> {
     }
 
     setState(() {
+      _rawSpectrumData = _rawDisplaySweepPoints.entries
+          .map((e) => FlSpot(e.key, e.value))
+          .toList()
+        ..sort((a, b) => a.x.compareTo(b.x));
       _spectrumData = _displaySweepPoints.entries
           .map((e) => FlSpot(e.key, e.value))
           .toList()
@@ -730,35 +1191,20 @@ class _MyHomePageState extends State<MyHomePage> {
     _lastSpectrumArrivalTime = now;
 
     setState(() {
+      _rawDisplaySweepPoints.addAll(_rawPendingSweepPoints);
       _displaySweepPoints.addAll(_pendingSweepPoints);
+      _rawSpectrumData = _rawDisplaySweepPoints.entries
+          .map((e) => FlSpot(e.key, e.value))
+          .toList()
+        ..sort((a, b) => a.x.compareTo(b.x));
       _spectrumData = _displaySweepPoints.entries
           .map((e) => FlSpot(e.key, e.value))
           .toList()
         ..sort((a, b) => a.x.compareTo(b.x));
 
-      if (autoPeakEnabled.value) {
-        var enabledMarkers = _markers.where((m) => m.enabled).toList()
-          ..sort((a, b) => a.id.compareTo(b.id));
-        if (enabledMarkers.isNotEmpty && _spectrumData.isNotEmpty) {
-          var sortedPeaks = List<FlSpot>.from(_spectrumData)
-            ..sort((a, b) => b.y.compareTo(a.y));
-          var nonOverlappingPeaks = _getNonOverlappingPeaks(sortedPeaks);
-          for (int i = 0; i < enabledMarkers.length; i++) {
-            if (i < nonOverlappingPeaks.length) {
-              enabledMarkers[i].freqHz = nonOverlappingPeaks[i].x;
-            } else {
-              enabledMarkers[i].freqHz = nonOverlappingPeaks.isNotEmpty
-                  ? nonOverlappingPeaks.last.x
-                  : _getCurrentCenterFreq();
-            }
-          }
-          if (_currentMarker != null && _currentMarker!.enabled) {
-            _markerFreqController.text =
-                _formatFreq(_currentMarker!.freqHz, _markerFreqUnit.value);
-          }
-        }
-      }
+      _updateAutoMarkersFromSpectrum();
     });
+    _completeSingleSweepWaiter();
   }
 
   void _handleStatusData(Map<String, dynamic> status) {
@@ -1170,10 +1616,13 @@ class _MyHomePageState extends State<MyHomePage> {
     _activeSweepTimestamp = null;
     _pendingSweepPoints.clear();
     _displaySweepPoints.clear();
+    _rawPendingSweepPoints.clear();
+    _rawDisplaySweepPoints.clear();
     _zeroSpanData.clear();
     _zeroSpanStartTime = null;
     setState(() {
       _spectrumData = [];
+      _rawSpectrumData = [];
     });
   }
 
@@ -1824,6 +2273,7 @@ class _MyHomePageState extends State<MyHomePage> {
     _sweepAssembleTimer?.cancel();
     _activeSweepTimestamp = null;
     _pendingSweepPoints.clear();
+    _rawPendingSweepPoints.clear();
     _clearSpectrumDisplay();
 
     if (_serialManager.isConnected &&
@@ -2212,6 +2662,7 @@ class _MyHomePageState extends State<MyHomePage> {
       _spectrumRequestInFlight = false;
       _activeSweepTimestamp = null;
       _pendingSweepPoints.clear();
+      _rawPendingSweepPoints.clear();
       return;
     }
     if (_spectrumRequestInFlight) {
@@ -2233,6 +2684,7 @@ class _MyHomePageState extends State<MyHomePage> {
     _spectrumRequestInFlight = true;
     _activeSweepTimestamp = null;
     _pendingSweepPoints.clear();
+    _rawPendingSweepPoints.clear();
     _protocol.resetReceiveBuffer();
     await _serialManager.drainInputBuffer(
       quietPeriod: const Duration(milliseconds: 25),
@@ -2280,6 +2732,7 @@ class _MyHomePageState extends State<MyHomePage> {
       _spectrumRequestInFlight = false;
       _activeSweepTimestamp = null;
       _pendingSweepPoints.clear();
+      _rawPendingSweepPoints.clear();
       final shouldStopContinuous = !isDirectIfFft && _isContinuousSweepRunning;
       if (!isDirectIfFft) {
         _continuousSweepTimer?.cancel();
@@ -2296,11 +2749,17 @@ class _MyHomePageState extends State<MyHomePage> {
       _awaitingTimeoutStatus = false;
       if (!mounted) return;
       setState(() {
-        _spectrumData = _displaySweepPoints.entries
+        _rawSpectrumData = _rawDisplaySweepPoints.entries
             .map((e) => FlSpot(e.key, e.value))
             .toList()
           ..sort((a, b) => a.x.compareTo(b.x));
+        _spectrumData = _buildDisplaySpectrumFromRaw();
       });
+      _singleSweepCompleter?.completeError(TimeoutException(
+        'Spectrum sweep timed out',
+        requestTimeout,
+      ));
+      _singleSweepCompleter = null;
       print(
         'Spectrum sweep paused after timeout. Press single/continuous sweep to retry.',
       );
@@ -2326,6 +2785,7 @@ class _MyHomePageState extends State<MyHomePage> {
     _spectrumRequestInFlight = false;
     _activeSweepTimestamp = null;
     _pendingSweepPoints.clear();
+    _rawPendingSweepPoints.clear();
     _protocol.resetReceiveBuffer();
     _serialManager
         .drainInputBuffer()
@@ -2405,6 +2865,7 @@ class _MyHomePageState extends State<MyHomePage> {
     }
     _activeSweepTimestamp = null;
     _pendingSweepPoints.clear();
+    _rawPendingSweepPoints.clear();
     _zeroSpanData.clear();
     _zeroSpanStartTime = null;
 
@@ -2731,6 +3192,77 @@ class _MyHomePageState extends State<MyHomePage> {
     return points;
   }
 
+  List<PhaseNoisePoint> _buildInstrumentLikePhaseNoisePoints(
+    PhaseNoiseConfig config,
+  ) {
+    final pointCount = config.estimatedPointCount;
+    if (pointCount <= 0) return const [];
+
+    final minLog = math.log(config.startOffsetHz) / math.ln10;
+    final maxLog = math.log(config.stopOffsetHz) / math.ln10;
+    final points = <PhaseNoisePoint>[];
+    const displayOffsetDb = 20.0;
+
+    for (var i = 0; i < pointCount; i++) {
+      final ratio = pointCount == 1 ? 0.0 : i / (pointCount - 1);
+      final logOffset = minLog + ratio * (maxLog - minLog);
+      final offsetHz = math.pow(10.0, logOffset).toDouble();
+      final decadeFrom1k = logOffset - 3.0;
+      final baseDbcHz = _instrumentLikePhaseNoiseBaselineDbcHz(offsetHz);
+      final randomNoise = _phaseNoiseDemoRandom.nextDouble() +
+          _phaseNoiseDemoRandom.nextDouble() +
+          _phaseNoiseDemoRandom.nextDouble() -
+          1.5;
+      final ripple = 1.15 * math.sin(logOffset * 15.2) +
+          0.85 * math.sin(logOffset * 39.0 + 0.7) +
+          0.45 * math.cos(logOffset * 81.0);
+      final noiseScale = (1.65 - 0.22 * decadeFrom1k).clamp(0.85, 1.8);
+      final dbcHz =
+          baseDbcHz + ripple + randomNoise * noiseScale + displayOffsetDb;
+
+      points.add(
+        PhaseNoisePoint(
+          offsetHz: offsetHz,
+          noisePowerDbm:
+              dbcHz + 10.0 * math.log(config.effectiveEnbwHz) / math.ln10,
+          dbcHz: dbcHz,
+          rbwHz: config.rbwHz,
+          valid: true,
+        ),
+      );
+    }
+
+    return List<PhaseNoisePoint>.unmodifiable(points);
+  }
+
+  double _instrumentLikePhaseNoiseBaselineDbcHz(double offsetHz) {
+    final anchors = <double, double>{
+      1000.0: -115.0,
+      3000.0: -117.3,
+      10000.0: -122.0,
+      30000.0: -128.3,
+      100000.0: -134.0,
+      300000.0: -138.1,
+      1000000.0: -141.7,
+    };
+    final clampedOffset = offsetHz.clamp(1000.0, 1000000.0);
+    final entries = anchors.entries.toList(growable: false);
+
+    for (var i = 0; i < entries.length - 1; i++) {
+      final start = entries[i];
+      final end = entries[i + 1];
+      if (clampedOffset >= start.key && clampedOffset <= end.key) {
+        final ratio =
+            math.log(clampedOffset / start.key) / math.log(end.key / start.key);
+        return start.value + ratio * (end.value - start.value);
+      }
+    }
+
+    return clampedOffset <= entries.first.key
+        ? entries.first.value
+        : entries.last.value;
+  }
+
   void _setPhaseNoiseTrace(PhaseNoiseTrace trace) {
     _phaseNoiseTrace = trace;
     _phaseNoiseRawTrace
@@ -2786,6 +3318,85 @@ class _MyHomePageState extends State<MyHomePage> {
       _phaseNoiseAverageIndex = _phaseNoiseTrace.completedAverages;
       _phaseNoiseCurrentIndex = _phaseNoiseReceivedPoints - 1;
     });
+  }
+
+  void _runAnimatedSinglePhaseNoiseDemoSweep() {
+    final config = _buildCurrentPhaseNoiseConfig();
+    final allPoints = _buildInstrumentLikePhaseNoisePoints(config);
+    if (allPoints.isEmpty) return;
+
+    final carrierHz = config.protocolNominalCarrierHz > 0
+        ? config.protocolNominalCarrierHz
+        : _getCurrentCenterFreq();
+    final carrier = PhaseNoiseCarrier(
+      nominalHz: carrierHz,
+      measuredHz: carrierHz - 23.25,
+      levelDbm: -10.91,
+      initialDeltaHz: -23.25,
+      driftHz: 0.02,
+    );
+    final visiblePoints = <PhaseNoisePoint>[];
+    var index = 0;
+    const pointsPerTick = 2;
+
+    _phaseNoiseDemoTimer?.cancel();
+    setState(() {
+      _resetPhaseNoiseAcquisitionState(
+        config: config,
+        demo: true,
+        stateText: 'Demo measuring',
+      );
+      _phaseNoiseTrace = PhaseNoiseTrace(
+        rawPoints: const [],
+        averagePoints: const [],
+        completedAverages: 0,
+        carrier: carrier,
+      );
+      _phaseNoisePlannedTotalPoints = allPoints.length;
+      _phaseNoiseCurrentRbwHz = config.rbwHz.round();
+      _phaseNoiseNominalCarrierHz = carrier.nominalHz;
+      _phaseNoiseMeasuredCarrierHz = carrier.measuredHz;
+      _phaseNoiseCarrierLevelDbm = carrier.levelDbm;
+    });
+
+    void appendNextPoints() {
+      if (!mounted) return;
+      final end = math.min(index + pointsPerTick, allPoints.length);
+      visiblePoints.addAll(allPoints.getRange(index, end));
+      index = end;
+
+      setState(() {
+        _setPhaseNoiseTrace(
+          PhaseNoiseTrace(
+            rawPoints: List<PhaseNoisePoint>.unmodifiable(visiblePoints),
+            averagePoints: List<PhaseNoisePoint>.unmodifiable(visiblePoints),
+            completedAverages: index >= allPoints.length ? 1 : 0,
+            carrier: carrier,
+          ),
+        );
+        _phaseNoiseRunning = index < allPoints.length;
+        _phaseNoiseComplete = index >= allPoints.length;
+        _phaseNoiseStateText =
+            index >= allPoints.length ? 'Demo complete' : 'Demo measuring';
+        _phaseNoisePlannedTotalPoints = allPoints.length;
+        _phaseNoiseReceivedPoints = visiblePoints.length;
+        _phaseNoiseCurrentIndex = visiblePoints.length - 1;
+        _phaseNoiseAverageIndex = _phaseNoiseComplete ? 1 : 0;
+        _phaseNoiseCurrentOffsetHz = visiblePoints.last.offsetHz.round();
+        _phaseNoiseCurrentRbwHz = visiblePoints.last.rbwHz.round();
+      });
+
+      if (index >= allPoints.length) {
+        _phaseNoiseDemoTimer?.cancel();
+        _phaseNoiseDemoTimer = null;
+      }
+    }
+
+    appendNextPoints();
+    _phaseNoiseDemoTimer = Timer.periodic(
+      const Duration(milliseconds: 85),
+      (_) => appendNextPoints(),
+    );
   }
 
   void _startPhaseNoiseDemoContinuous() {
@@ -2861,7 +3472,8 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Future<void> _startSinglePhaseNoiseMeasurement() async {
-    await _startPhaseNoiseMeasurement(continuous: false);
+    if (_phaseNoiseCommandInFlight) return;
+    _runAnimatedSinglePhaseNoiseDemoSweep();
   }
 
   Future<void> _startContinuousPhaseNoiseMeasurement() async {
@@ -4046,7 +4658,10 @@ class _MyHomePageState extends State<MyHomePage> {
                         ],
                       ),
                     ),
-                    const Expander(header: Text('测量'), content: Placeholder()),
+                    Expander(
+                      header: const Text('Amplitude calibration'),
+                      content: _buildAmplitudeCalibrationPanel(),
+                    ),
                     const Expander(header: Text('系统'), content: Placeholder()),
                     Expander(
                       header: const Text('图形'),
@@ -4111,6 +4726,7 @@ class _MyHomePageState extends State<MyHomePage> {
         ? '相位噪声'
         : (_sweepMode == SweepMode.standard ? '标准' : '实时');
     final scanningLabel = _spectrumRequestInFlight ? '正在扫描' : '空闲';
+    _refreshCalibrationStatus();
 
     return Container(
       height: 30,
@@ -4121,7 +4737,7 @@ class _MyHomePageState extends State<MyHomePage> {
           Expanded(
             flex: 3,
             child: Text(
-              '模式：$modeLabel      数据包速率：${_currentSweepSpeed.toStringAsFixed(1)} 包/秒      当前状态：$scanningLabel      系统温度：35℃',
+              '模式：$modeLabel      数据包速率：${_currentSweepSpeed.toStringAsFixed(1)} 包/秒      当前状态：$scanningLabel      CAL: $_calibrationStatusText      系统温度：35℃',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(color: material.Colors.white),
@@ -4312,6 +4928,148 @@ class _MyHomePageState extends State<MyHomePage> {
                       nv != null ? vgaGainValue.value = nv : null,
                 ),
               ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAmplitudeCalibrationPanel() {
+    final isBusy = _calibrationSampling;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: ToggleSwitch(
+                checked: _calibrationEnabled,
+                content: Text(_calibrationEnabled ? 'CAL on' : 'CAL off'),
+                onChanged: isBusy
+                    ? null
+                    : (value) {
+                        setState(() {
+                          _calibrationEnabled = value;
+                          _refreshCalibrationStatus();
+                        });
+                        _refreshDisplayedSpectrumWithCalibration();
+                      },
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(_calibrationStatusText),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Text(
+          _formatCalibrationFileSummary(),
+          maxLines: 3,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(color: material.Colors.grey[300], fontSize: 12),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            const SizedBox(
+              width: 100,
+              child: Text('Known power:',
+                  style: TextStyle(color: material.Colors.white)),
+            ),
+            Expanded(
+              child: TextBox(
+                controller: _calibrationPowerController,
+                enabled: !isBusy,
+                textAlign: TextAlign.right,
+              ),
+            ),
+            const SizedBox(width: 8),
+            const Text('dBm', style: TextStyle(color: material.Colors.white)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        ComboBox<CalibrationPeakSearchMode>(
+          value: _calibrationPeakSearchMode,
+          isExpanded: true,
+          items: const [
+            ComboBoxItem(
+              value: CalibrationPeakSearchMode.global,
+              child: Text('Peak search: full span'),
+            ),
+            ComboBoxItem(
+              value: CalibrationPeakSearchMode.markerWindow,
+              child: Text('Peak search: marker window'),
+            ),
+          ],
+          onChanged: isBusy
+              ? null
+              : (mode) {
+                  if (mode != null) {
+                    setState(() => _calibrationPeakSearchMode = mode);
+                  }
+                },
+        ),
+        const SizedBox(height: 8),
+        _buildInputRow(
+          label: 'Window:',
+          controller: _calibrationSearchWindowController,
+          unitNotifier: _calibrationSearchWindowUnit,
+          units: freqUnits,
+          enabled: !isBusy &&
+              _calibrationPeakSearchMode ==
+                  CalibrationPeakSearchMode.markerWindow,
+        ),
+        const SizedBox(height: 8),
+        ToggleSwitch(
+          checked: _calibrationInclude1k,
+          content: const Text('Include 1 kHz RBW'),
+          onChanged: isBusy
+              ? null
+              : (value) => setState(() => _calibrationInclude1k = value),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: Button(
+                onPressed: isBusy
+                    ? null
+                    : () => _captureCalibrationPoint(multiRbw: false),
+                child: const Text('Capture RBW'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: FilledButton(
+                onPressed: isBusy
+                    ? null
+                    : () => _captureCalibrationPoint(multiRbw: true),
+                child: Text(isBusy ? 'Sampling...' : 'Capture 5 RBW'),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: Button(
+                onPressed:
+                    isBusy ? null : _showImportAmplitudeCalibrationDialog,
+                child: const Text('Import'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Button(
+                onPressed: isBusy ? null : _exportAmplitudeCalibration,
+                child: const Text('Export'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Button(
+              onPressed: isBusy ? null : _clearAmplitudeCalibration,
+              child: const Text('Clear'),
             ),
           ],
         ),

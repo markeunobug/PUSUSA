@@ -1,0 +1,305 @@
+{
+  "schema": "pusu_host_amplitude_calibration",
+  "version": 1,
+  "created_at": "2026-05-26T17:04:43.790012",
+  "device": {
+    "name": "PuSuSA",
+    "serial": "",
+    "note": ""
+  },
+  "reference_plane": "rf_input",
+  "source": {
+    "model": "",
+    "cable_loss_db": 0.0,
+    "external_atten_db": 0.0
+  },
+  "points": [
+    {
+      "frequency_hz": 50000000.0,
+      "reference_power_dbm": -10.0,
+      "samples": [
+        {
+          "rbw_hz": 1000000.0,
+          "measured_power_dbm": -17.36955451965332,
+          "correction_db": 7.36955451965332,
+          "peak_frequency_hz": 50000000.0,
+          "timestamp": "2026-05-26T17:10:42.198939"
+        },
+        {
+          "rbw_hz": 300000.0,
+          "measured_power_dbm": -17.429777145385742,
+          "correction_db": 7.429777145385742,
+          "peak_frequency_hz": 50100000.0,
+          "timestamp": "2026-05-26T17:10:42.622480"
+        },
+        {
+          "rbw_hz": 100000.0,
+          "measured_power_dbm": -17.583730697631836,
+          "correction_db": 7.583730697631836,
+          "peak_frequency_hz": 50100000.0,
+          "timestamp": "2026-05-26T17:10:43.246149"
+        },
+        {
+          "rbw_hz": 30000.0,
+          "measured_power_dbm": -17.985185623168945,
+          "correction_db": 7.985185623168945,
+          "peak_frequency_hz": 50100000.0,
+          "timestamp": "2026-05-26T17:10:45.874052"
+        },
+        {
+          "rbw_hz": 10000.0,
+          "measured_power_dbm": -20.14436912536621,
+          "correction_db": 10.144369125366211,
+          "peak_frequency_hz": 50100000.0,
+          "timestamp": "2026-05-26T17:11:03.315278"
+        }
+      ]
+    },
+    {
+      "frequency_hz": 200000000.0,
+      "reference_power_dbm": -10.0,
+      "samples": [
+        {
+          "rbw_hz": 1000000.0,
+          "measured_power_dbm": -18.90300178527832,
+          "correction_db": 8.90300178527832,
+          "peak_frequency_hz": 200000000.0,
+          "timestamp": "2026-05-26T17:11:40.752179"
+        },
+        {
+          "rbw_hz": 300000.0,
+          "measured_power_dbm": -18.993715286254883,
+          "correction_db": 8.993715286254883,
+          "peak_frequency_hz": 199950000.0,
+          "timestamp": "2026-05-26T17:11:41.163684"
+        },
+        {
+          "rbw_hz": 100000.0,
+          "measured_power_dbm": -19.107179641723633,
+          "correction_db": 9.107179641723633,
+          "peak_frequency_hz": 200000000.0,
+          "timestamp": "2026-05-26T17:11:41.782912"
+        },
+        {
+          "rbw_hz": 30000.0,
+          "measured_power_dbm": -19.448259353637695,
+          "correction_db": 9.448259353637695,
+          "peak_frequency_hz": 199995000.0,
+          "timestamp": "2026-05-26T17:11:44.382459"
+        },
+        {
+          "rbw_hz": 10000.0,
+          "measured_power_dbm": -21.2836971282959,
+          "correction_db": 11.283697128295898,
+          "peak_frequency_hz": 200005000.0,
+          "timestamp": "2026-05-26T17:12:01.822054"
+        }
+      ]
+    },
+    {
+      "frequency_hz": 599500000.0,
+      "reference_power_dbm": -110.0,
+      "samples": [
+        {
+          "rbw_hz": 1000000.0,
+          "measured_power_dbm": -100.67524719238281,
+          "correction_db": -9.324752807617188,
+          "peak_frequency_hz": 599500000.0,
+          "timestamp": "2026-05-26T17:15:40.540602"
+        },
+        {
+          "rbw_hz": 300000.0,
+          "measured_power_dbm": -103.51447296142578,
+          "correction_db": -6.485527038574219,
+          "peak_frequency_hz": 599800000.0,
+          "timestamp": "2026-05-26T17:15:40.954796"
+        },
+        {
+          "rbw_hz": 100000.0,
+          "measured_power_dbm": -105.27672576904297,
+          "correction_db": -4.723274230957031,
+          "peak_frequency_hz": 600000000.0,
+          "timestamp": "2026-05-26T17:15:41.567448"
+        },
+        {
+          "rbw_hz": 30000.0,
+          "measured_power_dbm": -106.68099975585938,
+          "correction_db": -3.319000244140625,
+          "peak_frequency_hz": 599995000.0,
+          "timestamp": "2026-05-26T17:15:44.128351"
+        },
+        {
+          "rbw_hz": 10000.0,
+          "measured_power_dbm": -108.96075439453125,
+          "correction_db": -1.03924560546875,
+          "peak_frequency_hz": 600005000.0,
+          "timestamp": "2026-05-26T17:16:01.598890"
+        }
+      ]
+    },
+    {
+      "frequency_hz": 600000000.0,
+      "reference_power_dbm": -10.0,
+      "samples": [
+        {
+          "rbw_hz": 1000000.0,
+          "measured_power_dbm": -9.567121505737305,
+          "correction_db": -0.4328784942626953,
+          "peak_frequency_hz": 600000000.0,
+          "timestamp": "2026-05-26T17:12:40.668057"
+        },
+        {
+          "rbw_hz": 300000.0,
+          "measured_power_dbm": -9.626131057739258,
+          "correction_db": -0.3738689422607422,
+          "peak_frequency_hz": 600100000.0,
+          "timestamp": "2026-05-26T17:12:41.053920"
+        },
+        {
+          "rbw_hz": 100000.0,
+          "measured_power_dbm": -9.755205154418945,
+          "correction_db": -0.2447948455810547,
+          "peak_frequency_hz": 600000000.0,
+          "timestamp": "2026-05-26T17:12:41.632304"
+        },
+        {
+          "rbw_hz": 30000.0,
+          "measured_power_dbm": -10.138265609741211,
+          "correction_db": 0.13826560974121094,
+          "peak_frequency_hz": 599995000.0,
+          "timestamp": "2026-05-26T17:12:44.212363"
+        },
+        {
+          "rbw_hz": 10000.0,
+          "measured_power_dbm": -12.09941291809082,
+          "correction_db": 2.0994129180908203,
+          "peak_frequency_hz": 600000000.0,
+          "timestamp": "2026-05-26T17:13:01.627756"
+        }
+      ]
+    },
+    {
+      "frequency_hz": 1000000000.0,
+      "reference_power_dbm": -10.0,
+      "samples": [
+        {
+          "rbw_hz": 1000000.0,
+          "measured_power_dbm": -11.009580612182617,
+          "correction_db": 1.0095806121826172,
+          "peak_frequency_hz": 1000000000.0,
+          "timestamp": "2026-05-26T17:06:00.605039"
+        },
+        {
+          "rbw_hz": 300000.0,
+          "measured_power_dbm": -11.025716781616211,
+          "correction_db": 1.025716781616211,
+          "peak_frequency_hz": 1000050000.0,
+          "timestamp": "2026-05-26T17:06:01.004028"
+        },
+        {
+          "rbw_hz": 100000.0,
+          "measured_power_dbm": -11.093111038208008,
+          "correction_db": 1.0931110382080078,
+          "peak_frequency_hz": 1000000000.0,
+          "timestamp": "2026-05-26T17:06:01.818069"
+        },
+        {
+          "rbw_hz": 30000.0,
+          "measured_power_dbm": -11.365884780883789,
+          "correction_db": 1.365884780883789,
+          "peak_frequency_hz": 1000005000.0,
+          "timestamp": "2026-05-26T17:06:06.674721"
+        },
+        {
+          "rbw_hz": 10000.0,
+          "measured_power_dbm": -12.923757553100586,
+          "correction_db": 2.923757553100586,
+          "peak_frequency_hz": 1000005000.0,
+          "timestamp": "2026-05-26T17:06:41.107447"
+        }
+      ]
+    },
+    {
+      "frequency_hz": 1200000000.0,
+      "reference_power_dbm": -10.0,
+      "samples": [
+        {
+          "rbw_hz": 1000000.0,
+          "measured_power_dbm": -11.997106552124023,
+          "correction_db": 1.9971065521240234,
+          "peak_frequency_hz": 1200000000.0,
+          "timestamp": "2026-05-26T17:04:03.350267"
+        },
+        {
+          "rbw_hz": 300000.0,
+          "measured_power_dbm": -12.05827522277832,
+          "correction_db": 2.0582752227783203,
+          "peak_frequency_hz": 1200050000.0,
+          "timestamp": "2026-05-26T17:04:03.748596"
+        },
+        {
+          "rbw_hz": 100000.0,
+          "measured_power_dbm": -12.139081954956055,
+          "correction_db": 2.1390819549560547,
+          "peak_frequency_hz": 1200000000.0,
+          "timestamp": "2026-05-26T17:04:04.564860"
+        },
+        {
+          "rbw_hz": 30000.0,
+          "measured_power_dbm": -12.56806755065918,
+          "correction_db": 2.5680675506591797,
+          "peak_frequency_hz": 1200005000.0,
+          "timestamp": "2026-05-26T17:04:09.386993"
+        },
+        {
+          "rbw_hz": 10000.0,
+          "measured_power_dbm": -14.09135627746582,
+          "correction_db": 4.09135627746582,
+          "peak_frequency_hz": 1200000000.0,
+          "timestamp": "2026-05-26T17:04:43.789003"
+        }
+      ]
+    },
+    {
+      "frequency_hz": 1500000000.0,
+      "reference_power_dbm": -10.0,
+      "samples": [
+        {
+          "rbw_hz": 1000000.0,
+          "measured_power_dbm": -15.107633590698242,
+          "correction_db": 5.107633590698242,
+          "peak_frequency_hz": 1500000000.0,
+          "timestamp": "2026-05-26T17:07:45.445871"
+        },
+        {
+          "rbw_hz": 300000.0,
+          "measured_power_dbm": -15.170042037963867,
+          "correction_db": 5.170042037963867,
+          "peak_frequency_hz": 1500050000.0,
+          "timestamp": "2026-05-26T17:07:45.872162"
+        },
+        {
+          "rbw_hz": 100000.0,
+          "measured_power_dbm": -15.242124557495117,
+          "correction_db": 5.242124557495117,
+          "peak_frequency_hz": 1500000000.0,
+          "timestamp": "2026-05-26T17:07:46.699300"
+        },
+        {
+          "rbw_hz": 30000.0,
+          "measured_power_dbm": -15.637022018432617,
+          "correction_db": 5.637022018432617,
+          "peak_frequency_hz": 1500005000.0,
+          "timestamp": "2026-05-26T17:07:51.506419"
+        },
+        {
+          "rbw_hz": 10000.0,
+          "measured_power_dbm": -17.538572311401367,
+          "correction_db": 7.538572311401367,
+          "peak_frequency_hz": 1499995000.0,
+          "timestamp": "2026-05-26T17:08:25.922933"
+        }
+      ]
+    }
+  ]
+}
