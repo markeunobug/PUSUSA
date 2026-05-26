@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="684pt" height="402.48pt" viewBox="0 0 684 402.48" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:date>2026-05-26T11:09:01.333792</dc:date>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.10.0, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 402.48 
+L 684 402.48 
+L 684 -0 
+L 0 -0 
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 62.1072 185.7168 
+L 159.8688 185.7168 
+Q 167.904 185.7168 167.904 181.05984 
+L 167.904 139.92336 
+Q 167.904 135.2664 159.8688 135.2664 
+L 62.1072 135.2664 
+Q 54.072 135.2664 54.072 139.92336 
+L 54.072 181.05984 
+Q 54.072 185.7168 62.1072 185.7168 
+z
+" clip-path="url(#pb3caa80ac3)" style="fill: #ffffff; stroke: #374151; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_3">
+    <path d="M 236.2032 135.2664 
+L 340.6608 135.2664 
+Q 348.696 135.2664 348.696 130.60944 
+L 348.696 97.23456 
+Q 348.696 92.5776 340.6608 92.5776 
+L 236.2032 92.5776 
+Q 228.168 92.5776 228.168 97.23456 
+L 228.168 130.60944 
+Q 228.168 135.2664 236.2032 135.2664 
+z
+" clip-path="url(#pb3caa80ac3)" style="fill: #f7f8fa; stroke: #374151; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 236.2032 232.2864 
+L 340.6608 232.2864 
+Q 348.696 232.2864 348.696 227.62944 
+L 348.696 194.25456 
+Q 348.696 189.5976 340.6608 189.5976 
+L 236.2032 189.5976 
+Q 228.168 189.5976 228.168 194.25456 
+L 228.168 227.62944 
+Q 228.168 232.2864 236.2032 232.2864 
+z
+" clip-path="url(#pb3caa80ac3)" style="fill: #f7f8fa; stroke: #374151; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 396.9072 135.2664 
+L 487.9728 135.2664 
+Q 496.008 135.2664 496.008 130.60944 
+L 496.008 97.23456 
+Q 496.008 92.5776 487.9728 92.5776 
+L 396.9072 92.5776 
+Q 388.872 92.5776 388.872 97.23456 
+L 388.872 130.60944 
+Q 388.872 135.2664 396.9072 135.2664 
+z
+" clip-path="url(#pb3caa80ac3)" style="fill: #ffffff; stroke: #374151; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 396.9072 232.2864 
+L 487.9728 232.2864 
+Q 496.008 232.2864 496.008 227.62944 
+L 496.008 194.25456 
+Q 496.008 189.5976 487.9728 189.5976 
+L 396.9072 189.5976 
+Q 388.872 189.5976 388.872 194.25456 
+L 388.872 227.62944 
+Q 388.872 232.2864 396.9072 232.2864 
+z
+" clip-path="url(#pb3caa80ac3)" style="fill: #ffffff; stroke: #374151; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 544.2192 185.7168 
+L 628.5888 185.7168 
+Q 636.624 185.7168 636.624 181.05984 
+L 636.624 139.92336 
+Q 636.624 135.2664 628.5888 135.2664 
+L 544.2192 135.2664 
+Q 536.184 135.2664 536.184 139.92336 
+L 536.184 181.05984 
+Q 536.184 185.7168 544.2192 185.7168 
+z
+" clip-path="url(#pb3caa80ac3)" style="fill: #ffffff; stroke: #374151; stroke-width: 1.25; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 162.900595 159.421443 
+Q 198.037879 137.205612 231.852168 115.826255 
+" clip-path="url(#pb3caa80ac3)" style="fill: none; stroke: #374151; stroke-width: 1.4; stroke-linecap: round"/>
+    <path d="M 226.512498 116.36284 
+L 231.852168 115.826255 
+L 229.077633 120.419942 
+z
+" clip-path="url(#pb3caa80ac3)" style="fill: #374151; stroke: #374151; stroke-width: 1.4; stroke-linecap: round"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 162.860135 161.623224 
+Q 198.03695 185.717451 231.922398 208.927161 
+" clip-path="url(#pb3caa80ac3)" style="fill: none; stroke: #374151; stroke-width: 1.4; stroke-linecap: round"/>
+    <path d="M 229.318515 204.234635 
+L 231.922398 208.927161 
+L 226.606048 208.194752 
+z
+" clip-path="url(#pb3caa80ac3)" style="fill: #374151; stroke: #374151; stroke-width: 1.4; stroke-linecap: round"/>
+   </g>
+   <g id="patch_10">
+    <path d="M 343.997684 113.922 
+Q 368.783478 113.922 392.004025 113.922 
+" clip-path="url(#pb3caa80ac3)" style="fill: none; stroke: #374151; stroke-width: 1.4; stroke-linecap: round"/>
+    <path d="M 387.204025 111.522 
+L 392.004025 113.922 
+L 387.204025 116.322 
+z
+" clip-path="url(#pb3caa80ac3)" style="fill: #374151; stroke: #374151; stroke-width: 1.4; stroke-linecap: round"/>
+   </g>
+   <g id="patch_11">
+    <path d="M 343.997684 210.942 
+Q 368.783478 210.942 392.004025 210.942 
+" clip-path="url(#pb3caa80ac3)" style="fill: none; stroke: #374151; stroke-width: 1.4; stroke-linecap: round"/>
+    <path d="M 387.204025 208.542 
+L 392.004025 210.942 
+L 387.204025 213.342 
+z
+" clip-path="url(#pb3caa80ac3)" style="fill: #374151; stroke: #374151; stroke-width: 1.4; stroke-linecap: round"/>
+   </g>
+   <g id="patch_12">
+    <path d="M 490.904262 115.13321 
+Q 516.097458 134.297309 540.044875 152.513761 
+" clip-path="url(#pb3caa80ac3)" style="fill: none; stroke: #374151; stroke-width: 1.4; stroke-linecap: round"/>
+    <path d="M 537.677588 147.697544 
+L 540.044875 152.513761 
+L 534.771528 151.51786 
+z
+" clip-path="url(#pb3caa80ac3)" style="fill: #374151; stroke: #374151; stroke-width: 1.4; stroke-linecap: round"/>
+   </g>
+   <g id="patch_13">
+    <path d="M 490.84541 209.664467 
+Q 516.095716 188.627637 540.143446 168.59271 
+" clip-path="url(#pb3caa80ac3)" style="fill: none; stroke: #374151; stroke-width: 1.4; stroke-linecap: round"/>
+    <path d="M 534.919395 169.821243 
+L 540.143446 168.59271 
+L 537.991841 173.50907 
+z
+" clip-path="url(#pb3caa80ac3)" style="fill: #374151; stroke: #374151; stroke-width: 1.4; stroke-linecap: round"/>
+   </g>
+   <g id="text_1">
+    <text style="font-weight: 700; font-size: 16px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #111827" x="33.984" y="37.4536" transform="rotate(-0 33.984 37.4536)">数字正交下变频原理</text>
+   </g>
+   <g id="text_2">
+    <text style="font-size: 9.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #4b5563" x="33.984" y="51.661662" transform="rotate(-0 33.984 51.661662)">将固定中频搬移到零频附近，形成便于滤波和功率检测的复基带信号。</text>
+   </g>
+   <g id="text_3">
+    <text style="font-weight: 700; font-size: 10px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #111827" transform="translate(90.988 157.12635)">采样中频</text>
+    <text style="font-weight: 700; font-size: 10px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #111827" transform="translate(100.926281 169.364662)">x[n]</text>
+   </g>
+   <g id="text_4">
+    <text style="font-size: 9.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: middle; fill: #111827" x="288.432" y="116.538211" transform="rotate(-0 288.432 116.538211)">cos(2πfIF n/fs)</text>
+   </g>
+   <g id="text_5">
+    <text style="font-size: 9.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: middle; fill: #111827" x="288.432" y="213.558211" transform="rotate(-0 288.432 213.558211)">-sin(2πfIF n/fs)</text>
+   </g>
+   <g id="text_6">
+    <text style="font-weight: 700; font-size: 9.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #111827" transform="translate(423.44 110.725012)">低通滤波</text>
+    <text style="font-weight: 700; font-size: 9.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #111827" transform="translate(434.066641 122.351409)">I[n]</text>
+   </g>
+   <g id="text_7">
+    <text style="font-weight: 700; font-size: 9.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #111827" transform="translate(423.44 207.745012)">低通滤波</text>
+    <text style="font-weight: 700; font-size: 9.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #111827" transform="translate(431.772539 219.371409)">Q[n]</text>
+   </g>
+   <g id="text_8">
+    <text style="font-weight: 700; font-size: 9.2px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #111827" transform="translate(572.604 157.373289)">复基带</text>
+    <text style="font-weight: 700; font-size: 9.2px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #111827" transform="translate(550.644031 168.632536)">z[n]=I[n]+jQ[n]</text>
+   </g>
+   <g id="text_9">
+    <text style="font-weight: 700; font-size: 10.6px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #111827" x="74.16" y="286.6176" transform="rotate(-0 74.16 286.6176)">作用：把 40 MHz 中频信号变换到基带，使后续 RBW 滤波只需围绕零频设计。</text>
+   </g>
+   <g id="text_10">
+    <text style="font-size: 9.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #4b5563" x="74.16" y="309.9024" transform="rotate(-0 74.16 309.9024)">优势：I/Q 表示同时保留幅度和相位信息，避免实数混频后正负频率混叠带来的测量误差。</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="pb3caa80ac3">
+   <rect x="7.2" y="7.2" width="669.6" height="388.08"/>
+  </clipPath>
+ </defs>
+</svg>

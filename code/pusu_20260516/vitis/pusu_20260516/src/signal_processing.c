@@ -58,6 +58,7 @@ static const char *rbw_mode_name(rbw_mode_t mode);
 static float32_t rbw_mode_cutoff_hz(rbw_mode_t mode);
 static void fft_run(void);
 static void fft_postprocess(void);
+static void direct_if_fft_postprocess(void);
 static void report_time_domain_power(void);
 static void fft_report_peak(void);
 
@@ -116,6 +117,26 @@ void signal_processing_process_frame(volatile u16 *rx_buffer)
     fft_run();
     fft_postprocess();
     fft_report_peak();
+}
+
+void signal_processing_process_direct_if_fft_frame(volatile u16 *rx_buffer)
+{
+    uint32_t i;
+
+    if (rx_buffer == 0) {
+        latest_spectrum_valid = 0;
+        return;
+    }
+
+    for (i = 0; i < FFT_SIZE; i++) {
+        float32_t norm = (float32_t)(int16_t)rx_buffer[i] / 32768.0f;
+
+        fft_input[2U * i] = norm * hann_window[i];
+        fft_input[2U * i + 1U] = 0.0f;
+    }
+
+    fft_run();
+    direct_if_fft_postprocess();
 }
 
 int signal_processing_measure_power_dbfs(volatile u16 *rx_buffer, float *out_power_dbfs)
@@ -337,25 +358,14 @@ static void sweep_configure_for_rbw(rbw_mode_t mode)
         accum_target = (int)ACCUM_BUFFER_SIZE;
     }
 
-    /* Optimal DMA transfer size: minimize frames without exceeding the AXI DMA
-     * simple-transfer length limit. Narrow RBW modes will accumulate several
-     * DMA frames in SWEEP_ENGINE_STATE_REARM_DMA.
-     * Compute in FFT_SIZE blocks since DDC+CIC operate on 4096-sample chunks.
-     * total outputs from B blocks = floor(B * FFT_SIZE / cic_r).
-     * Find minimum B where total_outputs >= accum_target, then clamp to the
-     * largest safe block-aligned transfer. */
-    {
-        u32 blocks_needed = 1U;
-        while ((u32)(blocks_needed * FFT_SIZE) / (u32)cfg->cic_r < (u32)accum_target) {
-            blocks_needed++;
-        }
-
-        if (blocks_needed > DMA_SWEEP_MAX_BLOCKS_PER_TRANSFER) {
-            blocks_needed = DMA_SWEEP_MAX_BLOCKS_PER_TRANSFER;
-        }
-
-        current_dma_samples = blocks_needed * FFT_SIZE;
-    }
+    /* The PL stream is validated as one FFT_SIZE frame per DMA trigger.
+     * Requesting several frames in one simple-transfer can complete while later
+     * blocks contain no useful samples; for RBW_300K the first valid CIC outputs
+     * are then discarded by FIR transient/skip, leaving the EPSILON floor.
+     * Keep each DMA transfer to one frame and let the sweep state machine rearm
+     * until accum_target is reached.
+     */
+    current_dma_samples = FFT_SIZE;
 }
 
 /* ── Static: compensating FIR design ─────────────────────────────── */
@@ -685,6 +695,29 @@ static void fft_postprocess(void)
 
         fft_mag[i] = 20.0f * log10f(val);
         latest_spectrum_dbfs[i] = fft_mag[i];
+    }
+
+    latest_spectrum_valid = 1;
+}
+
+static void direct_if_fft_postprocess(void)
+{
+    uint32_t i;
+
+    for (i = 0; i < SPECTRUM_BINS; i++) {
+        float32_t val;
+
+        if (i == 0U) {
+            val = fft_mag[i] / (float32_t)FFT_SIZE;
+        } else {
+            val = (2.0f * fft_mag[i]) / (float32_t)FFT_SIZE;
+        }
+
+        if (val < EPSILON) {
+            val = EPSILON;
+        }
+
+        latest_spectrum_dbfs[i] = 20.0f * log10f(val);
     }
 
     latest_spectrum_valid = 1;

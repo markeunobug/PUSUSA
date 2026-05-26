@@ -9,6 +9,7 @@ void signal_processing_apply_rbw_mode(rbw_mode_t mode);
 void signal_processing_set_if_hz(float if_hz);
 float signal_processing_get_if_hz(void);
 void signal_processing_process_frame(volatile u16 *rx_buffer);
+void signal_processing_process_direct_if_fft_frame(volatile u16 *rx_buffer);
 int signal_processing_measure_power_dbfs(volatile u16 *rx_buffer, float *out_power_dbfs);
 int signal_processing_measure_power_dbm(volatile u16 *rx_buffer, float *out_power_dbm);
 void signal_processing_accumulate_dma(volatile u16 *rx_buffer, u32 dma_samples);

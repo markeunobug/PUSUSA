@@ -88,8 +88,13 @@ class MyHomePage extends StatefulWidget {
 class _MyHomePageState extends State<MyHomePage> {
   static const int _defaultSpectrumPointCount = 128;
   static const int _maxInternalSweepPointCount = 4096;
+  static const double _directIfFftStartHz = 0.0;
+  static const double _directIfFftStopHz = 65e6;
+  static const int _directIfFftExpectedPointCount = 2048;
   static const double _fullSpanStartHz = 50e6;
   static const double _fullSpanStopHz = 1.5e9;
+  static const Duration _spectrumUiRefreshInterval =
+      Duration(milliseconds: 16);
   static const String _defaultScreenshotDirectory =
       r'C:\learning\pusu_V2\host_computer\flutter_pusu\image';
 
@@ -188,8 +193,6 @@ class _MyHomePageState extends State<MyHomePage> {
     pathMode: RfPathMode.directIf,
     attenCode: 127,
   );
-  RfFrontendStatus? _lastRfFrontendStatus;
-  String _rfFrontendMessage = '未查询';
   final TextEditingController _rfAttenController =
       TextEditingController(text: '31.75');
   Timer? _rfFrontendSendDebounce;
@@ -292,6 +295,7 @@ class _MyHomePageState extends State<MyHomePage> {
   // 连续鎵弿瀹氭椂鍣?
   Timer? _continuousSweepTimer;
   Timer? _spectrumRequestTimeoutTimer;
+  Timer? _spectrumUiRefreshTimer;
   Timer? _sweepAssembleTimer;
   Timer? _startupSyncTimer;
   Timer? _serialInitTimer;
@@ -449,6 +453,7 @@ class _MyHomePageState extends State<MyHomePage> {
         .removeListener(_handleConnectionStatusChanged);
     _continuousSweepTimer?.cancel();
     _spectrumRequestTimeoutTimer?.cancel();
+    _spectrumUiRefreshTimer?.cancel();
     _sweepAssembleTimer?.cancel();
     _startupSyncTimer?.cancel();
     _serialInitTimer?.cancel();
@@ -508,12 +513,6 @@ class _MyHomePageState extends State<MyHomePage> {
       _rfFrontendCommandInFlight = false;
       _rfFrontendSendQueued = false;
       _stopContinuousSweep();
-      if (mounted) {
-        setState(() {
-          _rfFrontendMessage = '未连接';
-          _lastRfFrontendStatus = null;
-        });
-      }
     }
   }
 
@@ -534,7 +533,11 @@ class _MyHomePageState extends State<MyHomePage> {
 
     if (ok) {
       _deviceResponsive = true;
-      await _syncCurrentDeviceConfig();
+      if (_isDirectIfFftMode) {
+        await _syncDirectIfDeviceConfig();
+      } else {
+        await _syncCurrentDeviceConfig();
+      }
       await Future.delayed(const Duration(milliseconds: 40));
       await _serialManager.drainInputBuffer();
       _protocol.resetReceiveBuffer();
@@ -558,7 +561,9 @@ class _MyHomePageState extends State<MyHomePage> {
     }
 
     _protocol.resetReceiveBuffer();
-    _protocol.stopSweep();
+    if (!_isDirectIfFftMode) {
+      _protocol.stopSweep();
+    }
     await Future.delayed(const Duration(milliseconds: 60));
     await _serialManager.drainInputBuffer();
     if (!mounted ||
@@ -568,7 +573,11 @@ class _MyHomePageState extends State<MyHomePage> {
     }
 
     _protocol.resetReceiveBuffer();
-    _sendCurrentDeviceConfig();
+    if (_isDirectIfFftMode) {
+      _sendDirectIfDeviceConfig();
+    } else {
+      _sendCurrentDeviceConfig();
+    }
     await Future.delayed(const Duration(milliseconds: 120));
     await _serialManager.drainInputBuffer(
       quietPeriod: const Duration(milliseconds: 50),
@@ -666,16 +675,35 @@ class _MyHomePageState extends State<MyHomePage> {
       _displaySweepPoints[spot.x] = spot.y;
     }
 
+    if (segment.done) {
+      _completeSweepAssembly();
+    } else {
+      _scheduleSpectrumUiRefresh();
+    }
+  }
+
+  void _scheduleSpectrumUiRefresh() {
+    if (_spectrumUiRefreshTimer?.isActive == true) {
+      return;
+    }
+
+    _spectrumUiRefreshTimer = Timer(_spectrumUiRefreshInterval, () {
+      _spectrumUiRefreshTimer = null;
+      _refreshSpectrumUiFromDisplayPoints();
+    });
+  }
+
+  void _refreshSpectrumUiFromDisplayPoints() {
+    if (!mounted) {
+      return;
+    }
+
     setState(() {
       _spectrumData = _displaySweepPoints.entries
           .map((e) => FlSpot(e.key, e.value))
           .toList()
         ..sort((a, b) => a.x.compareTo(b.x));
     });
-
-    if (segment.done) {
-      _completeSweepAssembly();
-    }
   }
 
   void _completeSweepAssembly() {
@@ -683,6 +711,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
     _spectrumRequestInFlight = false;
     _spectrumRequestTimeoutTimer?.cancel();
+    _spectrumUiRefreshTimer?.cancel();
+    _spectrumUiRefreshTimer = null;
     _activeSweepTimestamp = null;
     _protocol.getSweepProfile();
 
@@ -756,14 +786,10 @@ class _MyHomePageState extends State<MyHomePage> {
         _rfFrontendSendDebounce?.isActive == true;
 
     setState(() {
-      _lastRfFrontendStatus = status;
       if (!hasPendingLocalChange) {
         _rfFrontendConfig = status.config;
         _syncRfAttenText(status.config);
       }
-      _rfFrontendMessage = status.ok
-          ? '已应用：${_formatRfFrontendConfig(status.config)}'
-          : '设备返回错误：${_rfFrontendErrorLabel(status.error)}';
     });
   }
 
@@ -1139,6 +1165,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
   void _clearSpectrumDisplay() {
     _sweepAssembleTimer?.cancel();
+    _spectrumUiRefreshTimer?.cancel();
+    _spectrumUiRefreshTimer = null;
     _activeSweepTimestamp = null;
     _pendingSweepPoints.clear();
     _displaySweepPoints.clear();
@@ -1157,8 +1185,21 @@ class _MyHomePageState extends State<MyHomePage> {
     return _confirmedStopHz;
   }
 
+  bool get _isDirectIfFftMode =>
+      _rfFrontendConfig.pathMode == RfPathMode.directIf;
+
+  double get _chartStartHz =>
+      _isDirectIfFftMode ? _directIfFftStartHz : _confirmedStartHz;
+
+  double get _chartStopHz =>
+      _isDirectIfFftMode ? _directIfFftStopHz : _confirmedStopHz;
+
+  bool get _isFrequencySweepConfigActive => !_isDirectIfFftMode;
+
   bool get _isZeroSpan =>
-      _confirmedStartHz > 0 && _confirmedStartHz == _confirmedStopHz;
+      !_isDirectIfFftMode &&
+      _confirmedStartHz > 0 &&
+      _confirmedStartHz == _confirmedStopHz;
 
   double _getCurrentCenterFreq() {
     return (_confirmedStartHz + _confirmedStopHz) / 2.0;
@@ -1511,6 +1552,9 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   bool _commitFrequencyInputs({bool showDialog = true}) {
+    if (_isDirectIfFftMode) {
+      return true;
+    }
     switch (_lastFrequencyEditMode) {
       case FrequencyEditMode.startStop:
         return _commitStartStopInputs(showDialog: showDialog);
@@ -1582,6 +1626,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   void _updateFreqFromStartStop() {
+    if (!_isFrequencySweepConfigActive) return;
     _lastFrequencyEditMode = FrequencyEditMode.startStop;
     if (!_commitStartStopInputs()) return;
     _updateRbwField();
@@ -1590,6 +1635,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   void _updateFreqFromCenterSpan() {
+    if (!_isFrequencySweepConfigActive) return;
     _lastFrequencyEditMode = FrequencyEditMode.centerSpan;
     if (!_commitCenterSpanInputs()) return;
     _updateRbwField();
@@ -1597,7 +1643,12 @@ class _MyHomePageState extends State<MyHomePage> {
     _applyFrequencyChange();
   }
 
+  void _handleFrequencyUnitChanged(VoidCallback submitFrequencyChange) {
+    submitFrequencyChange();
+  }
+
   void _setFullSpan() {
+    if (!_isFrequencySweepConfigActive) return;
     _lastFrequencyEditMode = FrequencyEditMode.startStop;
     setState(() {
       _confirmedStartHz = _fullSpanStartHz;
@@ -1610,6 +1661,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   void _setZeroSpan() {
+    if (!_isFrequencySweepConfigActive) return;
     _lastFrequencyEditMode = FrequencyEditMode.startStop;
     final centerHz = _getCurrentCenterFreq();
     setState(() {
@@ -1749,12 +1801,45 @@ class _MyHomePageState extends State<MyHomePage> {
   void _updateRfFrontendConfig(RfFrontendConfig config) {
     final clamped =
         config.copyWith(attenCode: config.attenCode.clamp(0, 127).toInt());
+    final previousPathMode = _rfFrontendConfig.pathMode;
+    final pathModeChanged = clamped.pathMode != _rfFrontendConfig.pathMode;
     setState(() {
       _rfFrontendConfig = clamped;
       _syncRfAttenText(clamped);
-      _rfFrontendMessage = '等待发送：${_formatRfFrontendConfig(clamped)}';
     });
+    if (pathModeChanged) {
+      _stopAcquisitionForPathSwitch(previousPathMode);
+    }
     _scheduleRfFrontendSend();
+  }
+
+  void _stopAcquisitionForPathSwitch(RfPathMode previousPathMode) {
+    _measurementConfigGeneration++;
+    _measurementConfigInFlight = false;
+    _awaitingTimeoutStatus = false;
+    _acceptSpectrumData = false;
+    _spectrumRequestInFlight = false;
+    _continuousSweepTimer?.cancel();
+    _spectrumRequestTimeoutTimer?.cancel();
+    _sweepAssembleTimer?.cancel();
+    _activeSweepTimestamp = null;
+    _pendingSweepPoints.clear();
+    _clearSpectrumDisplay();
+
+    if (_serialManager.isConnected &&
+        previousPathMode == RfPathMode.mixerChain) {
+      _protocol.stopSweep();
+    }
+    _protocol.resetReceiveBuffer();
+    _serialManager
+        .drainInputBuffer()
+        .then((_) => _protocol.resetReceiveBuffer());
+
+    if (_isContinuousSweepRunning && mounted) {
+      setState(() {
+        _isContinuousSweepRunning = false;
+      });
+    }
   }
 
   void _scheduleRfFrontendSend() {
@@ -1776,7 +1861,6 @@ class _MyHomePageState extends State<MyHomePage> {
     final config = _rfFrontendConfig;
     setState(() {
       _rfFrontendCommandInFlight = true;
-      _rfFrontendMessage = '正在发送：${_formatRfFrontendConfig(config)}';
     });
 
     final ok = await _protocol.setRfFrontendConfirmed(config);
@@ -1784,7 +1868,6 @@ class _MyHomePageState extends State<MyHomePage> {
 
     setState(() {
       _rfFrontendCommandInFlight = false;
-      _rfFrontendMessage = ok ? 'ACK OK，等待状态回读' : 'ACK 超时或失败';
     });
 
     if (_rfFrontendSendQueued) {
@@ -1797,20 +1880,10 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
-  void _queryRfFrontendStatus() {
-    if (!_serialManager.isConnected) {
-      setState(() {
-        _rfFrontendMessage = '未连接';
-      });
-      return;
-    }
-    _protocol.getRfFrontendStatus();
-    setState(() {
-      _rfFrontendMessage = '正在查询';
-    });
-  }
-
   Future<void> _submitBandwidthConfig() {
+    if (_isDirectIfFftMode) {
+      return Future<void>.value();
+    }
     return _applyMeasurementConfigChange(clearDisplay: true);
   }
 
@@ -1834,6 +1907,9 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   int? _estimateRawInternalSweepPointCount() {
+    if (_isDirectIfFftMode) {
+      return _directIfFftExpectedPointCount;
+    }
     return _estimateRawInternalSweepPointCountForRbwHz(_getSelectedRbwHz());
   }
 
@@ -1849,6 +1925,9 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   bool _isSweepWorkloadSupported({bool showDialog = false}) {
+    if (_isDirectIfFftMode) {
+      return true;
+    }
     final rawPoints = _estimateRawInternalSweepPointCount();
     if (rawPoints == null || rawPoints <= _maxInternalSweepPointCount) {
       return true;
@@ -1878,6 +1957,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Duration _getSpectrumRequestTimeout() {
+    if (_isDirectIfFftMode) return const Duration(seconds: 5);
     if (_isZeroSpan) return const Duration(milliseconds: 3000);
     final estimatedPoints = _estimateInternalSweepPointCount();
     final timeoutMs = estimatedPoints * 80 + 5000;
@@ -1939,6 +2019,22 @@ class _MyHomePageState extends State<MyHomePage> {
     _sendVgaGainConfig();
   }
 
+  void _sendDirectIfDeviceConfig() {
+    _protocol.setAmplitudeConfig(
+      AmplitudeConfig(
+        refLevelDbm: double.tryParse(refLevelController.text) ?? 0,
+        attenuatorMode: 0,
+        preampMode: 0,
+      ),
+    );
+    _protocol.setDetectConfig(
+      DetectConfig(
+        mode: _mapDetectStringToInt(detectMode.value),
+      ),
+    );
+    _sendVgaGainConfig();
+  }
+
   Future<bool> _syncCurrentDeviceConfig() async {
     final config = _buildCurrentControlConfig();
     _confirmedStartHz = config.frequency.startHz;
@@ -1946,6 +2042,29 @@ class _MyHomePageState extends State<MyHomePage> {
     final ok = await _protocol.applyControlConfigConfirmed(config);
     if (!ok) {
       print('Control config ACK timeout or failure');
+      return false;
+    }
+    _sendVgaGainConfig();
+    return true;
+  }
+
+  Future<bool> _syncDirectIfDeviceConfig() async {
+    if (!await _protocol.setAmplitudeConfigConfirmed(
+      AmplitudeConfig(
+        refLevelDbm: double.tryParse(refLevelController.text) ?? 0,
+        attenuatorMode: 0,
+        preampMode: 0,
+      ),
+    )) {
+      print('Direct-IF amplitude config ACK timeout or failure');
+      return false;
+    }
+    if (!await _protocol.setDetectConfigConfirmed(
+      DetectConfig(
+        mode: _mapDetectStringToInt(detectMode.value),
+      ),
+    )) {
+      print('Direct-IF detect config ACK timeout or failure');
       return false;
     }
     _sendVgaGainConfig();
@@ -1989,29 +2108,9 @@ class _MyHomePageState extends State<MyHomePage> {
     _updateRfFrontendConfig(_rfFrontendConfig.copyWith(attenCode: code));
   }
 
-  String _rfFrontendErrorLabel(int error) {
-    switch (error) {
-      case 0:
-        return '0：OK';
-      case 1:
-        return '1：RF GPIO 未就绪/不可用';
-      case 2:
-        return '2：参数无效';
-      case 3:
-        return '3：GPIO 初始化失败';
-      default:
-        return '$error：未知错误';
-    }
-  }
-
-  String _formatRfFrontendConfig(RfFrontendConfig config) {
-    return '${_rfLnaModeLabel(config.lnaMode)} / '
-        '${_rfPathModeLabel(config.pathMode)} / '
-        '${config.attenDb.toStringAsFixed(2)} dB';
-  }
-
   void _sendSweepConfig() {
     if (_suppressPresetDeviceUpdates) return;
+    if (_isDirectIfFftMode) return;
     _protocol.setSweep(sweepSpeed.value,
         _sweepMode == SweepMode.standard ? 0 : 1, _getCurrentPointCount());
   }
@@ -2101,7 +2200,8 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Future<void> _requestSpectrumIfIdle() async {
-    if (_getCurrentStartFreq() > _getCurrentStopFreq()) {
+    final isDirectIfFft = _isDirectIfFftMode;
+    if (!isDirectIfFft && _getCurrentStartFreq() > _getCurrentStopFreq()) {
       return;
     }
     if (_awaitingTimeoutStatus) {
@@ -2146,31 +2246,46 @@ class _MyHomePageState extends State<MyHomePage> {
       return;
     }
     _protocol.resetReceiveBuffer();
-    final rawPoints = _estimateRawInternalSweepPointCount();
-    print(
-      'Request spectrum: rbw=${_formatFreqAutoUnit(_getSelectedRbwHz())}, '
-      'span=${_formatFreqAutoUnit(_getCurrentStopFreq() - _getCurrentStartFreq())}, '
-      'estimatedInternalPoints=${rawPoints ?? _getCurrentPointCount()}, '
-      'displayPoints=${_getCurrentPointCount()}',
-    );
-    _protocol.getSpectrum(_getCurrentPointCount());
+    if (isDirectIfFft) {
+      print(
+        'Request direct-IF FFT spectrum: '
+        'span=${_formatFreqAutoUnit(_directIfFftStartHz)}-'
+        '${_formatFreqAutoUnit(_directIfFftStopHz)}, '
+        'expectedPoints=$_directIfFftExpectedPointCount',
+      );
+      _protocol.getSpectrum(_directIfFftExpectedPointCount);
+    } else {
+      final rawPoints = _estimateRawInternalSweepPointCount();
+      print(
+        'Request spectrum: rbw=${_formatFreqAutoUnit(_getSelectedRbwHz())}, '
+        'span=${_formatFreqAutoUnit(_getCurrentStopFreq() - _getCurrentStartFreq())}, '
+        'estimatedInternalPoints=${rawPoints ?? _getCurrentPointCount()}, '
+        'displayPoints=${_getCurrentPointCount()}',
+      );
+      _protocol.getSpectrum(_getCurrentPointCount());
+    }
 
     final requestTimeout = _getSpectrumRequestTimeout();
     _spectrumRequestTimeoutTimer?.cancel();
     _spectrumRequestTimeoutTimer = Timer(requestTimeout, () async {
+      final timeoutDetail = isDirectIfFft
+          ? 'direct-IF FFT expectedPoints=$_directIfFftExpectedPointCount'
+          : 'rbw=${_formatFreqAutoUnit(_getSelectedRbwHz())}, '
+              'span=${_formatFreqAutoUnit(_getCurrentStopFreq() - _getCurrentStartFreq())}, '
+              'estimatedInternalPoints=${_estimateRawInternalSweepPointCount() ?? _getCurrentPointCount()}';
       print(
         'Spectrum request timed out after ${requestTimeout.inSeconds}s: '
-        'rbw=${_formatFreqAutoUnit(_getSelectedRbwHz())}, '
-        'span=${_formatFreqAutoUnit(_getCurrentStopFreq() - _getCurrentStartFreq())}, '
-        'estimatedInternalPoints=${_estimateRawInternalSweepPointCount() ?? _getCurrentPointCount()}',
+        '$timeoutDetail',
       );
       _spectrumRequestInFlight = false;
       _activeSweepTimestamp = null;
       _pendingSweepPoints.clear();
-      final wasContinuous = _isContinuousSweepRunning;
-      _continuousSweepTimer?.cancel();
-      _continuousSweepTimer = null;
-      if (wasContinuous && mounted) {
+      final shouldStopContinuous = !isDirectIfFft && _isContinuousSweepRunning;
+      if (!isDirectIfFft) {
+        _continuousSweepTimer?.cancel();
+        _continuousSweepTimer = null;
+      }
+      if (shouldStopContinuous && mounted) {
         setState(() {
           _isContinuousSweepRunning = false;
         });
@@ -2201,7 +2316,7 @@ class _MyHomePageState extends State<MyHomePage> {
     _measurementConfigGeneration++;
     _measurementConfigInFlight = false;
     _awaitingTimeoutStatus = false;
-    if (_serialManager.isConnected) {
+    if (_serialManager.isConnected && !_isDirectIfFftMode) {
       _protocol.stopSweep();
     }
     _acceptSpectrumData = false;
@@ -2230,6 +2345,7 @@ class _MyHomePageState extends State<MyHomePage> {
     bool? forceContinuous,
     bool clearDisplay = false,
   }) async {
+    final isDirectIfFft = _isDirectIfFftMode;
     if (!_commitFrequencyInputs()) {
       return;
     }
@@ -2259,7 +2375,9 @@ class _MyHomePageState extends State<MyHomePage> {
       _spectrumRequestInFlight = false;
       _continuousSweepTimer?.cancel();
       _spectrumRequestTimeoutTimer?.cancel();
-      _protocol.stopSweep();
+      if (!isDirectIfFft) {
+        _protocol.stopSweep();
+      }
       _acceptSpectrumData = false;
       _activeSweepTimestamp = null;
       _pendingSweepPoints.clear();
@@ -2279,7 +2397,9 @@ class _MyHomePageState extends State<MyHomePage> {
     _spectrumRequestTimeoutTimer?.cancel();
     _spectrumRequestInFlight = false;
     _acceptSpectrumData = false;
-    _protocol.stopSweep();
+    if (!isDirectIfFft) {
+      _protocol.stopSweep();
+    }
     if (clearDisplay) {
       _clearSpectrumDisplay();
     }
@@ -2303,7 +2423,9 @@ class _MyHomePageState extends State<MyHomePage> {
       return;
     }
 
-    final configApplied = await _syncCurrentDeviceConfig();
+    final configApplied = isDirectIfFft
+        ? await _syncDirectIfDeviceConfig()
+        : await _syncCurrentDeviceConfig();
     if (!configApplied) {
       _measurementConfigInFlight = false;
       _acceptSpectrumData = false;
@@ -2332,7 +2454,9 @@ class _MyHomePageState extends State<MyHomePage> {
       }
       await _requestSpectrumIfIdle();
       _continuousSweepTimer = Timer.periodic(
-        Duration(milliseconds: (1000 / sweepSpeed.value).round()),
+        isDirectIfFft
+            ? const Duration(milliseconds: 750)
+            : Duration(milliseconds: (1000 / sweepSpeed.value).round()),
         (_) => _requestSpectrumIfIdle(),
       );
     } else {
@@ -2421,8 +2545,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
   void _updateMarkerFreq(Marker marker, double freqHz) {
     if (!marker.enabled) return;
-    final clampedFreq =
-        freqHz.clamp(_getCurrentStartFreq(), _getCurrentStopFreq()).toDouble();
+    final clampedFreq = freqHz.clamp(_chartStartHz, _chartStopHz).toDouble();
     setState(() {
       _currentMarker = marker;
       marker.freqHz = clampedFreq;
@@ -2439,6 +2562,9 @@ class _MyHomePageState extends State<MyHomePage> {
       _clearSpectrumDisplay();
       _clearPhaseNoiseShellData();
     } else {
+      if (_serialManager.isConnected) {
+        _protocol.stopPhaseNoise();
+      }
       _stopContinuousSweep();
       _clearPhaseNoiseShellData();
       _acceptSpectrumData = true;
@@ -2631,18 +2757,16 @@ class _MyHomePageState extends State<MyHomePage> {
             : _phaseNoiseTrace.rawPoints);
     final validPoints = points
         .where(
-          (point) =>
-              point.offsetHz > 0 && point.dbcHz.isFinite && point.valid,
+          (point) => point.offsetHz > 0 && point.dbcHz.isFinite && point.valid,
         )
         .toList(growable: false);
     if (validPoints.isEmpty) return null;
 
     return validPoints.reduce(
-      (best, point) =>
-          (point.offsetHz - marker.offsetHz).abs() <
-                  (best.offsetHz - marker.offsetHz).abs()
-              ? point
-              : best,
+      (best, point) => (point.offsetHz - marker.offsetHz).abs() <
+              (best.offsetHz - marker.offsetHz).abs()
+          ? point
+          : best,
     );
   }
 
@@ -3330,8 +3454,9 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final double startFreq = _confirmedStartHz;
-    final double stopFreq = _confirmedStopHz;
+    final bool isDirectIfFft = _isDirectIfFftMode;
+    final double startFreq = _chartStartHz;
+    final double stopFreq = _chartStopHz;
     final double centerFreq = (startFreq + stopFreq) / 2;
     final double span = stopFreq - startFreq;
 
@@ -3504,8 +3629,11 @@ class _MyHomePageState extends State<MyHomePage> {
                               controller: startFreqController,
                               unitNotifier: startFreqUnit,
                               units: freqUnits,
+                              enabled: _isFrequencySweepConfigActive,
                               onChanged: () => _lastFrequencyEditMode =
                                   FrequencyEditMode.startStop,
+                              onUnitChanged: () => _handleFrequencyUnitChanged(
+                                  _updateFreqFromStartStop),
                               onSubmitted: _updateFreqFromStartStop),
                           const SizedBox(height: 8),
                           _buildInputRow(
@@ -3513,8 +3641,11 @@ class _MyHomePageState extends State<MyHomePage> {
                               controller: stopFreqController,
                               unitNotifier: stopFreqUnit,
                               units: freqUnits,
+                              enabled: _isFrequencySweepConfigActive,
                               onChanged: () => _lastFrequencyEditMode =
                                   FrequencyEditMode.startStop,
+                              onUnitChanged: () => _handleFrequencyUnitChanged(
+                                  _updateFreqFromStartStop),
                               onSubmitted: _updateFreqFromStartStop),
                           const SizedBox(height: 8),
                           _buildInputRow(
@@ -3522,8 +3653,11 @@ class _MyHomePageState extends State<MyHomePage> {
                               controller: centerFreqController,
                               unitNotifier: centerFreqUnit,
                               units: freqUnits,
+                              enabled: _isFrequencySweepConfigActive,
                               onChanged: () => _lastFrequencyEditMode =
                                   FrequencyEditMode.centerSpan,
+                              onUnitChanged: () => _handleFrequencyUnitChanged(
+                                  _updateFreqFromCenterSpan),
                               onSubmitted: _updateFreqFromCenterSpan),
                           const SizedBox(height: 8),
                           _buildInputRow(
@@ -3531,22 +3665,29 @@ class _MyHomePageState extends State<MyHomePage> {
                               controller: spanController,
                               unitNotifier: spanUnit,
                               units: freqUnits,
+                              enabled: _isFrequencySweepConfigActive,
                               onChanged: () => _lastFrequencyEditMode =
                                   FrequencyEditMode.centerSpan,
+                              onUnitChanged: () => _handleFrequencyUnitChanged(
+                                  _updateFreqFromCenterSpan),
                               onSubmitted: _updateFreqFromCenterSpan),
                           const SizedBox(height: 8),
                           Row(
                             children: [
                               Expanded(
                                 child: Button(
-                                  onPressed: _setFullSpan,
+                                  onPressed: _isFrequencySweepConfigActive
+                                      ? _setFullSpan
+                                      : null,
                                   child: const Text('FULL SPAN'),
                                 ),
                               ),
                               const SizedBox(width: 8),
                               Expanded(
                                 child: Button(
-                                  onPressed: _setZeroSpan,
+                                  onPressed: _isFrequencySweepConfigActive
+                                      ? _setZeroSpan
+                                      : null,
                                   child: const Text('ZERO SPAN'),
                                 ),
                               ),
@@ -3589,12 +3730,10 @@ class _MyHomePageState extends State<MyHomePage> {
                               ),
                             ],
                           ),
+                          const SizedBox(height: 12),
+                          _buildRfFrontendPanel(),
                         ],
                       ),
-                    ),
-                    Expander(
-                      header: const Text('RF 前端'),
-                      content: _buildRfFrontendPanel(),
                     ),
                     Expander(
                       header: const Text('BW'),
@@ -3625,8 +3764,11 @@ class _MyHomePageState extends State<MyHomePage> {
                                         .map((o) => ComboBoxItem<String>(
                                             value: o, child: Text(o)))
                                         .toList(),
-                                    onChanged: (nv) =>
-                                        nv != null ? rbwMode.value = nv : null,
+                                    onChanged: isDirectIfFft
+                                        ? null
+                                        : (nv) => nv != null
+                                            ? rbwMode.value = nv
+                                            : null,
                                   ),
                                 ),
                               ),
@@ -3672,8 +3814,11 @@ class _MyHomePageState extends State<MyHomePage> {
                                         .map((o) => ComboBoxItem<String>(
                                             value: o, child: Text(o)))
                                         .toList(),
-                                    onChanged: (nv) =>
-                                        nv != null ? vbwMode.value = nv : null,
+                                    onChanged: isDirectIfFft
+                                        ? null
+                                        : (nv) => nv != null
+                                            ? vbwMode.value = nv
+                                            : null,
                                   ),
                                 ),
                               ),
@@ -3683,7 +3828,8 @@ class _MyHomePageState extends State<MyHomePage> {
                           ValueListenableBuilder<String>(
                             valueListenable: vbwMode,
                             builder: (context, mode, child) {
-                              final bool isEnabled = mode == '手动';
+                              final bool isEnabled =
+                                  !isDirectIfFft && mode == '手动';
                               return _buildInputRow(
                                 label: 'VBW：',
                                 controller: vbwController,
@@ -3839,12 +3985,10 @@ class _MyHomePageState extends State<MyHomePage> {
                                                   _currentMarker!.freqHz;
                                               switch (action) {
                                                 case '起始点':
-                                                  newFreq =
-                                                      _getCurrentStartFreq();
+                                                  newFreq = _chartStartHz;
                                                   break;
                                                 case '结束点':
-                                                  newFreq =
-                                                      _getCurrentStopFreq();
+                                                  newFreq = _chartStopHz;
                                                   break;
                                                 case '向左寻峰':
                                                   newFreq = _findLeftPeak(
@@ -3855,8 +3999,9 @@ class _MyHomePageState extends State<MyHomePage> {
                                                       _currentMarker!.freqHz);
                                                   break;
                                                 case '中间点':
-                                                  newFreq =
-                                                      _getCurrentCenterFreq();
+                                                  newFreq = (_chartStartHz +
+                                                          _chartStopHz) /
+                                                      2.0;
                                                   break;
                                               }
                                               _currentMarker!.freqHz = newFreq;
@@ -3917,6 +4062,7 @@ class _MyHomePageState extends State<MyHomePage> {
                               Expanded(
                                 child: TextBox(
                                   controller: pointCountController,
+                                  enabled: !isDirectIfFft,
                                   onSubmitted: (value) {
                                     pointCountController.text =
                                         (_getCurrentPointCount()).toString();
@@ -4006,6 +4152,7 @@ class _MyHomePageState extends State<MyHomePage> {
     bool enabled = true,
     VoidCallback? onSubmitted,
     VoidCallback? onChanged,
+    VoidCallback? onUnitChanged,
     FocusNode? focusNode,
   }) {
     return Row(
@@ -4043,6 +4190,7 @@ class _MyHomePageState extends State<MyHomePage> {
                 if (nv != null) {
                   unitNotifier.value = nv;
                   onChanged?.call();
+                  onUnitChanged?.call();
                 }
               },
             ),
@@ -4053,13 +4201,6 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Widget _buildRfFrontendPanel() {
-    final status = _lastRfFrontendStatus;
-    final appliedGpio = status == null
-        ? '--'
-        : '0x${status.appliedGpio.toRadixString(16).padLeft(2, '0')}';
-    final errorText =
-        status == null ? '--' : _rfFrontendErrorLabel(status.error);
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -4173,32 +4314,6 @@ class _MyHomePageState extends State<MyHomePage> {
               ),
             ),
           ],
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Button(
-              onPressed:
-                  _rfFrontendCommandInFlight ? null : _sendRfFrontendConfig,
-              child: const Text('应用'),
-            ),
-            const SizedBox(width: 8),
-            Button(
-              onPressed:
-                  _rfFrontendCommandInFlight ? null : _queryRfFrontendStatus,
-              child: const Text('查询'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Text(
-          _rfFrontendMessage,
-          style: const TextStyle(color: material.Colors.white),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          'GPIO $appliedGpio    Error $errorText',
-          style: TextStyle(color: material.Colors.grey[300], fontSize: 12),
         ),
       ],
     );

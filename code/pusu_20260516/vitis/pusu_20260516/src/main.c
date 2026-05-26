@@ -13,6 +13,9 @@ static int protocol_spectrum_provider(const device_control_config_t *config,
                                       spectrum_point_t *points,
                                       unsigned short max_points,
                                       unsigned short *out_point_count);
+static int protocol_direct_if_fft_provider(spectrum_point_t *points,
+                                           unsigned short max_points,
+                                           unsigned short *out_point_count);
 static int protocol_status_provider(device_status_t *status);
 static int start_background_capture(void);
 static int reset_background_capture(void);
@@ -50,9 +53,11 @@ static phase_noise_engine_t g_phase_noise_engine;
 static protocol_sweep_stream_context_t g_sweep_stream_context;
 static int g_last_sweep_error = 0;
 static unsigned char g_background_dma_error_code = 0U;
+static float g_direct_if_spectrum_dbfs[SPECTRUM_BINS];
 
 #define BACKGROUND_DMA_ERR_RESET 0xD1U
 #define BACKGROUND_DMA_ERR_START 0xD2U
+#define DIRECT_IF_FRAME_TIMEOUT_LOOPS 500000U
 
 int main(void)
 {
@@ -139,6 +144,7 @@ int main(void)
                 (phase_noise_engine_is_active(&g_phase_noise_engine) == 0)) {
                 lock_indicator_toggle_activity();
                 reset_and_resume_background_capture_if_idle();
+                applied_rbw_mode = (rbw_mode_t)0xFFU;
             }
             continue;
         }
@@ -152,6 +158,7 @@ int main(void)
                 sweep_engine_set_point_callback(&g_sweep_engine, 0, 0);
                 lock_indicator_toggle_activity();
                 reset_and_resume_background_capture_if_idle();
+                applied_rbw_mode = (rbw_mode_t)0xFFU;
             }
             continue;
         }
@@ -257,15 +264,26 @@ static int protocol_spectrum_provider(const device_control_config_t *config,
                                       unsigned short max_points,
                                       unsigned short *out_point_count)
 {
+    if ((config == 0) || (points == 0) || (out_point_count == 0)) {
+        return -1;
+    }
+
     if (phase_noise_engine_is_active(&g_phase_noise_engine) != 0) {
         return -1;
     }
 
-    protocol_sweep_stream_context_t stream_context;
-
-    if ((points == 0) || (out_point_count == 0)) {
-        return -1;
+    {
+        const rf_frontend_state_t *rf_state = rf_frontend_get_state();
+        if ((rf_state != 0) && (rf_state->path_mode == RF_PATH_DIRECT_IF)) {
+            return protocol_direct_if_fft_provider(points, max_points, out_point_count);
+        }
     }
+
+    if (config->rf_frontend.path_mode == (unsigned char)RF_PATH_DIRECT_IF) {
+        return protocol_direct_if_fft_provider(points, max_points, out_point_count);
+    }
+
+    protocol_sweep_stream_context_t stream_context;
 
     stream_context.points = points;
     stream_context.max_points = max_points;
@@ -301,6 +319,95 @@ static int protocol_spectrum_provider(const device_control_config_t *config,
     lock_indicator_toggle_activity();
     reset_and_resume_background_capture_if_idle();
     return 0;
+}
+
+static int protocol_direct_if_fft_provider(spectrum_point_t *points,
+                                           unsigned short max_points,
+                                           unsigned short *out_point_count)
+{
+    unsigned short bin_count = 0U;
+    unsigned short i;
+    unsigned int wait_count = 0U;
+    int status = -1;
+
+    if ((points == 0) || (out_point_count == 0) || (max_points == 0U)) {
+        return -1;
+    }
+
+    *out_point_count = 0U;
+
+    release_background_capture();
+    if (dma_capture_reset() != XST_SUCCESS) {
+        g_dma_error_count++;
+        g_background_dma_error_code = BACKGROUND_DMA_ERR_RESET;
+        reset_and_resume_background_capture_if_idle();
+        return -1;
+    }
+
+    if (dma_capture_start(TRANSFER_LENGTH) != XST_SUCCESS) {
+        g_dma_error_count++;
+        g_background_dma_error_code = BACKGROUND_DMA_ERR_START;
+        reset_and_resume_background_capture_if_idle();
+        return -1;
+    }
+    g_dma_start_count++;
+    g_background_dma_error_code = 0U;
+
+    while (wait_count < DIRECT_IF_FRAME_TIMEOUT_LOOPS) {
+        if (dma_capture_take_error() != 0) {
+            g_dma_error_count++;
+            break;
+        }
+
+        if (dma_capture_frame_ready() != 0) {
+            g_frame_ready_count++;
+            signal_processing_process_direct_if_fft_frame(dma_capture_get_rx_buffer());
+            g_process_frame_count++;
+
+            if (signal_processing_get_latest_spectrum(g_direct_if_spectrum_dbfs,
+                                                      SPECTRUM_BINS,
+                                                      &bin_count) != 0) {
+                break;
+            }
+
+            if (bin_count > max_points) {
+                bin_count = max_points;
+            }
+
+            status = 0;
+            for (i = 0U; i < bin_count; i++) {
+                uint32_t freq_hz =
+                    (uint32_t)signal_processing_get_bin_frequency_hz(i);
+                uint8_t done = (uint8_t)((i + 1U >= bin_count) ? 1U : 0U);
+
+                points[i].freq_hz = freq_hz;
+                points[i].amp_dbm = g_direct_if_spectrum_dbfs[i];
+
+                if (device_protocol_stream_spectrum_point(freq_hz,
+                                                          g_direct_if_spectrum_dbfs[i],
+                                                          bin_count,
+                                                          i,
+                                                          done) != 0) {
+                    status = -1;
+                    break;
+                }
+            }
+
+            *out_point_count = (status == 0) ? bin_count : i;
+            break;
+        }
+
+        wait_count++;
+    }
+
+    if (status == 0) {
+        lock_indicator_toggle_activity();
+    } else if (wait_count >= DIRECT_IF_FRAME_TIMEOUT_LOOPS) {
+        g_dma_error_count++;
+    }
+
+    reset_and_resume_background_capture_if_idle();
+    return status;
 }
 
 static int protocol_sweep_point_callback(uint32_t freq_hz,

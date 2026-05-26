@@ -1,0 +1,302 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="656.1pt" height="358.128pt" viewBox="0 0 656.1 358.128" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:date>2026-05-26T09:46:11.529555</dc:date>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.10.0, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 358.128 
+L 656.1 358.128 
+L 656.1 0 
+L 0 0 
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 53.4024 164.627424 
+L 127.8396 164.627424 
+Q 153.5076 164.627424 153.5076 150.878304 
+L 153.5076 121.317696 
+Q 153.5076 107.568576 127.8396 107.568576 
+L 53.4024 107.568576 
+Q 27.7344 107.568576 27.7344 121.317696 
+L 27.7344 150.878304 
+Q 27.7344 164.627424 53.4024 164.627424 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #dce9ff; stroke: #b7c0c8; stroke-width: 1.2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_3">
+    <path d="M 200.9934 164.627424 
+L 275.4306 164.627424 
+Q 301.0986 164.627424 301.0986 150.878304 
+L 301.0986 121.317696 
+Q 301.0986 107.568576 275.4306 107.568576 
+L 200.9934 107.568576 
+Q 175.3254 107.568576 175.3254 121.317696 
+L 175.3254 150.878304 
+Q 175.3254 164.627424 200.9934 164.627424 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #ddf3f1; stroke: #b7c0c8; stroke-width: 1.2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 348.5844 164.627424 
+L 423.0216 164.627424 
+Q 448.6896 164.627424 448.6896 150.878304 
+L 448.6896 121.317696 
+Q 448.6896 107.568576 423.0216 107.568576 
+L 348.5844 107.568576 
+Q 322.9164 107.568576 322.9164 121.317696 
+L 322.9164 150.878304 
+Q 322.9164 164.627424 348.5844 164.627424 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #e3f2e7; stroke: #b7c0c8; stroke-width: 1.2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 496.1754 164.627424 
+L 570.6126 164.627424 
+Q 596.2806 164.627424 596.2806 150.878304 
+L 596.2806 121.317696 
+Q 596.2806 107.568576 570.6126 107.568576 
+L 496.1754 107.568576 
+Q 470.5074 107.568576 470.5074 121.317696 
+L 470.5074 150.878304 
+Q 470.5074 164.627424 496.1754 164.627424 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #f8ebd7; stroke: #b7c0c8; stroke-width: 1.2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 143.955654 136.098 
+Q 164.416431 136.098 182.864746 136.098 
+" clip-path="url(#p795dcdef12)" style="fill: none; stroke: #667085; stroke-width: 1.8; stroke-linecap: round"/>
+    <path d="M 178.064746 133.698 
+L 182.864746 136.098 
+L 178.064746 138.498 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #667085; stroke: #667085; stroke-width: 1.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 291.546654 136.098 
+Q 312.007431 136.098 330.455746 136.098 
+" clip-path="url(#p795dcdef12)" style="fill: none; stroke: #667085; stroke-width: 1.8; stroke-linecap: round"/>
+    <path d="M 325.655746 133.698 
+L 330.455746 136.098 
+L 325.655746 138.498 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #667085; stroke: #667085; stroke-width: 1.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 439.137654 136.098 
+Q 459.598431 136.098 478.046746 136.098 
+" clip-path="url(#p795dcdef12)" style="fill: none; stroke: #667085; stroke-width: 1.8; stroke-linecap: round"/>
+    <path d="M 473.246746 133.698 
+L 478.046746 136.098 
+L 473.246746 138.498 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #667085; stroke: #667085; stroke-width: 1.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 71.37 184.21992 
+L 289.548 184.21992 
+L 289.548 173.220624 
+L 71.37 173.220624 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #52b6b0; opacity: 0.85"/>
+   </g>
+   <g id="patch_10">
+    <path d="M 289.548 184.21992 
+L 469.224 184.21992 
+L 469.224 173.220624 
+L 289.548 173.220624 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #5bae6b; opacity: 0.8"/>
+   </g>
+   <g id="patch_11">
+    <path d="M 71.37 199.68768 
+L 255.232019 199.68768 
+L 255.232019 188.688384 
+L 71.37 188.688384 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #52b6b0; opacity: 0.85"/>
+   </g>
+   <g id="patch_12">
+    <path d="M 289.548 199.68768 
+L 469.224 199.68768 
+L 469.224 188.688384 
+L 289.548 188.688384 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #5bae6b; opacity: 0.8"/>
+   </g>
+   <g id="patch_13">
+    <path d="M 71.37 215.15544 
+L 238.847667 215.15544 
+L 238.847667 204.156144 
+L 71.37 204.156144 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #52b6b0; opacity: 0.85"/>
+   </g>
+   <g id="patch_14">
+    <path d="M 289.548 215.15544 
+L 469.224 215.15544 
+L 469.224 204.156144 
+L 289.548 204.156144 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #5bae6b; opacity: 0.8"/>
+   </g>
+   <g id="patch_15">
+    <path d="M 71.37 230.6232 
+L 220.916039 230.6232 
+L 220.916039 219.623904 
+L 71.37 219.623904 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #52b6b0; opacity: 0.85"/>
+   </g>
+   <g id="patch_16">
+    <path d="M 289.548 230.6232 
+L 411.471 230.6232 
+L 411.471 219.623904 
+L 289.548 219.623904 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #5bae6b; opacity: 0.8"/>
+   </g>
+   <g id="patch_17">
+    <path d="M 71.37 246.09096 
+L 204.428072 246.09096 
+L 204.428072 235.091664 
+L 71.37 235.091664 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #52b6b0; opacity: 0.85"/>
+   </g>
+   <g id="patch_18">
+    <path d="M 289.548 246.09096 
+L 411.471 246.09096 
+L 411.471 235.091664 
+L 289.548 235.091664 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #5bae6b; opacity: 0.8"/>
+   </g>
+   <g id="patch_19">
+    <path d="M 71.37 261.55872 
+L 186.600058 261.55872 
+L 186.600058 250.559424 
+L 71.37 250.559424 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #52b6b0; opacity: 0.85"/>
+   </g>
+   <g id="patch_20">
+    <path d="M 289.548 261.55872 
+L 382.5945 261.55872 
+L 382.5945 250.559424 
+L 289.548 250.559424 
+z
+" clip-path="url(#p795dcdef12)" style="fill: #5bae6b; opacity: 0.8"/>
+   </g>
+   <g id="text_1">
+    <text style="font-weight: 700; font-size: 14px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #263238" x="20.034" y="32.14037" transform="rotate(-0 20.034 32.14037)">RBW 多档数字滤波链</text>
+   </g>
+   <g id="text_2">
+    <text style="font-size: 8.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="20.034" y="46.648847" transform="rotate(-0 20.034 46.648847)">RBW 档位决定抽取比、补偿 FIR 长度和每点观测样本数。</text>
+   </g>
+   <g id="text_3">
+    <text style="font-size: 9px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(68.011313 132.961359)">DDC后 I/Q</text>
+    <text style="font-size: 9px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(49.696313 144.191672)">130 MSPS 等效输入</text>
+   </g>
+   <g id="text_4">
+    <text style="font-size: 9px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(221.869266 127.346203)">CIC抽取</text>
+    <text style="font-size: 9px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(205.852781 138.576516)">R/N按RBW配置</text>
+    <text style="font-size: 9px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(215.712 149.806828)">降低数据率</text>
+   </g>
+   <g id="text_5">
+    <text style="font-size: 9px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(370.152141 127.095188)">补偿FIR</text>
+    <text style="font-size: 9px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(351.052453 138.7755)">Hamming窗低通</text>
+    <text style="font-size: 9px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(367.803 150.057844)">修正通带</text>
+   </g>
+   <g id="text_6">
+    <text style="font-size: 9px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(510.894 127.346203)">有效观测窗</text>
+    <text style="font-size: 9px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(515.394 138.576516)">跳过瞬态</text>
+    <text style="font-size: 9px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(515.394 149.806828)">积累功率</text>
+   </g>
+   <g id="text_7">
+    <text style="font-size: 8.2px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #263238" x="58.536" y="180.978475" transform="rotate(-0 58.536 180.978475)">1 kHz</text>
+   </g>
+   <g id="text_8">
+    <text style="font-size: 7.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="295.965" y="180.785702" transform="rotate(-0 295.965 180.785702)">R=13000</text>
+   </g>
+   <g id="text_9">
+    <text style="font-size: 7.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="482.058" y="180.785702" transform="rotate(-0 482.058 180.785702)">FIR=256 taps</text>
+   </g>
+   <g id="text_10">
+    <text style="font-size: 8.2px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #263238" x="58.536" y="196.446235" transform="rotate(-0 58.536 196.446235)">10 kHz</text>
+   </g>
+   <g id="text_11">
+    <text style="font-size: 7.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="261.649019" y="196.253462" transform="rotate(-0 261.649019 196.253462)">R=1300</text>
+   </g>
+   <g id="text_12">
+    <text style="font-size: 7.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="482.058" y="196.253462" transform="rotate(-0 482.058 196.253462)">FIR=256 taps</text>
+   </g>
+   <g id="text_13">
+    <text style="font-size: 8.2px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #263238" x="58.536" y="211.913995" transform="rotate(-0 58.536 211.913995)">30 kHz</text>
+   </g>
+   <g id="text_14">
+    <text style="font-size: 7.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="245.264667" y="211.721222" transform="rotate(-0 245.264667 211.721222)">R=433</text>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 7.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="482.058" y="211.721222" transform="rotate(-0 482.058 211.721222)">FIR=256 taps</text>
+   </g>
+   <g id="text_16">
+    <text style="font-size: 8.2px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #263238" x="58.536" y="227.381755" transform="rotate(-0 58.536 227.381755)">100 kHz</text>
+   </g>
+   <g id="text_17">
+    <text style="font-size: 7.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="227.333039" y="227.188982" transform="rotate(-0 227.333039 227.188982)">R=130</text>
+   </g>
+   <g id="text_18">
+    <text style="font-size: 7.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="482.058" y="227.188982" transform="rotate(-0 482.058 227.188982)">FIR=128 taps</text>
+   </g>
+   <g id="text_19">
+    <text style="font-size: 8.2px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #263238" x="58.536" y="242.849515" transform="rotate(-0 58.536 242.849515)">300 kHz</text>
+   </g>
+   <g id="text_20">
+    <text style="font-size: 7.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="210.845072" y="242.656742" transform="rotate(-0 210.845072 242.656742)">R=43</text>
+   </g>
+   <g id="text_21">
+    <text style="font-size: 7.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="482.058" y="242.656742" transform="rotate(-0 482.058 242.656742)">FIR=128 taps</text>
+   </g>
+   <g id="text_22">
+    <text style="font-size: 8.2px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #263238" x="58.536" y="258.317275" transform="rotate(-0 58.536 258.317275)">1 MHz</text>
+   </g>
+   <g id="text_23">
+    <text style="font-size: 7.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="193.017058" y="258.124502" transform="rotate(-0 193.017058 258.124502)">R=13</text>
+   </g>
+   <g id="text_24">
+    <text style="font-size: 7.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="482.058" y="258.124502" transform="rotate(-0 482.058 258.124502)">FIR=64 taps</text>
+   </g>
+   <g id="text_25">
+    <text style="font-weight: 700; font-size: 8.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #52b6b0" x="129.123" y="280.46376" transform="rotate(-0 129.123 280.46376)">CIC抽取比</text>
+   </g>
+   <g id="text_26">
+    <text style="font-weight: 700; font-size: 8.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #5bae6b" x="315.216" y="280.46376" transform="rotate(-0 315.216 280.46376)">补偿FIR长度</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p795dcdef12">
+   <rect x="7.2" y="7.2" width="641.7" height="343.728"/>
+  </clipPath>
+ </defs>
+</svg>

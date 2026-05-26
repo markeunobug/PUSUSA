@@ -34,6 +34,7 @@ FINITE_WINDOW_OFFSETS_HZ = (
     1_000.0,
     3_000.0,
     10_000.0,
+    10_200.0,
     14_000.0,
     100_000.0,
     1_000_000.0,
@@ -41,6 +42,15 @@ FINITE_WINDOW_OFFSETS_HZ = (
     14_000_000.0,
 )
 FINITE_WINDOW_PLOT_FLOOR_DB = -220.0
+DECIMATION_REWORK_OFFSETS_HZ = (
+    1_000.0,
+    3_000.0,
+    10_000.0,
+    10_200.0,
+    14_000.0,
+    100_000.0,
+)
+DECIMATION_REWORK_PLOT_FLOOR_DB = -140.0
 _CIC_IMPULSE_CACHE: dict[tuple[int, int], np.ndarray] = {}
 
 
@@ -634,6 +644,376 @@ def write_finite_window_outputs(out_dir: Path, modes_by_name: dict[str, RbwMode]
             )
 
 
+def format_hz(value: float) -> str:
+    abs_value = abs(value)
+    if abs_value >= 1_000_000.0:
+        return f"{value / 1_000_000.0:g} MHz"
+    if abs_value >= 1_000.0:
+        return f"{value / 1_000.0:g} kHz"
+    return f"{value:g} Hz"
+
+
+def decimation_rework_modes() -> list[RbwMode]:
+    """Temporary 1 kHz RBW modes for the decimation rework study."""
+    return [
+        RbwMode(
+            name="old_1K_R13000",
+            rbw_hz=1_000.0,
+            cic_r=13_000,
+            cic_n=5,
+            fir_taps=256,
+            observe_points=256,
+            skip_points=128,
+        ),
+        RbwMode(
+            name="new_1K_R1300",
+            rbw_hz=1_000.0,
+            cic_r=1_300,
+            cic_n=5,
+            fir_taps=256,
+            observe_points=256,
+            skip_points=128,
+        ),
+    ]
+
+
+def decimation_rework_label(mode: RbwMode) -> str:
+    if mode.cic_r == 13_000:
+        return "old 1K, R=13000"
+    if mode.cic_r == 1_300:
+        return "new 1K, R=1300"
+    return mode.name
+
+
+def analyze_decimation_rework() -> tuple[
+    list[RbwMode],
+    list[dict[str, float | str | int | bool]],
+    list[dict[str, float | str | int]],
+    list[dict[str, float | int | bool]],
+]:
+    modes = decimation_rework_modes()
+    offsets = np.asarray(DECIMATION_REWORK_OFFSETS_HZ, dtype=np.float64)
+    mode_rows: list[dict[str, float | str | int | bool]] = []
+    offset_rows: list[dict[str, float | str | int]] = []
+
+    for mode in modes:
+        coeffs = design_fir(mode)
+        main_f = np.linspace(0.0, min(mode.fs_out_hz / 2.0, 4.0 * mode.rbw_hz), 40_001)
+        main_mag = total_mag(main_f, mode, coeffs)
+        bw_3db = find_bandwidth(main_f, main_mag, 3.0103)
+        main_enbw = enbw_main(mode, coeffs)
+
+        alias_hz = alias_to_output(offsets, mode.fs_out_hz)
+        fir_alias_db = np.asarray(db20(fir_mag_at(alias_hz, coeffs, mode.fs_out_hz)))
+        cic_db = np.asarray(db20(cic_mag(offsets, mode)))
+        steady_db = np.asarray(db20(total_mag(offsets, mode, coeffs)))
+        current_db, fixed_db = finite_window_response_db(mode, offsets)
+
+        mode_rows.append({
+            "configuration": decimation_rework_label(mode),
+            "mode_name": mode.name,
+            "rbw_hz": mode.rbw_hz,
+            "cic_r": mode.cic_r,
+            "cic_n": mode.cic_n,
+            "fs_out_hz": mode.fs_out_hz,
+            "fir_taps": mode.fir_taps,
+            "observe_points": mode.observe_points,
+            "skip_points": mode.skip_points,
+            "accum_count": mode.observe_points + mode.skip_points + mode.fir_taps,
+            "fits_accum_768": (mode.observe_points + mode.skip_points + mode.fir_taps) <= 768,
+            "bw_3db_hz": bw_3db,
+            "enbw_main_hz": main_enbw,
+            "enbw_main_over_rbw": main_enbw / mode.rbw_hz,
+            "noise_correction_db": 10.0 * math.log10(main_enbw / mode.rbw_hz),
+        })
+
+        for offset_hz, alias, fir_db, cic_value_db, steady_value_db, current_value_db, fixed_value_db in zip(
+            offsets,
+            alias_hz,
+            fir_alias_db,
+            cic_db,
+            steady_db,
+            current_db,
+            fixed_db,
+        ):
+            offset_rows.append({
+                "configuration": decimation_rework_label(mode),
+                "mode_name": mode.name,
+                "rbw_hz": mode.rbw_hz,
+                "cic_r": mode.cic_r,
+                "cic_n": mode.cic_n,
+                "fs_out_hz": mode.fs_out_hz,
+                "fir_taps": mode.fir_taps,
+                "observe_points": mode.observe_points,
+                "skip_points": mode.skip_points,
+                "accum_count": mode.observe_points + mode.skip_points + mode.fir_taps,
+                "offset_hz": float(offset_hz),
+                "alias_hz": float(alias),
+                "abs_alias_hz": float(abs(alias)),
+                "alias_inside_nominal_rbw": abs(alias) <= mode.rbw_hz,
+                "cic_response_db": float(cic_value_db),
+                "fir_response_at_alias_db": float(fir_db),
+                "steady_state_response_db": float(steady_value_db),
+                "current_window_response_db": float(current_value_db),
+                "fixed_window_response_db": float(fixed_value_db),
+                "current_window_density_dbc_hz": float(current_value_db - 10.0 * math.log10(mode.rbw_hz)),
+                "fixed_window_density_dbc_hz": float(fixed_value_db - 10.0 * math.log10(mode.rbw_hz)),
+            })
+
+    tap_rows: list[dict[str, float | int | bool]] = []
+    for taps in (256, 384, 512):
+        mode = RbwMode(
+            name=f"new_1K_R1300_{taps}tap",
+            rbw_hz=1_000.0,
+            cic_r=1_300,
+            cic_n=5,
+            fir_taps=taps,
+            observe_points=256,
+            skip_points=128,
+        )
+        coeffs = design_fir(mode)
+        main_f = np.linspace(0.0, min(mode.fs_out_hz / 2.0, 4.0 * mode.rbw_hz), 40_001)
+        response = np.asarray(db20(total_mag(offsets, mode, coeffs)))
+        tap_rows.append({
+            "fir_taps": taps,
+            "accum_count": mode.observe_points + mode.skip_points + mode.fir_taps,
+            "fits_accum_768": (mode.observe_points + mode.skip_points + mode.fir_taps) <= 768,
+            "bw_3db_hz": find_bandwidth(main_f, total_mag(main_f, mode, coeffs), 3.0103),
+            "enbw_main_hz": enbw_main(mode, coeffs),
+            "response_10khz_db": float(response[2]),
+            "response_10p2khz_db": float(response[3]),
+            "response_14khz_db": float(response[4]),
+        })
+
+    return modes, mode_rows, offset_rows, tap_rows
+
+
+def write_decimation_rework_summary(
+    out_dir: Path,
+    mode_rows: list[dict[str, float | str | int | bool]],
+    offset_rows: list[dict[str, float | str | int]],
+    tap_rows: list[dict[str, float | int | bool]],
+) -> None:
+    md_path = out_dir / "rbw_decimation_rework_summary.md"
+    row_by_mode_offset = {
+        (str(row["mode_name"]), float(row["offset_hz"])): row
+        for row in offset_rows
+    }
+
+    with md_path.open("w", encoding="utf-8") as f:
+        f.write("# RBW Decimation Rework Alias Check\n\n")
+        f.write(
+            "This report constructs temporary 1 kHz RBW modes for the decimation rework, "
+            "independent of the current `app_config.h` values.\n\n"
+        )
+        f.write("| Configuration | Fs out | 3 dB BW | ENBW | ENBW/RBW | Accum count |\n")
+        f.write("| --- | ---: | ---: | ---: | ---: | ---: |\n")
+        for row in mode_rows:
+            f.write(
+                "| {configuration} | {fs_out_hz:.1f} Hz | {bw_3db_hz:.1f} Hz | "
+                "{enbw_main_hz:.1f} Hz | {enbw_main_over_rbw:.3f} | {accum_count} |\n".format(
+                    **row
+                )
+            )
+
+        f.write("\n## Key Alias Points\n\n")
+        f.write(
+            "`FIR at alias` is the post-decimation FIR response at the folded frequency. "
+            "`Fixed window` is the full CIC + FIR finite-window response after skipping the FIR transient.\n\n"
+        )
+        f.write(
+            "| Configuration | Offset | Alias | In RBW passband | FIR at alias | "
+            "CIC | Steady total | Current window | Fixed window |\n"
+        )
+        f.write("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+        for row in offset_rows:
+            f.write(
+                "| {configuration} | {offset} | {alias} | {inside} | {fir_response_at_alias_db:.2f} dB | "
+                "{cic_response_db:.2f} dB | {steady_state_response_db:.2f} dB | "
+                "{current_window_response_db:.2f} dB | {fixed_window_response_db:.2f} dB |\n".format(
+                    offset=format_hz(float(row["offset_hz"])),
+                    alias=format_hz(float(row["alias_hz"])),
+                    inside="yes" if row["alias_inside_nominal_rbw"] else "no",
+                    **row,
+                )
+            )
+
+        old_10k = row_by_mode_offset[("old_1K_R13000", 10_000.0)]
+        old_10p2k = row_by_mode_offset[("old_1K_R13000", 10_200.0)]
+        new_10k = row_by_mode_offset[("new_1K_R1300", 10_000.0)]
+        new_10p2k = row_by_mode_offset[("new_1K_R1300", 10_200.0)]
+
+        f.write("\n## Conclusion\n\n")
+        f.write(
+            "- Old 1 kHz RBW (`R=13000`, `Fs_out=10 kHz`) folds 10 kHz to DC and "
+            f"10.2 kHz to {format_hz(float(old_10p2k['alias_hz']))}; both land inside the 1 kHz RBW passband. "
+            f"The FIR-only alias response is {float(old_10k['fir_response_at_alias_db']):.2f} dB at 10 kHz and "
+            f"{float(old_10p2k['fir_response_at_alias_db']):.2f} dB at 10.2 kHz.\n"
+        )
+        f.write(
+            "- New 1 kHz RBW (`R=1300`, `Fs_out=100 kHz`) leaves those offsets at "
+            f"{format_hz(float(new_10k['alias_hz']))} and {format_hz(float(new_10p2k['alias_hz']))}, outside the 1 kHz FIR passband. "
+            f"The full fixed-window carrier rejection is {float(new_10k['fixed_window_response_db']):.2f} dB at 10 kHz and "
+            f"{float(new_10p2k['fixed_window_response_db']):.2f} dB at 10.2 kHz.\n"
+        )
+        f.write(
+            "- Exact 10 kHz is a CIC comb-null special case in the old mode, so the ideal steady-state total response is very low. "
+            "The alias risk is still visible in the folded frequency and FIR-only columns, and the old current-window model leaks "
+            f"{float(old_10p2k['current_window_response_db']):.2f} dB at 10.2 kHz before the FIR transient is skipped.\n"
+        )
+
+        f.write("\n## If More Rejection Is Needed\n\n")
+        f.write(
+            "The proposed 256-tap Hamming FIR solves the 10 kHz alias geometry, but it gives only about "
+            f"{float(new_10k['fixed_window_response_db']):.1f} dB to {float(new_10p2k['fixed_window_response_db']):.1f} dB "
+            "of full fixed-window carrier rejection around 10 kHz. Tap sweep for the new `R=1300` mode:\n\n"
+        )
+        f.write("| FIR taps | Accum count | Fits 768 buffer | 3 dB BW | ENBW | 10 kHz | 10.2 kHz | 14 kHz |\n")
+        f.write("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+        for row in tap_rows:
+            f.write(
+                "| {fir_taps} | {accum_count} | {fits} | {bw_3db_hz:.1f} Hz | {enbw_main_hz:.1f} Hz | "
+                "{response_10khz_db:.2f} dB | {response_10p2khz_db:.2f} dB | {response_14khz_db:.2f} dB |\n".format(
+                    fits="yes" if row["fits_accum_768"] else "no",
+                    **row,
+                )
+            )
+        f.write(
+            "\nA 384-tap Hamming FIR is the largest option that still fits `256 + 128 + taps <= 768`; "
+            "larger rejection should use a different window or a larger/rebalanced accumulation buffer.\n"
+        )
+
+
+def write_decimation_rework_csv(
+    out_dir: Path,
+    offset_rows: list[dict[str, float | str | int]],
+) -> None:
+    csv_path = out_dir / "rbw_decimation_alias_comparison.csv"
+    fieldnames = list(offset_rows[0].keys())
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(offset_rows)
+
+
+def plot_decimation_rework(
+    out_dir: Path,
+    modes: list[RbwMode],
+    offset_rows: list[dict[str, float | str | int]],
+) -> None:
+    freq = np.linspace(0.0, 120_000.0, 6001)
+    colors = {
+        "old_1K_R13000": "tab:red",
+        "new_1K_R1300": "tab:blue",
+    }
+
+    fig, axes = plt.subplots(3, 1, figsize=(11, 11), dpi=150)
+
+    for mode in modes:
+        coeffs = design_fir(mode)
+        alias = alias_to_output(freq, mode.fs_out_hz)
+        fir_alias_db = np.asarray(db20(fir_mag_at(alias, coeffs, mode.fs_out_hz)))
+        label = decimation_rework_label(mode)
+        color = colors.get(mode.name, None)
+
+        axes[0].plot(freq / 1_000.0, np.abs(alias), label=label, color=color)
+        axes[1].plot(
+            freq / 1_000.0,
+            np.maximum(fir_alias_db, DECIMATION_REWORK_PLOT_FLOOR_DB),
+            label=label,
+            color=color,
+        )
+
+    axes[0].axhspan(0.0, 1_000.0, color="tab:green", alpha=0.12, label="within nominal 1 kHz RBW")
+    axes[0].set_title("Post-decimation alias landing")
+    axes[0].set_ylabel("|Alias frequency| (Hz)")
+    axes[0].set_ylim(0.0, 55_000.0)
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend(loc="upper right")
+
+    axes[1].set_title("FIR response at the aliased frequency")
+    axes[1].set_ylabel("FIR-only response (dB)")
+    axes[1].set_ylim(DECIMATION_REWORK_PLOT_FLOOR_DB, 5.0)
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend(loc="lower left")
+
+    offsets = np.asarray(DECIMATION_REWORK_OFFSETS_HZ, dtype=np.float64)
+    for mode in modes:
+        mode_rows = [row for row in offset_rows if row["mode_name"] == mode.name]
+        mode_rows.sort(key=lambda row: float(row["offset_hz"]))
+        x = np.asarray([float(row["offset_hz"]) for row in mode_rows])
+        current = np.asarray([float(row["current_window_response_db"]) for row in mode_rows])
+        fixed = np.asarray([float(row["fixed_window_response_db"]) for row in mode_rows])
+        label = decimation_rework_label(mode)
+        color = colors.get(mode.name, None)
+        axes[2].semilogx(
+            x,
+            np.maximum(fixed, DECIMATION_REWORK_PLOT_FLOOR_DB),
+            marker="o",
+            linewidth=1.6,
+            color=color,
+            label=f"{label} fixed window",
+        )
+        axes[2].semilogx(
+            x,
+            np.maximum(current, DECIMATION_REWORK_PLOT_FLOOR_DB),
+            marker="x",
+            linestyle="--",
+            linewidth=1.1,
+            color=color,
+            alpha=0.75,
+            label=f"{label} current window",
+        )
+
+    for ax in axes:
+        for marker in (10_000.0, 10_200.0):
+            ax.axvline(marker / 1_000.0 if ax is not axes[2] else marker, color="0.35", linestyle=":", linewidth=0.9)
+
+    axes[2].set_title("Full CIC + FIR finite-window response at requested offsets")
+    axes[2].set_xlabel("Offset after DDC (Hz)")
+    axes[2].set_ylabel("Carrier response (dB)")
+    axes[2].set_xticks(offsets)
+    axes[2].set_xticklabels([format_hz(float(offset)) for offset in offsets])
+    axes[2].set_ylim(DECIMATION_REWORK_PLOT_FLOOR_DB, 5.0)
+    axes[2].grid(True, which="both", alpha=0.3)
+    axes[2].legend(loc="lower left", fontsize=8)
+
+    axes[0].set_xlim(0.0, 120.0)
+    axes[1].set_xlim(0.0, 120.0)
+    axes[0].set_xlabel("Offset after DDC (kHz)")
+    axes[1].set_xlabel("Offset after DDC (kHz)")
+
+    fig.suptitle("1 kHz RBW Decimation Alias Comparison: R=13000 vs R=1300", y=0.995)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.savefig(out_dir / "rbw_decimation_alias_comparison.png")
+    plt.close(fig)
+
+
+def write_decimation_rework_outputs(out_dir: Path, write_plots: bool) -> tuple[
+    list[dict[str, float | str | int | bool]],
+    list[dict[str, float | str | int]],
+]:
+    modes, mode_rows, offset_rows, tap_rows = analyze_decimation_rework()
+    write_decimation_rework_csv(out_dir, offset_rows)
+    write_decimation_rework_summary(out_dir, mode_rows, offset_rows, tap_rows)
+    if write_plots:
+        plot_decimation_rework(out_dir, modes, offset_rows)
+    return mode_rows, offset_rows
+
+
+def print_decimation_rework_summary(offset_rows: list[dict[str, float | str | int]]) -> None:
+    print("\n1K decimation rework alias check:")
+    print("Config             Offset    Alias     FIR@alias   CurrentWin   FixedWin")
+    for row in offset_rows:
+        if float(row["offset_hz"]) not in (10_000.0, 10_200.0):
+            continue
+        print(
+            "{configuration:<18} {offset_hz:>7.0f} {alias_hz:>9.1f} "
+            "{fir_response_at_alias_db:>10.2f} {current_window_response_db:>12.2f} "
+            "{fixed_window_response_db:>10.2f}".format(**row)
+        )
+
+
 def print_summary(rows: list[dict[str, float | str]]) -> None:
     print("Mode  Fs_out(Hz)  3dB_BW(Hz)  ENBW_main(Hz)  ENBW/RBW  Corr(dB)  Att@1xRBW  Att@10k")
     for row in rows:
@@ -657,6 +1037,7 @@ def main() -> int:
     rows, responses = analyze_modes(modes)
     write_summary(args.out_dir, rows)
     write_response_csvs(args.out_dir, responses)
+    _, decimation_rework_rows = write_decimation_rework_outputs(args.out_dir, write_plots=not args.no_plots)
 
     if not args.no_plots:
         plot_all_modes(args.out_dir, responses, modes)
@@ -668,6 +1049,7 @@ def main() -> int:
         write_finite_window_outputs(args.out_dir, modes_by_name)
 
     print_summary(rows)
+    print_decimation_rework_summary(decimation_rework_rows)
     print(f"\nWrote analysis to: {args.out_dir}")
     return 0
 

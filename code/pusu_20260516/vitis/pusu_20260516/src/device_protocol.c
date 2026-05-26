@@ -457,7 +457,10 @@ static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned 
             if (length == 2U) {
                 g_protocol.config.sweep.point_count = sanitize_point_count(read_u16_le(data));//扫描点数设置，这里最大512，是否不够用
             }
-            if (g_protocol.sweep_control != 0) {
+            if ((rf_frontend_get_state() != 0) && (rf_frontend_get_state()->path_mode == RF_PATH_DIRECT_IF)) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+                send_spectrum();
+            } else if (g_protocol.sweep_control != 0) {
                 if (start_sweep() == 0) {
                     send_ack(cmd, ACK_OK, ERR_NONE);
                 } else {

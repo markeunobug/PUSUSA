@@ -100,3 +100,27 @@
 1. 上下位机可能尚未完全统一到二进制协议。
 2. 若联调失败，先确认下位机当前分支到底接收的是二进制帧还是文本字符。
 3. `STATUS_DATA` 中温度字段的字节序需要实机确认。
+
+## 5. GET_SPECTRUM behavior by RF path
+
+`GET_SPECTRUM(0x06)` reuses the existing segmented `SPECTRUM_DATA(0x82)`
+stream, but the returned trace depends on the current RF frontend path:
+
+| RF path | Behavior |
+| --- | --- |
+| `RF_PATH_MIXER_CHAIN` | Existing sweep behavior: LO sweep, 40 MHz IF DDC/RBW power measurement, streamed sweep points. |
+| `RF_PATH_DIRECT_IF` | One LTC2208 ADC frame is captured, a raw 4096-point real-input FFT is run without DDC/RBW filtering, and fixed 0-65 MHz FFT bins are streamed. |
+
+The firmware dispatches direct-IF FFT from the applied RF frontend state, so a
+successful `SET_RF_FRONTEND(path=direct_if)` / `RF_FRONTEND_STATUS` response is
+enough to route the next `GET_SPECTRUM` away from the sweep engine.
+
+Direct-IF FFT details:
+
+- ADC sample rate: `130 MSPS`.
+- FFT size: `4096` samples.
+- Returned bins: `SPECTRUM_BINS = 2048`.
+- Bin spacing: `130 MHz / 4096 = 31.73828125 kHz`.
+- Frequency field: `bin_index * ADC_SAMPLE_RATE_HZ / FFT_SIZE`, so the final 2048-bin trace reaches about `64.968 MHz`.
+- Amplitude field: raw FFT magnitude in `dBFS` for this first firmware path; absolute RF calibration is intentionally left for later.
+- Direct-IF mode ignores configured start/stop frequency, sweep point count, and RBW/VBW for the returned x-axis.

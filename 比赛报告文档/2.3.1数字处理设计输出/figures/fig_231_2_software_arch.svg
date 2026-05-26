@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="656.1pt" height="358.128pt" viewBox="0 0 656.1 358.128" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:date>2026-05-26T09:46:09.002971</dc:date>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.10.0, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 358.128 
+L 656.1 358.128 
+L 656.1 0 
+L 0 0 
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 271.5804 123.380064 
+L 384.5196 123.380064 
+Q 410.1876 123.380064 410.1876 109.630944 
+L 410.1876 83.507616 
+Q 410.1876 69.758496 384.5196 69.758496 
+L 271.5804 69.758496 
+Q 245.9124 69.758496 245.9124 83.507616 
+L 245.9124 109.630944 
+Q 245.9124 123.380064 271.5804 123.380064 
+z
+" clip-path="url(#p9c96ea2977)" style="fill: #e9e5fa; stroke: #8b7bd3; stroke-width: 1.2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_3">
+    <path d="M 66.2364 123.380064 
+L 179.1756 123.380064 
+Q 204.8436 123.380064 204.8436 109.630944 
+L 204.8436 83.507616 
+Q 204.8436 69.758496 179.1756 69.758496 
+L 66.2364 69.758496 
+Q 40.5684 69.758496 40.5684 83.507616 
+L 40.5684 109.630944 
+Q 40.5684 123.380064 66.2364 123.380064 
+z
+" clip-path="url(#p9c96ea2977)" style="fill: #dce9ff; stroke: #5b8def; stroke-width: 1.2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 66.2364 212.749344 
+L 179.1756 212.749344 
+Q 204.8436 212.749344 204.8436 199.000224 
+L 204.8436 172.876896 
+Q 204.8436 159.127776 179.1756 159.127776 
+L 66.2364 159.127776 
+Q 40.5684 159.127776 40.5684 172.876896 
+L 40.5684 199.000224 
+Q 40.5684 212.749344 66.2364 212.749344 
+z
+" clip-path="url(#p9c96ea2977)" style="fill: #ddf3f1; stroke: #52b6b0; stroke-width: 1.2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 271.5804 212.749344 
+L 384.5196 212.749344 
+Q 410.1876 212.749344 410.1876 199.000224 
+L 410.1876 172.876896 
+Q 410.1876 159.127776 384.5196 159.127776 
+L 271.5804 159.127776 
+Q 245.9124 159.127776 245.9124 172.876896 
+L 245.9124 199.000224 
+Q 245.9124 212.749344 271.5804 212.749344 
+z
+" clip-path="url(#p9c96ea2977)" style="fill: #e3f2e7; stroke: #5bae6b; stroke-width: 1.2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 476.9244 212.749344 
+L 589.8636 212.749344 
+Q 615.5316 212.749344 615.5316 199.000224 
+L 615.5316 172.876896 
+Q 615.5316 159.127776 589.8636 159.127776 
+L 476.9244 159.127776 
+Q 451.2564 159.127776 451.2564 172.876896 
+L 451.2564 199.000224 
+Q 451.2564 212.749344 476.9244 212.749344 
+z
+" clip-path="url(#p9c96ea2977)" style="fill: #f8ebd7; stroke: #d99a3d; stroke-width: 1.2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 476.9244 123.380064 
+L 589.8636 123.380064 
+Q 615.5316 123.380064 615.5316 109.630944 
+L 615.5316 83.507616 
+Q 615.5316 69.758496 589.8636 69.758496 
+L 476.9244 69.758496 
+Q 451.2564 69.758496 451.2564 83.507616 
+L 451.2564 109.630944 
+Q 451.2564 123.380064 476.9244 123.380064 
+z
+" clip-path="url(#p9c96ea2977)" style="fill: #f6dfe3; stroke: #d8737f; stroke-width: 1.2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 195.294396 96.56928 
+Q 225.378855 96.56928 253.450853 96.56928 
+" clip-path="url(#p9c96ea2977)" style="fill: none; stroke: #5b8def; stroke-width: 1.8; stroke-linecap: round"/>
+    <path d="M 248.650853 94.16928 
+L 253.450853 96.56928 
+L 248.650853 98.96928 
+z
+" clip-path="url(#p9c96ea2977)" style="fill: #5b8def; stroke: #5b8def; stroke-width: 1.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 326.048719 117.186445 
+Q 219.709597 117.063396 126.298969 163.523146 
+" clip-path="url(#p9c96ea2977)" style="fill: none; stroke: #52b6b0; stroke-width: 1.8; stroke-linecap: round"/>
+    <path d="M 131.66552 163.534444 
+L 126.298969 163.523146 
+L 129.527938 159.236684 
+z
+" clip-path="url(#p9c96ea2977)" style="fill: #52b6b0; stroke: #52b6b0; stroke-width: 1.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_10">
+    <path d="M 195.294396 185.93856 
+Q 225.378855 185.93856 253.450853 185.93856 
+" clip-path="url(#p9c96ea2977)" style="fill: none; stroke: #52b6b0; stroke-width: 1.8; stroke-linecap: round"/>
+    <path d="M 248.650853 183.53856 
+L 253.450853 185.93856 
+L 248.650853 188.33856 
+z
+" clip-path="url(#p9c96ea2977)" style="fill: #52b6b0; stroke: #52b6b0; stroke-width: 1.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_11">
+    <path d="M 400.638396 185.93856 
+Q 430.722855 185.93856 458.794853 185.93856 
+" clip-path="url(#p9c96ea2977)" style="fill: none; stroke: #5bae6b; stroke-width: 1.8; stroke-linecap: round"/>
+    <path d="M 453.994853 183.53856 
+L 458.794853 185.93856 
+L 453.994853 188.33856 
+z
+" clip-path="url(#p9c96ea2977)" style="fill: #5bae6b; stroke: #5bae6b; stroke-width: 1.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_12">
+    <path d="M 533.394 163.314695 
+Q 533.394 141.254577 533.394 121.20692 
+" clip-path="url(#p9c96ea2977)" style="fill: none; stroke: #d8737f; stroke-width: 1.8; stroke-linecap: round"/>
+    <path d="M 530.994 126.00692 
+L 533.394 121.20692 
+L 535.794 126.00692 
+z
+" clip-path="url(#p9c96ea2977)" style="fill: #d8737f; stroke: #d8737f; stroke-width: 1.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_13">
+    <path d="M 458.793143 96.56928 
+Q 430.721145 96.56928 400.636686 96.56928 
+" clip-path="url(#p9c96ea2977)" style="fill: none; stroke: #d8737f; stroke-width: 1.8; stroke-linecap: round"/>
+    <path d="M 453.993143 94.16928 
+L 458.793143 96.56928 
+L 453.993143 98.96928 
+z
+" clip-path="url(#p9c96ea2977)" style="fill: #d8737f; stroke: #d8737f; stroke-width: 1.8; stroke-linecap: round"/>
+   </g>
+   <g id="patch_14">
+    <path d="M 143.2404 295.244064 
+L 512.8596 295.244064 
+Q 538.5276 295.244064 538.5276 281.494944 
+L 538.5276 255.371616 
+Q 538.5276 241.622496 512.8596 241.622496 
+L 143.2404 241.622496 
+Q 117.5724 241.622496 117.5724 255.371616 
+L 117.5724 281.494944 
+Q 117.5724 295.244064 143.2404 295.244064 
+z
+" clip-path="url(#p9c96ea2977)" style="fill: #eef1f4; stroke: #b7c0c8; stroke-width: 1.2; stroke-linejoin: miter"/>
+   </g>
+   <g id="text_1">
+    <text style="font-weight: 700; font-size: 14px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #263238" x="20.034" y="32.687245" transform="rotate(-0 20.034 32.687245)">Zynq 侧软件模块协同关系</text>
+   </g>
+   <g id="text_2">
+    <text style="font-size: 8.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #667085" x="20.034" y="46.648847" transform="rotate(-0 20.034 46.648847)">Bare-metal 固件通过函数回调和状态机组织采集、处理与发送。</text>
+   </g>
+   <g id="text_3">
+    <text style="font-weight: 700; font-size: 9.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(294.614453 87.2526)">sweep_engine</text>
+    <text style="font-weight: 700; font-size: 9.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(304.3 99.231507)">扫频状态机</text>
+    <text style="font-weight: 700; font-size: 9.5px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(299.55 111.085725)">调度每个频点</text>
+   </g>
+   <g id="text_4">
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(101.823188 87.982405)">lo_control</text>
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(104.344938 99.02228)">设置 LO1</text>
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(105.106 110.00303)">等待锁定</text>
+   </g>
+   <g id="text_5">
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(95.448 177.351685)">dma_capture</text>
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(88.41075 188.39156)">AXI DMA S2MM</text>
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(100.706 199.37231)">采集中频帧</text>
+   </g>
+   <g id="text_6">
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(291.039125 177.351685)">signal_processing</text>
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(292.985437 188.39156)">DDC + CIC + FIR</text>
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(310.45 199.37231)">功率估计</text>
+   </g>
+   <g id="text_7">
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(488.727813 177.351685)">amplitude_correction</text>
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(491.980375 188.39156)">衰减/LNA/VGA/频率</text>
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(502.594 199.37231)">输入端幅度修正</text>
+   </g>
+   <g id="text_8">
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(500.127938 87.982405)">device_protocol</text>
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(510.223187 99.02228)">0x82频谱点</text>
+    <text style="font-size: 8.8px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; fill: #263238" transform="translate(494.462938 110.00303)">ACK/状态/性能数据</text>
+   </g>
+   <g id="text_9">
+    <text style="font-size: 9.2px; font-family: 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', sans-serif; text-anchor: middle; fill: #263238" x="328.05" y="271.133624" transform="rotate(-0 328.05 271.133624)">主循环持续轮询 device_protocol 和 sweep_engine；扫频活跃时释放后台 FFT/状态采集路径，保证 DMA 资源被当前测量点独占。</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p9c96ea2977">
+   <rect x="7.2" y="7.2" width="641.7" height="343.728"/>
+  </clipPath>
+ </defs>
+</svg>

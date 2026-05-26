@@ -78,6 +78,7 @@ See `docs/uart_protocol_summary.md` for the complete protocol spec.
 - **Sweep profiling is gated off by default**: `SWEEP_PROFILE_ENABLE 0` in `app_config.h`. When enabled, `profile_timer.c/.h` records coarse per-sweep-point timing and exposes it through `GET_PROFILE(0x0E)` / `PROFILE_DATA(0x85)`. Host display is in the bottom status bar.
 - **Two Flutter projects exist**: `flutter_pusu/` is the current active host app. `flutter_hello/` is older and should not be modified.
 - **Multiple Vitis project trees exist**: `code/pusu_20260516/vitis/pusu_20260516/` is current. `vitis_20260409/` and older `vitis/` trees are reference code.
+- **Never pull or overwrite from GitHub without explicit user approval**: do not run `git pull`, merge/rebase fetched remote changes, reset/checkout over local files, or otherwise sync from GitHub in a way that could overwrite local work. If remote sync or recovery seems necessary, explain the risk and ask the user before acting.
 
 ## Build and development
 
