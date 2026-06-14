@@ -1,0 +1,3 @@
+file,type,samples,selected_column,bit_width,signed,sample_rate_hz,bin_spacing_hz,peak_bin_hz,peak_interp_hz,peak_relative_db,has_tdata,has_tvalid,has_tlast,has_adc_raw,tvalid_issues,overflow_issues
+iladata_1.0000G.csv,CSV / Vivado ILA-style table,1024,system_i/LTC2208_0_adc_data[15:0],16,True,130000000.0,126953.125,39990234.375,40000643.859653234,37.87644663697193,False,False,False,True,no tvalid/valid field present,system_i/LTC2208_0_adc_of never asserted
+iladata_1.0001G.csv,CSV / Vivado ILA-style table,1024,system_i/LTC2208_0_adc_data[15:0],16,True,130000000.0,126953.125,40117187.5,40099003.6726557,37.7217824270351,False,False,False,True,no tvalid/valid field present,system_i/LTC2208_0_adc_of never asserted

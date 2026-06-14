@@ -4,7 +4,7 @@ Project path: C:\learning\pusu_V2\code\pusu_test\vitis\helloworld\src\helloworld
 
 Current working digital chain:
 - ADC raw capture via AXI DMA S2MM
-- Single DDC from 50 MHz IF to 0 Hz
+- Single DDC from 40 MHz IF to 0 Hz
 - Selectable RBW FIR via UART command
 - Time-domain power output in dBFS: POWER_DBFS,<RBW>,<value>
 - FFT peak debug output: PEAK,<RBW>,<bin>,<kHz>,<Hz_rem>,<dB>

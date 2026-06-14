@@ -1,0 +1,1673 @@
+#include "device_protocol.h"
+
+#include <math.h>
+#include <string.h>
+
+#include "xuartps_hw.h"
+#include "app_config.h"
+#include "dma_capture.h"
+#include "profile_timer.h"
+#include "rf_frontend.h"
+#include "signal_processing.h"
+#include "sweep_plan.h"
+
+void ad8370_set_gain_code(unsigned char code);
+
+#define FRAME_START_BYTE 0xAAU
+#define FRAME_END_BYTE   0x55U
+
+#define CMD_SET_FREQ       0x01U
+#define CMD_SET_AMPLITUDE  0x02U
+#define CMD_SET_BW         0x03U
+#define CMD_SET_DETECT     0x04U
+#define CMD_SET_SWEEP      0x05U
+#define CMD_GET_SPECTRUM   0x06U
+#define CMD_GET_STATUS     0x07U
+#define CMD_RESET          0x08U
+#define CMD_START_SWEEP    0x09U
+#define CMD_STOP_SWEEP     0x0AU
+#define CMD_SET_VGA_GAIN   0x0BU
+#define CMD_SET_RF_FRONTEND 0x0CU
+#define CMD_GET_RF_FRONTEND 0x0DU
+#define CMD_GET_PROFILE    0x0EU
+#define CMD_SET_PHASE_NOISE_CONFIG 0x0FU
+#define CMD_START_PHASE_NOISE      0x10U
+#define CMD_STOP_PHASE_NOISE       0x11U
+#define CMD_GET_PHASE_NOISE_STATUS 0x12U
+#define CMD_CAPTURE_STREAM_SMOKE   0x13U
+#define CMD_CAPTURE_SG_SMOKE       0x14U
+#define CMD_CAPTURE_MAIN_SMOKE     0x15U
+#define CMD_CAPTURE_SG_RING_SMOKE  0x16U
+#define CMD_CAPTURE_SG_BURST_SMOKE 0x17U
+
+
+#define CMD_ACK            0x81U
+#define CMD_SPECTRUM_DATA  0x82U
+#define CMD_STATUS_DATA    0x83U
+#define CMD_RF_FRONTEND_STATUS 0x84U
+#define CMD_PROFILE_DATA   0x85U
+#define CMD_PHASE_NOISE_DATA   0x86U
+#define CMD_PHASE_NOISE_STATUS 0x87U
+#define CMD_CAPTURE_STREAM_SMOKE_RESULT 0x88U
+#define CMD_CAPTURE_SG_SMOKE_RESULT     0x89U
+
+
+#define ACK_OK             0x01U
+#define ACK_FAIL           0x00U
+#define ERR_NONE           0x00U
+#define ERR_BAD_CRC        0x01U
+#define ERR_BAD_FRAME      0x02U
+#define ERR_BAD_CMD        0x03U
+#define ERR_INTERNAL       0x04U
+
+#define RX_BUFFER_SIZE          2048U
+#define TX_FRAME_MAX_SIZE       16384U
+#define STATUS_PAYLOAD_SIZE     147U
+#define PHASE_NOISE_CONFIG_PAYLOAD_SIZE 36U
+#define PHASE_NOISE_DATA_PAYLOAD_SIZE   42U
+#define PHASE_NOISE_STATUS_PAYLOAD_SIZE 64U
+#define CAPTURE_STREAM_SMOKE_RESULT_PAYLOAD_SIZE 76U
+#define CAPTURE_SG_SMOKE_RESULT_PAYLOAD_SIZE 120U
+#define UART_RX_DRAIN_LIMIT     4096U
+#define DEFAULT_POINT_COUNT     256U
+#define MIN_POINT_COUNT         8U
+#define MAX_POINT_COUNT         SWEEP_PLAN_MAX_POINTS
+
+#define UART_RX_ERROR_MASK \
+    (XUARTPS_IXR_OVER | XUARTPS_IXR_FRAMING | XUARTPS_IXR_PARITY | \
+     XUARTPS_IXR_TOUT | XUARTPS_IXR_RBRK)
+
+typedef struct {
+    unsigned char buffer[RX_BUFFER_SIZE];
+    unsigned int length;
+    unsigned int timestamp;
+    unsigned int rng_state;
+    device_control_config_t config;
+    device_protocol_spectrum_provider_t spectrum_provider;
+    device_protocol_status_provider_t status_provider;
+    device_protocol_sweep_control_t sweep_control;
+    device_protocol_rf_frontend_control_t rf_frontend_control;
+    device_protocol_phase_noise_control_t phase_noise_control;
+    device_protocol_capture_stream_smoke_control_t capture_stream_smoke_control;
+    device_protocol_capture_main_smoke_control_t capture_main_smoke_control;
+    device_protocol_capture_sg_smoke_control_t capture_sg_smoke_control;
+    device_protocol_capture_sg_ring_smoke_control_t capture_sg_ring_smoke_control;
+    spectrum_point_t spectrum_points[MAX_POINT_COUNT];
+    unsigned char tx_buffer[TX_FRAME_MAX_SIZE];
+    unsigned int stream_timestamp;
+    unsigned short streamed_point_count;
+    unsigned int rx_bad_frame_count;
+    unsigned int rx_crc_error_count;
+    unsigned int rx_overrun_count;
+    unsigned int rx_resync_count;
+} device_protocol_state_t;
+
+static device_protocol_state_t g_protocol;
+
+static unsigned short crc16_modbus(const unsigned char *data, unsigned int length);
+static void uart_send_bytes(const unsigned char *data, unsigned int length);
+static void send_frame(unsigned char cmd, const unsigned char *data, unsigned short length);
+static void send_frame_inplace(unsigned char cmd, unsigned short length);
+static void send_ack(unsigned char original_cmd, unsigned char success, unsigned char error_code);
+static void send_status(void);
+static void send_spectrum(void);
+static void send_rf_frontend_status(void);
+static void send_profile(void);
+static void send_capture_stream_smoke_result(
+    const dma_capture_stream_smoke_result_t *result);
+static void send_capture_sg_smoke_result(
+    const dma_capture_sg_smoke_result_t *result);
+
+static int start_sweep(void);
+static int stop_sweep(void);
+static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned short length);
+static unsigned int uart_check_error_status(void);
+static void uart_drain_rx_fifo(void);
+static void protocol_resync(void);
+static void reset_default_config(void);
+static int fake_spectrum_provider(
+    const device_control_config_t *config,
+    spectrum_point_t *points,
+    unsigned short max_points,
+    unsigned short *out_point_count);
+static int fake_status_provider(device_status_t *status);
+static unsigned int fake_rand(void);
+static double make_fake_amplitude(double ratio, const device_control_config_t *config);
+static void write_u16_be(unsigned char *dst, unsigned short value);
+static void write_u32_be(unsigned char *dst, unsigned int value);
+static void write_u32_le(unsigned char *dst, unsigned int value);
+static void write_f32_le(unsigned char *dst, float value);
+static void write_f64_le(unsigned char *dst, double value);
+static int append_signal_processing_peak_debug(unsigned char *dst,
+                                               unsigned short max_len,
+                                               unsigned short *io_len);
+#if DMA_CAPTURE_BURST_DIAG_ENABLE
+static int append_dma_capture_burst_debug(unsigned char *dst,
+                                           unsigned short max_len,
+                                           unsigned short *io_len);
+#endif
+#if DMA_CAPTURE_BURST_DIAG_ENABLE
+static int append_dma_capture_burst_debug(unsigned char *dst,
+                                           unsigned short max_len,
+                                           unsigned short *io_len)
+{
+    dma_capture_burst_diag_t dbg;
+    unsigned int offset;
+    const unsigned int ext_len = 124U;
+
+    if ((dst == 0) || (io_len == 0)) {
+        return -1;
+    }
+    if ((unsigned int)*io_len + ext_len > (unsigned int)max_len) {
+        return -1;
+    }
+
+    dma_capture_get_burst_diag(&dbg);
+    offset = (unsigned int)*io_len;
+
+    dst[offset++] = 'D';
+    dst[offset++] = 'M';
+    dst[offset++] = 'A';
+    dst[offset++] = 'D';
+    dst[offset++] = (unsigned char)(dbg.version & 0xFFU);
+    dst[offset++] = (unsigned char)ext_len;
+    dst[offset++] = 0U;
+    dst[offset++] = 0U;
+
+    write_u32_be(&dst[offset], dbg.valid);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.sequence);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.samples_per_bd);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.bd_count);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.requested_samples);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.requested_bytes);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.completed_bd_count);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.completed_bytes);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.wait_loops);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.result_code);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.reset_us);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.cache_flush_us);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.bd_submit_us);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.pl_start_us);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.wait_reclaim_us);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.stop_us);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.cache_invalidate_us);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.status_us);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.final_reset_us);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.total_us);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.packet_count);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.burst_packet_count);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.burst_remaining);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.overflow_count);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.backpressure_count);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.raw_status);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.s2mm_dmasr);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.irq_count);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.last_irq_status);
+    offset += 4U;
+
+    *io_len = (unsigned short)offset;
+    return 0;
+}
+#endif
+static unsigned short read_u16_le(const unsigned char *src);
+static double read_f64_le(const unsigned char *src);
+static unsigned short sanitize_point_count(unsigned short value);
+static unsigned char sanitize_rbw_mode(unsigned char value);
+static double rbw_mode_to_hz(unsigned char mode, double fallback_hz);
+
+int device_protocol_init(void)
+{
+    memset(&g_protocol, 0, sizeof(g_protocol));
+    g_protocol.rng_state = 0x12345678U;
+    device_protocol_recover_uart_rx();
+    reset_default_config();
+    g_protocol.spectrum_provider = fake_spectrum_provider;
+    g_protocol.status_provider = fake_status_provider;
+    return XST_SUCCESS;
+}
+
+void device_protocol_recover_uart_rx(void)
+{
+    uart_check_error_status();
+    uart_drain_rx_fifo();
+    XUartPs_WriteReg(UART_BASEADDR, XUARTPS_CR_OFFSET,
+                     XUARTPS_CR_RXRST);
+    XUartPs_WriteReg(UART_BASEADDR, XUARTPS_CR_OFFSET,
+                     XUARTPS_CR_RX_EN | XUARTPS_CR_TX_EN);
+    XUartPs_WriteReg(UART_BASEADDR, XUARTPS_ISR_OFFSET, XUARTPS_IXR_MASK);
+}
+
+//????
+void device_protocol_poll(void)
+{
+    if (uart_check_error_status() != 0U) {
+        protocol_resync();
+    }
+
+    while (XUartPs_IsReceiveData(UART_BASEADDR) != 0U) {	//??uart??fifo????????????????
+        unsigned char ch = (unsigned char)(XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET) & 0xFFU);//??????????
+
+        if ((g_protocol.length == 0U) && (ch != FRAME_START_BYTE)) {//??????????
+            continue;
+        }
+
+        if (g_protocol.length < RX_BUFFER_SIZE) {		//??????????????????
+            g_protocol.buffer[g_protocol.length++] = ch;//????????
+        } else {
+            g_protocol.rx_bad_frame_count++;
+            protocol_resync();
+            continue;
+        }
+
+        while (g_protocol.length >= 7U) {	//????????????????????????????
+            unsigned short payload_length;	//??????
+            unsigned int frame_length;		//??????
+            unsigned short rx_crc;
+            unsigned short calc_crc;
+            unsigned char cmd;
+
+            if (g_protocol.buffer[0] != FRAME_START_BYTE) {	//??????????????????????????????
+                memmove(&g_protocol.buffer[0], &g_protocol.buffer[1], g_protocol.length - 1U);
+                g_protocol.length--;
+                continue;
+            }
+
+            //??????
+            payload_length = (unsigned short)(((unsigned short)g_protocol.buffer[1] << 8) |
+                                              (unsigned short)g_protocol.buffer[2]);
+            //????????
+            frame_length = 1U + 2U + 1U + (unsigned int)payload_length + 2U + 1U;
+
+            if (frame_length > RX_BUFFER_SIZE) {//??????????
+                g_protocol.rx_bad_frame_count++;
+                protocol_resync();
+                break;
+            }
+
+            if (g_protocol.length < frame_length) {//????????????
+                break;
+            }
+
+            if (g_protocol.buffer[frame_length - 1U] != FRAME_END_BYTE) {	//??????????????????????
+                g_protocol.rx_bad_frame_count++;
+                memmove(&g_protocol.buffer[0], &g_protocol.buffer[1], g_protocol.length - 1U);//??????????????????????????
+                g_protocol.length--;
+                continue;
+            }
+
+            //????????CRC??
+            rx_crc = (unsigned short)(((unsigned short)g_protocol.buffer[frame_length - 3U] << 8) |
+                                      (unsigned short)g_protocol.buffer[frame_length - 2U]);
+            //????CRC??
+            calc_crc = crc16_modbus(&g_protocol.buffer[1], 2U + 1U + payload_length);
+
+            cmd = g_protocol.buffer[3];//????????????????????
+            if (calc_crc != rx_crc) {
+                g_protocol.rx_crc_error_count++;
+                send_ack(cmd, ACK_FAIL, ERR_BAD_CRC);
+                protocol_resync();
+                break;
+            } else {
+                handle_frame(cmd, &g_protocol.buffer[4], payload_length);//????????????????????
+            }
+
+            if (g_protocol.length > frame_length) {
+                memmove(&g_protocol.buffer[0],
+                        &g_protocol.buffer[frame_length],
+                        g_protocol.length - frame_length);
+            }
+            g_protocol.length -= frame_length;
+        }
+    }
+}
+
+const device_control_config_t *device_protocol_get_config(void)
+{
+    return &g_protocol.config;
+}
+
+void device_protocol_set_spectrum_provider(device_protocol_spectrum_provider_t provider)
+{
+    g_protocol.spectrum_provider = provider;
+}
+
+void device_protocol_set_status_provider(device_protocol_status_provider_t provider)
+{
+    g_protocol.status_provider = provider;
+}
+
+void device_protocol_set_sweep_control_handler(device_protocol_sweep_control_t handler)
+{
+    g_protocol.sweep_control = handler;
+}
+
+void device_protocol_set_rf_frontend_handler(device_protocol_rf_frontend_control_t handler)
+{
+    g_protocol.rf_frontend_control = handler;
+}
+
+void device_protocol_set_phase_noise_handler(device_protocol_phase_noise_control_t handler)
+{
+    g_protocol.phase_noise_control = handler;
+}
+
+void device_protocol_set_capture_stream_smoke_handler(
+    device_protocol_capture_stream_smoke_control_t handler)
+{
+    g_protocol.capture_stream_smoke_control = handler;
+}
+
+void device_protocol_set_capture_main_smoke_handler(
+    device_protocol_capture_main_smoke_control_t handler)
+{
+    g_protocol.capture_main_smoke_control = handler;
+}
+
+void device_protocol_set_capture_sg_smoke_handler(
+    device_protocol_capture_sg_smoke_control_t handler)
+{
+    g_protocol.capture_sg_smoke_control = handler;
+}
+
+void device_protocol_set_capture_sg_ring_smoke_handler(
+    device_protocol_capture_sg_ring_smoke_control_t handler)
+{
+    g_protocol.capture_sg_ring_smoke_control = handler;
+}
+
+void device_protocol_send_rf_frontend_status(void)
+{
+    send_rf_frontend_status();
+}
+
+int device_protocol_stream_spectrum_point(uint32_t freq_hz,
+                                          float amp_dbm,
+                                          uint16_t total_points,
+                                          uint16_t current_index,
+                                          uint8_t done)
+{
+    unsigned short payload_length = 19U;
+    unsigned int offset = 4U;
+
+    if ((unsigned int)payload_length + 7U > TX_FRAME_MAX_SIZE) {
+        return -1;
+    }
+
+    write_u16_be(&g_protocol.tx_buffer[offset], 1U);
+    offset += 2U;
+
+    write_u32_be(&g_protocol.tx_buffer[offset], g_protocol.stream_timestamp);
+    offset += 4U;
+
+    write_u16_be(&g_protocol.tx_buffer[offset], total_points);
+    offset += 2U;
+
+    write_u16_be(&g_protocol.tx_buffer[offset], current_index);
+    offset += 2U;
+
+    g_protocol.tx_buffer[offset++] = (done != 0U) ? 1U : 0U;
+
+    write_u32_le(&g_protocol.tx_buffer[offset], freq_hz);
+    offset += 4U;
+
+    write_f32_le(&g_protocol.tx_buffer[offset], amp_dbm);
+
+    send_frame_inplace(CMD_SPECTRUM_DATA, payload_length);
+    g_protocol.streamed_point_count++;
+    return 0;
+}
+
+int device_protocol_stream_phase_noise_point(const phase_noise_data_t *point)
+{
+    unsigned short payload_length = PHASE_NOISE_DATA_PAYLOAD_SIZE;
+    unsigned int offset = 4U;
+
+    if (point == 0) {
+        return -1;
+    }
+    if ((unsigned int)payload_length + 7U > TX_FRAME_MAX_SIZE) {
+        return -1;
+    }
+
+    g_protocol.tx_buffer[offset++] = point->version;
+    g_protocol.tx_buffer[offset++] = point->flags;
+    write_u16_be(&g_protocol.tx_buffer[offset], point->trace_id);
+    offset += 2U;
+    write_u16_be(&g_protocol.tx_buffer[offset], point->total_points);
+    offset += 2U;
+    write_u16_be(&g_protocol.tx_buffer[offset], point->current_index);
+    offset += 2U;
+    write_u16_be(&g_protocol.tx_buffer[offset], point->average_index);
+    offset += 2U;
+    write_f64_le(&g_protocol.tx_buffer[offset], point->carrier_hz);
+    offset += 8U;
+    write_f32_le(&g_protocol.tx_buffer[offset], point->carrier_level_dbm);
+    offset += 4U;
+    write_u32_le(&g_protocol.tx_buffer[offset], point->offset_hz);
+    offset += 4U;
+    write_f32_le(&g_protocol.tx_buffer[offset], point->noise_power_dbm);
+    offset += 4U;
+    write_f32_le(&g_protocol.tx_buffer[offset], point->phase_noise_dbc_hz);
+    offset += 4U;
+    write_u32_le(&g_protocol.tx_buffer[offset], point->rbw_hz);
+    offset += 4U;
+    g_protocol.tx_buffer[offset++] = point->error_code;
+    g_protocol.tx_buffer[offset++] = 0U;
+    g_protocol.tx_buffer[offset++] = 0U;
+    g_protocol.tx_buffer[offset++] = 0U;
+
+    send_frame_inplace(CMD_PHASE_NOISE_DATA, payload_length);
+    return 0;
+}
+
+int device_protocol_send_phase_noise_status(const phase_noise_status_t *status)
+{
+    unsigned short payload_length = PHASE_NOISE_STATUS_PAYLOAD_SIZE;
+    unsigned int offset = 4U;
+
+    if (status == 0) {
+        return -1;
+    }
+    if ((unsigned int)payload_length + 7U > TX_FRAME_MAX_SIZE) {
+        return -1;
+    }
+
+    g_protocol.tx_buffer[offset++] = status->version;
+    g_protocol.tx_buffer[offset++] = status->state;
+    g_protocol.tx_buffer[offset++] = status->flags;
+    g_protocol.tx_buffer[offset++] = status->error_code;
+    write_u16_be(&g_protocol.tx_buffer[offset], status->trace_id);
+    offset += 2U;
+    write_u16_be(&g_protocol.tx_buffer[offset], status->total_points);
+    offset += 2U;
+    write_u16_be(&g_protocol.tx_buffer[offset], status->current_index);
+    offset += 2U;
+    write_u16_be(&g_protocol.tx_buffer[offset], status->average_index);
+    offset += 2U;
+    write_f64_le(&g_protocol.tx_buffer[offset], status->nominal_carrier_hz);
+    offset += 8U;
+    write_f64_le(&g_protocol.tx_buffer[offset], status->measured_carrier_hz);
+    offset += 8U;
+    write_f32_le(&g_protocol.tx_buffer[offset], status->carrier_level_dbm);
+    offset += 4U;
+    write_f64_le(&g_protocol.tx_buffer[offset], status->start_offset_hz);
+    offset += 8U;
+    write_f64_le(&g_protocol.tx_buffer[offset], status->stop_offset_hz);
+    offset += 8U;
+    write_u32_le(&g_protocol.tx_buffer[offset], status->current_offset_hz);
+    offset += 4U;
+    write_u32_le(&g_protocol.tx_buffer[offset], status->current_rbw_hz);
+    offset += 4U;
+    write_u32_le(&g_protocol.tx_buffer[offset], status->elapsed_ms);
+    offset += 4U;
+    g_protocol.tx_buffer[offset++] = (unsigned char)(status->warning_code & 0xFFU);
+    g_protocol.tx_buffer[offset++] = (unsigned char)((status->warning_code >> 8U) & 0xFFU);
+    g_protocol.tx_buffer[offset++] = 0U;
+    g_protocol.tx_buffer[offset++] = 0U;
+
+    send_frame_inplace(CMD_PHASE_NOISE_STATUS, payload_length);
+    return 0;
+}
+//?????????????? ??????
+static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned short length)
+{
+    switch (cmd) {
+    case CMD_SET_FREQ:
+        if (length == 32U) {
+            g_protocol.config.frequency.start_hz = read_f64_le(&data[0]);
+            g_protocol.config.frequency.stop_hz = read_f64_le(&data[8]);
+            g_protocol.config.frequency.center_hz = read_f64_le(&data[16]);
+            g_protocol.config.frequency.span_hz = read_f64_le(&data[24]);
+            send_ack(cmd, ACK_OK, ERR_NONE);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_SET_AMPLITUDE:
+        if (length == 10U) {
+            g_protocol.config.amplitude.ref_level_dbm = read_f64_le(&data[0]);
+            g_protocol.config.amplitude.attenuator_mode = data[8];
+            g_protocol.config.amplitude.preamp_mode = data[9];
+            send_ack(cmd, ACK_OK, ERR_NONE);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_SET_BW:
+        if (length == 18U) {
+            g_protocol.config.bandwidth.rbw_mode = sanitize_rbw_mode(data[0]);
+            g_protocol.config.bandwidth.rbw_hz = rbw_mode_to_hz(
+                g_protocol.config.bandwidth.rbw_mode,
+                read_f64_le(&data[1]));
+            g_protocol.config.bandwidth.vbw_mode = data[9];
+            g_protocol.config.bandwidth.vbw_hz = rbw_mode_to_hz(
+                g_protocol.config.bandwidth.rbw_mode,
+                read_f64_le(&data[10]));
+            send_ack(cmd, ACK_OK, ERR_NONE);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_SET_DETECT:
+        if (length == 1U) {
+            g_protocol.config.detect.detect_mode = data[0];
+            send_ack(cmd, ACK_OK, ERR_NONE);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_SET_SWEEP:
+        if (length == 11U) {
+            g_protocol.config.sweep.speed_hz = read_f64_le(&data[0]);
+            g_protocol.config.sweep.mode = data[8];
+            g_protocol.config.sweep.point_count = sanitize_point_count(read_u16_le(&data[9]));
+            send_ack(cmd, ACK_OK, ERR_NONE);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_GET_SPECTRUM:
+        if ((length == 0U) || (length == 2U)) {
+            if (length == 2U) {
+                g_protocol.config.sweep.point_count = sanitize_point_count(read_u16_le(data));//??????????????????????512????????????
+            }
+            if ((rf_frontend_get_state() != 0) && (rf_frontend_get_state()->path_mode == RF_PATH_DIRECT_IF)) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+                send_spectrum();
+            } else if (g_protocol.sweep_control != 0) {
+                if (start_sweep() == 0) {
+                    send_ack(cmd, ACK_OK, ERR_NONE);
+                } else {
+                    send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+                }
+            } else {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+                send_spectrum();
+            }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_GET_STATUS:
+        if (length == 0U) {
+            send_ack(cmd, ACK_OK, ERR_NONE);
+            send_status();
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_RESET:
+        if (length == 0U) {
+            g_protocol.timestamp = 0U;
+            g_protocol.rng_state = 0x12345678U;
+            reset_default_config();
+            send_ack(cmd, ACK_OK, ERR_NONE);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_START_SWEEP:
+        if (length == 0U) {
+            if (start_sweep() == 0) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_STOP_SWEEP:
+        if (length == 0U) {
+            if (stop_sweep() == 0) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_SET_VGA_GAIN://????VGA??????
+        if (length == 1U) {
+            ad8370_set_gain_code(data[0]);
+            send_ack(cmd, ACK_OK, ERR_NONE);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_SET_RF_FRONTEND:
+        if (length == 4U) {
+            device_rf_frontend_config_t rf_config;
+            int ok = XST_FAILURE;
+
+            rf_config.lna_mode = data[0];
+            rf_config.path_mode = data[1];
+            rf_config.atten_code = data[2];
+            rf_config.flags = data[3];
+
+            if (g_protocol.rf_frontend_control != 0) {
+                ok = g_protocol.rf_frontend_control(&rf_config);
+            }
+
+            if (ok == XST_SUCCESS) {
+                g_protocol.config.rf_frontend = rf_config;
+                send_ack(cmd, ACK_OK, ERR_NONE);
+                send_rf_frontend_status();
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+                send_rf_frontend_status();
+            }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_GET_RF_FRONTEND:
+        if (length == 0U) {
+            send_ack(cmd, ACK_OK, ERR_NONE);
+            send_rf_frontend_status();
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_GET_PROFILE:
+        if (length == 0U) {
+            send_ack(cmd, ACK_OK, ERR_NONE);
+            send_profile();
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_SET_PHASE_NOISE_CONFIG:
+        if (length == PHASE_NOISE_CONFIG_PAYLOAD_SIZE) {
+            phase_noise_config_t pn_config;
+
+            memset(&pn_config, 0, sizeof(pn_config));
+            pn_config.version = data[0];
+            pn_config.flags = data[1];
+            pn_config.carrier_mode = data[2];
+            pn_config.sideband_mode = data[3];
+            pn_config.nominal_carrier_hz = read_f64_le(&data[4]);
+            pn_config.start_offset_hz = read_f64_le(&data[12]);
+            pn_config.stop_offset_hz = read_f64_le(&data[20]);
+            pn_config.points_per_decade = read_u16_le(&data[28]);
+            pn_config.average_count = read_u16_le(&data[30]);
+            pn_config.carrier_search_span_hz =
+                (uint32_t)read_u16_le(&data[32]) * 1000U;
+            pn_config.minimum_carrier_level_dbm = (int8_t)data[34];
+
+            if ((g_protocol.phase_noise_control != 0) &&
+                (g_protocol.phase_noise_control(PHASE_NOISE_ENGINE_ACTION_CONFIGURE,
+                                                &pn_config) == 0)) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_START_PHASE_NOISE:
+        if (length == 0U) {
+            if ((g_protocol.phase_noise_control != 0) &&
+                (g_protocol.phase_noise_control(PHASE_NOISE_ENGINE_ACTION_START, 0) == 0)) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+                (void)g_protocol.phase_noise_control(PHASE_NOISE_ENGINE_ACTION_GET_STATUS, 0);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_STOP_PHASE_NOISE:
+        if (length == 0U) {
+            if (g_protocol.phase_noise_control != 0) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+                (void)g_protocol.phase_noise_control(PHASE_NOISE_ENGINE_ACTION_STOP, 0);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_GET_PHASE_NOISE_STATUS:
+        if (length == 0U) {
+            if (g_protocol.phase_noise_control != 0) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+                (void)g_protocol.phase_noise_control(PHASE_NOISE_ENGINE_ACTION_GET_STATUS, 0);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_CAPTURE_STREAM_SMOKE:
+        if ((length == 0U) || (length == 4U)) {
+            dma_capture_stream_smoke_result_t result;
+            u32 sample_count = 4096U;
+
+            if (length == 4U) {
+                sample_count = ((u32)data[0] << 24U) |
+                               ((u32)data[1] << 16U) |
+                               ((u32)data[2] << 8U) |
+                               (u32)data[3];
+            }
+
+            memset(&result, 0, sizeof(result));
+            result.version = DMA_CAPTURE_STREAM_SMOKE_RESULT_VERSION;
+            result.result_code = DMA_CAPTURE_STREAM_SMOKE_PL_UNAVAILABLE;
+            result.requested_samples = sample_count;
+            result.transfer_bytes = sample_count * (u32)sizeof(u16);
+
+            if ((g_protocol.capture_stream_smoke_control != 0) &&
+                (g_protocol.capture_stream_smoke_control(sample_count,
+                                                         &result) == XST_SUCCESS)) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+            send_capture_stream_smoke_result(&result);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_CAPTURE_MAIN_SMOKE:
+        if ((length == 0U) || (length == 4U)) {
+            dma_capture_stream_smoke_result_t result;
+            u32 sample_count = 4096U;
+
+            if (length == 4U) {
+                sample_count = ((u32)data[0] << 24U) |
+                               ((u32)data[1] << 16U) |
+                               ((u32)data[2] << 8U) |
+                               (u32)data[3];
+            }
+
+            memset(&result, 0, sizeof(result));
+            result.version = DMA_CAPTURE_STREAM_SMOKE_RESULT_VERSION;
+            result.result_code = DMA_CAPTURE_STREAM_SMOKE_PL_UNAVAILABLE;
+            result.requested_samples = sample_count;
+            result.transfer_bytes = sample_count * (u32)sizeof(u16);
+
+            if ((g_protocol.capture_main_smoke_control != 0) &&
+                (g_protocol.capture_main_smoke_control(sample_count,
+                                                       &result) == XST_SUCCESS)) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+            send_capture_stream_smoke_result(&result);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_CAPTURE_SG_SMOKE:
+        if ((length == 0U) || (length == 8U)) {
+            dma_capture_sg_smoke_result_t result;
+            u32 samples_per_bd = 4096U;
+            u32 bd_count = 4U;
+
+            if (length == 8U) {
+                samples_per_bd = ((u32)data[0] << 24U) |
+                                 ((u32)data[1] << 16U) |
+                                 ((u32)data[2] << 8U) |
+                                 (u32)data[3];
+                bd_count = ((u32)data[4] << 24U) |
+                           ((u32)data[5] << 16U) |
+                           ((u32)data[6] << 8U) |
+                           (u32)data[7];
+            }
+
+            memset(&result, 0, sizeof(result));
+            result.version = DMA_CAPTURE_SG_SMOKE_RESULT_VERSION;
+            result.result_code = DMA_CAPTURE_SG_SMOKE_UNSUPPORTED;
+            result.samples_per_bd = samples_per_bd;
+            result.bd_count = bd_count;
+            result.requested_samples = samples_per_bd * bd_count;
+            result.requested_bytes = result.requested_samples * (u32)sizeof(u16);
+
+            if ((g_protocol.capture_sg_smoke_control != 0) &&
+                (g_protocol.capture_sg_smoke_control(samples_per_bd,
+                                                     bd_count,
+                                                     &result) == XST_SUCCESS)) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+            send_capture_sg_smoke_result(&result);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_CAPTURE_SG_RING_SMOKE:
+        if ((length == 0U) || (length == 12U)) {
+            dma_capture_sg_smoke_result_t result;
+            u32 samples_per_bd = 4096U;
+            u32 bd_count = 4U;
+            u32 target_bd_count = 64U;
+
+            if (length == 12U) {
+                samples_per_bd = ((u32)data[0] << 24U) |
+                                 ((u32)data[1] << 16U) |
+                                 ((u32)data[2] << 8U) |
+                                 (u32)data[3];
+                bd_count = ((u32)data[4] << 24U) |
+                           ((u32)data[5] << 16U) |
+                           ((u32)data[6] << 8U) |
+                           (u32)data[7];
+                target_bd_count = ((u32)data[8] << 24U) |
+                                  ((u32)data[9] << 16U) |
+                                  ((u32)data[10] << 8U) |
+                                  (u32)data[11];
+            }
+
+            memset(&result, 0, sizeof(result));
+            result.version = DMA_CAPTURE_SG_SMOKE_RESULT_VERSION;
+            result.result_code = DMA_CAPTURE_SG_SMOKE_UNSUPPORTED;
+            result.samples_per_bd = samples_per_bd;
+            result.bd_count = bd_count;
+            result.requested_samples = samples_per_bd * target_bd_count;
+            result.requested_bytes = result.requested_samples * (u32)sizeof(u16);
+
+            if ((g_protocol.capture_sg_ring_smoke_control != 0) &&
+                (g_protocol.capture_sg_ring_smoke_control(samples_per_bd,
+                                                          bd_count,
+                                                          target_bd_count,
+                                                          &result) == XST_SUCCESS)) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+            send_capture_sg_smoke_result(&result);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_CAPTURE_SG_BURST_SMOKE:
+        if ((length == 0U) || (length == 8U)) {
+            dma_capture_sg_smoke_result_t result;
+            u32 samples_per_bd = 4096U;
+            u32 bd_count = 4U;
+            int smoke_status = XST_FAILURE;
+
+            if (length == 8U) {
+                samples_per_bd = ((u32)data[0] << 24U) |
+                                 ((u32)data[1] << 16U) |
+                                 ((u32)data[2] << 8U) |
+                                 (u32)data[3];
+                bd_count = ((u32)data[4] << 24U) |
+                           ((u32)data[5] << 16U) |
+                           ((u32)data[6] << 8U) |
+                           (u32)data[7];
+            }
+
+            memset(&result, 0, sizeof(result));
+            result.version = DMA_CAPTURE_SG_SMOKE_RESULT_VERSION;
+            result.result_code = DMA_CAPTURE_SG_SMOKE_UNSUPPORTED;
+            result.samples_per_bd = samples_per_bd;
+            result.bd_count = bd_count;
+            result.requested_samples = samples_per_bd * bd_count;
+            result.requested_bytes = result.requested_samples * (u32)sizeof(u16);
+
+            if (g_protocol.capture_sg_smoke_control != 0) {
+                dma_capture_set_sg_smoke_burst_mode(1);
+                smoke_status = g_protocol.capture_sg_smoke_control(samples_per_bd,
+                                                                   bd_count,
+                                                                   &result);
+                dma_capture_set_sg_smoke_burst_mode(0);
+            }
+
+            if (smoke_status == XST_SUCCESS) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+            send_capture_sg_smoke_result(&result);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    default:
+        send_ack(cmd, ACK_FAIL, ERR_BAD_CMD);
+        break;
+    }
+}
+
+static void reset_default_config(void)
+{
+    g_protocol.config.frequency.start_hz = 50.0e6;	//????start 50MHz
+    g_protocol.config.frequency.stop_hz = 1.5e9;	//????end   1.5GHz
+    g_protocol.config.frequency.center_hz = 725.0e6;//????center 725MHz
+    g_protocol.config.frequency.span_hz = 1.45e9;	//????span 	1.450GHz
+
+    g_protocol.config.amplitude.ref_level_dbm = 0.0;
+    g_protocol.config.amplitude.attenuator_mode = 0U;
+    g_protocol.config.amplitude.preamp_mode = 0U;
+
+    g_protocol.config.bandwidth.rbw_mode = (unsigned char)RBW_MODE_1M;
+    g_protocol.config.bandwidth.rbw_hz = 1.0e6;
+    g_protocol.config.bandwidth.vbw_mode = 0U;
+    g_protocol.config.bandwidth.vbw_hz = 1.0e6;
+
+    g_protocol.config.sweep.speed_hz = 30.0;
+    g_protocol.config.sweep.mode = 0U;
+    g_protocol.config.sweep.point_count = DEFAULT_POINT_COUNT;
+
+    g_protocol.config.detect.detect_mode = 0U;
+
+    g_protocol.config.rf_frontend.lna_mode = (unsigned char)RF_LNA_BYPASS;
+    g_protocol.config.rf_frontend.path_mode = (unsigned char)RF_PATH_MIXER_CHAIN;
+    g_protocol.config.rf_frontend.atten_code = RF_FRONTEND_DEFAULT_ATTEN_CODE;
+    g_protocol.config.rf_frontend.flags = 1U;
+}
+
+static void send_ack(unsigned char original_cmd, unsigned char success, unsigned char error_code)
+{
+    unsigned char payload[3];
+
+    payload[0] = original_cmd;
+    payload[1] = success;
+    payload[2] = error_code;
+    send_frame(CMD_ACK, payload, 3U);
+}
+
+static void send_status(void)
+{
+    device_status_t status;
+    unsigned char payload[STATUS_PAYLOAD_SIZE];
+    int ok = 0;
+
+    if (g_protocol.status_provider != 0) {
+        ok = g_protocol.status_provider(&status);
+    }
+
+    if (ok != 0) {
+        send_ack(CMD_GET_STATUS, ACK_FAIL, ERR_INTERNAL);
+        return;
+    }
+
+    status.uart_rx_bad_frame_count = g_protocol.rx_bad_frame_count;
+    status.uart_rx_crc_error_count = g_protocol.rx_crc_error_count;
+    status.uart_rx_overrun_count = g_protocol.rx_overrun_count;
+    status.uart_rx_resync_count = g_protocol.rx_resync_count;
+
+    write_f64_le(&payload[0], status.temperature_c);
+    payload[8] = status.battery_percent;
+    payload[9] = status.error_code;
+    write_u32_be(&payload[10], status.dma_start_count);
+    write_u32_be(&payload[14], status.dma_error_count);
+    write_u32_be(&payload[18], status.frame_ready_count);
+    write_u32_be(&payload[22], status.process_frame_count);
+    payload[26] = status.spectrum_valid;
+    write_u32_be(&payload[27], status.s2mm_dmacr);
+    write_u32_be(&payload[31], status.s2mm_dmasr);
+    write_u32_be(&payload[35], status.dma_irq_count);
+    write_u32_be(&payload[39], status.dma_last_irq_status);
+    write_u32_be(&payload[43], status.uart_rx_bad_frame_count);
+    write_u32_be(&payload[47], status.uart_rx_crc_error_count);
+    write_u32_be(&payload[51], status.uart_rx_overrun_count);
+    write_u32_be(&payload[55], status.uart_rx_resync_count);
+    write_u32_be(&payload[59], status.dma_error_bg_irq_count);
+    write_u32_be(&payload[63], status.dma_error_bg_start_count);
+    write_u32_be(&payload[67], status.dma_error_bg_reset_count);
+    write_u32_be(&payload[71], status.dma_error_sweep_reset_count);
+    write_u32_be(&payload[75], status.dma_error_direct_if_count);
+    write_u32_be(&payload[79], status.dma_error_phase_noise_count);
+    write_u32_be(&payload[83], status.dma_error_capture_test_count);
+    write_u32_be(&payload[87], status.dma_start_last_result_code);
+    write_u32_be(&payload[91], status.dma_start_last_transfer_bytes);
+    write_u32_be(&payload[95], status.dma_start_last_capture_samples);
+    write_u32_be(&payload[99], status.dma_start_last_s2mm_dmasr);
+    write_u32_be(&payload[103], status.dma_start_last_sg_ring_ready);
+    write_u32_be(&payload[107], status.dma_start_last_sg_active_bd_count);
+    write_u32_be(&payload[111], status.dma_start_last_sg_free_bd_count);
+    write_u32_be(&payload[115], status.dma_start_fail_invalid_arg_count);
+    write_u32_be(&payload[119], status.dma_start_fail_invalid_samples_count);
+    write_u32_be(&payload[123], status.dma_start_fail_pl_abort_count);
+    write_u32_be(&payload[127], status.dma_start_fail_pl_clear_count);
+    write_u32_be(&payload[131], status.dma_start_fail_pl_config_count);
+    write_u32_be(&payload[135], status.dma_start_fail_submit_sg_count);
+    write_u32_be(&payload[139], status.dma_start_fail_simple_transfer_count);
+    write_u32_be(&payload[143], status.dma_start_fail_pl_start_count);
+    send_frame(CMD_STATUS_DATA, payload, STATUS_PAYLOAD_SIZE);
+}
+
+
+static void send_rf_frontend_status(void)
+{
+    const rf_frontend_state_t *state = rf_frontend_get_state();
+    unsigned char payload[5];
+
+    payload[0] = (unsigned char)state->lna_mode;
+    payload[1] = (unsigned char)state->path_mode;
+    payload[2] = state->atten_code;
+    payload[3] = state->applied_gpio;
+    payload[4] = state->last_error;
+    send_frame(CMD_RF_FRONTEND_STATUS, payload, sizeof(payload));
+}
+
+static void send_profile(void)
+{
+    unsigned short payload_length = 0U;
+
+    if (sweep_profile_build_payload(&g_protocol.tx_buffer[4],
+                                    (unsigned short)(TX_FRAME_MAX_SIZE - 7U),
+                                    &payload_length) != 0) {
+        send_ack(CMD_GET_PROFILE, ACK_FAIL, ERR_INTERNAL);
+        return;
+    }
+
+    if (append_signal_processing_peak_debug(&g_protocol.tx_buffer[4],
+                                             (unsigned short)(TX_FRAME_MAX_SIZE - 7U),
+                                             &payload_length) != 0) {
+        send_ack(CMD_GET_PROFILE, ACK_FAIL, ERR_INTERNAL);
+        return;
+    }
+
+#if DMA_CAPTURE_BURST_DIAG_ENABLE
+    if (append_dma_capture_burst_debug(&g_protocol.tx_buffer[4],
+                                       (unsigned short)(TX_FRAME_MAX_SIZE - 7U),
+                                       &payload_length) != 0) {
+        send_ack(CMD_GET_PROFILE, ACK_FAIL, ERR_INTERNAL);
+        return;
+    }
+#endif
+
+    send_frame_inplace(CMD_PROFILE_DATA, payload_length);
+}
+
+static void send_capture_stream_smoke_result(
+    const dma_capture_stream_smoke_result_t *result)
+{
+    unsigned char payload[CAPTURE_STREAM_SMOKE_RESULT_PAYLOAD_SIZE];
+    unsigned int offset = 0U;
+
+    if (result == 0) {
+        return;
+    }
+
+    write_u32_be(&payload[offset], result->version);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->result_code);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->requested_samples);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->transfer_bytes);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->dma_completed);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->dma_error);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->timed_out);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->wait_loops);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->raw_status);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->status_error_code);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->total_sample_count_lo);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->total_sample_count_hi);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->packet_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->overflow_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->backpressure_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->s2mm_dmacr);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->s2mm_dmasr);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->irq_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->last_irq_status);
+
+    send_frame(CMD_CAPTURE_STREAM_SMOKE_RESULT,
+               payload,
+               CAPTURE_STREAM_SMOKE_RESULT_PAYLOAD_SIZE);
+}
+static void send_capture_sg_smoke_result(
+    const dma_capture_sg_smoke_result_t *result)
+{
+    unsigned char payload[CAPTURE_SG_SMOKE_RESULT_PAYLOAD_SIZE];
+    unsigned int offset = 0U;
+
+    if (result == 0) {
+        return;
+    }
+
+    write_u32_be(&payload[offset], result->version);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->result_code);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->samples_per_bd);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->bd_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->requested_samples);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->requested_bytes);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->completed_bd_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->completed_bytes);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->dma_completed);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->dma_error);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->timed_out);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->wait_loops);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->first_bd_status);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->last_bd_status);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->raw_status);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->status_error_code);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->total_sample_count_lo);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->total_sample_count_hi);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->packet_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->overflow_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->backpressure_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->s2mm_dmacr);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->s2mm_dmasr);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->irq_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->last_irq_status);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->debug_config_has_sg);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->debug_instance_has_sg);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->debug_ring_ready);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->debug_dma_device_id);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->debug_dma_baseaddr);
+
+    send_frame(CMD_CAPTURE_SG_SMOKE_RESULT,
+               payload,
+               CAPTURE_SG_SMOKE_RESULT_PAYLOAD_SIZE);
+}
+//????????
+static void send_spectrum(void)
+{
+    unsigned short point_count = 0U;
+    int ok = 0;
+
+    g_protocol.timestamp++;
+    g_protocol.stream_timestamp = g_protocol.timestamp;
+    g_protocol.streamed_point_count = 0U;
+
+    if (g_protocol.spectrum_provider != 0) {
+        ok = g_protocol.spectrum_provider(	//????????????????????????main???? protocol_spectrum_provider
+            &g_protocol.config,
+            g_protocol.spectrum_points,
+            MAX_POINT_COUNT,
+            &point_count);
+    }
+
+    if ((ok != 0) || ((point_count == 0U) && (g_protocol.streamed_point_count == 0U))) {
+        send_ack(CMD_GET_SPECTRUM, ACK_FAIL, ERR_INTERNAL);
+        return;
+    }
+}
+
+static int start_sweep(void)
+{
+    g_protocol.timestamp++;
+    g_protocol.stream_timestamp = g_protocol.timestamp;
+    g_protocol.streamed_point_count = 0U;
+
+    if (g_protocol.sweep_control == 0) {
+        return -1;
+    }
+
+    return g_protocol.sweep_control(DEVICE_PROTOCOL_SWEEP_START, &g_protocol.config);
+}
+
+static int stop_sweep(void)
+{
+    if (g_protocol.sweep_control == 0) {
+        return -1;
+    }
+
+    return g_protocol.sweep_control(DEVICE_PROTOCOL_SWEEP_STOP, &g_protocol.config);
+}
+
+static unsigned int uart_check_error_status(void)
+{
+    unsigned int isr = XUartPs_ReadReg(UART_BASEADDR, XUARTPS_ISR_OFFSET);
+    unsigned int error_bits = isr & UART_RX_ERROR_MASK;
+
+    if ((error_bits & XUARTPS_IXR_OVER) != 0U) {
+        g_protocol.rx_overrun_count++;
+    }
+
+    if (error_bits != 0U) {
+        XUartPs_WriteReg(UART_BASEADDR, XUARTPS_ISR_OFFSET, error_bits);
+    }
+
+    return error_bits;
+}
+
+static void uart_drain_rx_fifo(void)
+{
+    unsigned int drained = 0U;
+
+    while ((XUartPs_IsReceiveData(UART_BASEADDR) != 0U) &&
+           (drained < UART_RX_DRAIN_LIMIT)) {
+        (void)XUartPs_ReadReg(UART_BASEADDR, XUARTPS_FIFO_OFFSET);
+        drained++;
+    }
+}
+
+static void protocol_resync(void)
+{
+    g_protocol.length = 0U;
+    g_protocol.rx_resync_count++;
+    device_protocol_recover_uart_rx();
+}
+
+static int fake_status_provider(device_status_t *status)
+{
+    status->temperature_c = 32.5;
+    status->battery_percent = 85U;
+    status->error_code = 0U;
+    status->dma_start_count = 0U;
+    status->dma_error_count = 0U;
+    status->dma_error_bg_irq_count = 0U;
+    status->dma_error_bg_start_count = 0U;
+    status->dma_error_bg_reset_count = 0U;
+    status->dma_error_sweep_reset_count = 0U;
+    status->dma_error_direct_if_count = 0U;
+    status->dma_error_phase_noise_count = 0U;
+    status->dma_error_capture_test_count = 0U;
+    status->dma_start_last_result_code = 0U;
+    status->dma_start_last_transfer_bytes = 0U;
+    status->dma_start_last_capture_samples = 0U;
+    status->dma_start_last_s2mm_dmasr = 0U;
+    status->dma_start_last_sg_ring_ready = 0U;
+    status->dma_start_last_sg_active_bd_count = 0U;
+    status->dma_start_last_sg_free_bd_count = 0U;
+    status->dma_start_fail_invalid_arg_count = 0U;
+    status->dma_start_fail_invalid_samples_count = 0U;
+    status->dma_start_fail_pl_abort_count = 0U;
+    status->dma_start_fail_pl_clear_count = 0U;
+    status->dma_start_fail_pl_config_count = 0U;
+    status->dma_start_fail_submit_sg_count = 0U;
+    status->dma_start_fail_simple_transfer_count = 0U;
+    status->dma_start_fail_pl_start_count = 0U;
+    status->frame_ready_count = 0U;
+    status->process_frame_count = 0U;
+    status->spectrum_valid = 0U;
+    status->s2mm_dmacr = 0U;
+    status->s2mm_dmasr = 0U;
+    status->dma_irq_count = 0U;
+    status->dma_last_irq_status = 0U;
+    status->uart_rx_bad_frame_count = g_protocol.rx_bad_frame_count;
+    status->uart_rx_crc_error_count = g_protocol.rx_crc_error_count;
+    status->uart_rx_overrun_count = g_protocol.rx_overrun_count;
+    status->uart_rx_resync_count = g_protocol.rx_resync_count;
+    return 0;
+}
+
+static int fake_spectrum_provider(
+    const device_control_config_t *config,
+    spectrum_point_t *points,
+    unsigned short max_points,
+    unsigned short *out_point_count)
+{
+    unsigned short point_count = sanitize_point_count(config->sweep.point_count);
+    double start_hz = config->frequency.start_hz;
+    double stop_hz = config->frequency.stop_hz;
+    double step_hz;
+    unsigned int i;
+
+    if (point_count > max_points) {
+        point_count = max_points;
+    }
+
+    if (stop_hz <= start_hz) {
+        start_hz = 0.0;
+        stop_hz = 1.0e9;
+    }
+
+    step_hz = (point_count > 1U) ? ((stop_hz - start_hz) / (double)(point_count - 1U)) : 0.0;
+
+    for (i = 0U; i < point_count; i++) {
+        double ratio = (point_count > 1U) ? ((double)i / (double)(point_count - 1U)) : 0.0;
+        points[i].freq_hz = (uint32_t)(start_hz + step_hz * (double)i);
+        points[i].amp_dbm = (float)make_fake_amplitude(ratio, config);
+        (void)device_protocol_stream_spectrum_point(points[i].freq_hz,
+                                                    points[i].amp_dbm,
+                                                    point_count,
+                                                    i,
+                                                    (i + 1U >= point_count) ? 1U : 0U);
+    }
+
+    *out_point_count = point_count;
+    return 0;
+}
+
+static double make_fake_amplitude(double ratio, const device_control_config_t *config)
+{
+    double peak1_center = 0.22;
+    double peak2_center = 0.68;
+    double peak1_width = 0.004 + (1.5e6 / (config->bandwidth.rbw_hz + 1.0)) * 0.0002;
+    double peak2_width = 0.007 + (1.0e6 / (config->bandwidth.rbw_hz + 1.0)) * 0.0002;
+    double detect_bias = (double)config->detect.detect_mode * 0.8;
+    double mode_bias = (double)config->sweep.mode * 1.2;
+    double noise = ((double)(fake_rand() % 1000U) / 1000.0) * 2.5;
+    double baseline = -88.0 + noise + detect_bias - mode_bias;
+    double peak1 = 36.0 * exp(-((ratio - peak1_center) * (ratio - peak1_center)) / peak1_width);
+    double peak2 = 24.0 * exp(-((ratio - peak2_center) * (ratio - peak2_center)) / peak2_width);
+
+    return baseline + peak1 + peak2;
+}
+
+static unsigned int fake_rand(void)
+{
+    g_protocol.rng_state = g_protocol.rng_state * 1664525U + 1013904223U;
+    return g_protocol.rng_state;
+}
+
+static void send_frame(unsigned char cmd, const unsigned char *data, unsigned short length)
+{
+    unsigned int offset = 0U;
+    unsigned short crc;
+
+    if ((unsigned int)length + 7U > TX_FRAME_MAX_SIZE) {
+        return;
+    }
+
+    g_protocol.tx_buffer[offset++] = FRAME_START_BYTE;
+    write_u16_be(&g_protocol.tx_buffer[offset], length);
+    offset += 2U;
+    g_protocol.tx_buffer[offset++] = cmd;
+
+    if ((data != 0) && (length > 0U)) {
+        memmove(&g_protocol.tx_buffer[offset], data, length);
+        offset += length;
+    }
+
+    crc = crc16_modbus(&g_protocol.tx_buffer[1], 2U + 1U + length);
+    write_u16_be(&g_protocol.tx_buffer[offset], crc);
+    offset += 2U;
+    g_protocol.tx_buffer[offset++] = FRAME_END_BYTE;
+
+    uart_send_bytes(g_protocol.tx_buffer, offset);
+}
+
+static void send_frame_inplace(unsigned char cmd, unsigned short length)
+{
+    unsigned int offset = 0U;
+    unsigned short crc;
+
+    if ((unsigned int)length + 7U > TX_FRAME_MAX_SIZE) {
+        return;
+    }
+
+    g_protocol.tx_buffer[offset++] = FRAME_START_BYTE;
+    write_u16_be(&g_protocol.tx_buffer[offset], length);
+    offset += 2U;
+    g_protocol.tx_buffer[offset++] = cmd;
+
+    crc = crc16_modbus(&g_protocol.tx_buffer[1], 2U + 1U + length);
+    write_u16_be(&g_protocol.tx_buffer[4U + length], crc);
+    g_protocol.tx_buffer[6U + length] = FRAME_END_BYTE;
+
+    uart_send_bytes(g_protocol.tx_buffer, 7U + length);
+}
+
+static unsigned short crc16_modbus(const unsigned char *data, unsigned int length)
+{
+    unsigned short crc = 0xFFFFU;
+    unsigned int i;
+    unsigned int bit;
+
+    for (i = 0U; i < length; i++) {
+        crc ^= (unsigned short)data[i];
+        for (bit = 0U; bit < 8U; bit++) {
+            if ((crc & 0x0001U) != 0U) {
+                crc = (unsigned short)((crc >> 1U) ^ 0xA001U);
+            } else {
+                crc = (unsigned short)(crc >> 1U);
+            }
+        }
+    }
+
+    return crc;
+}
+
+static void uart_send_bytes(const unsigned char *data, unsigned int length)
+{
+    unsigned int i;
+
+    for (i = 0U; i < length; i++) {
+        XUartPs_SendByte(UART_BASEADDR, data[i]);
+    }
+}
+
+static void write_u16_be(unsigned char *dst, unsigned short value)
+{
+    dst[0] = (unsigned char)((value >> 8) & 0xFFU);
+    dst[1] = (unsigned char)(value & 0xFFU);
+}
+
+static void write_u32_be(unsigned char *dst, unsigned int value)
+{
+    dst[0] = (unsigned char)((value >> 24) & 0xFFU);
+    dst[1] = (unsigned char)((value >> 16) & 0xFFU);
+    dst[2] = (unsigned char)((value >> 8) & 0xFFU);
+    dst[3] = (unsigned char)(value & 0xFFU);
+}
+
+static void write_u32_le(unsigned char *dst, unsigned int value)
+{
+    dst[0] = (unsigned char)(value & 0xFFU);
+    dst[1] = (unsigned char)((value >> 8) & 0xFFU);
+    dst[2] = (unsigned char)((value >> 16) & 0xFFU);
+    dst[3] = (unsigned char)((value >> 24) & 0xFFU);
+}
+
+static void write_f32_le(unsigned char *dst, float value)
+{
+    union {
+        float f;
+        unsigned char b[4];
+    } conv;
+    unsigned int i;
+
+    conv.f = value;
+    for (i = 0U; i < 4U; i++) {
+        dst[i] = conv.b[i];
+    }
+}
+
+static void write_f64_le(unsigned char *dst, double value)
+{
+    union {
+        double d;
+        unsigned char b[8];
+    } conv;
+    unsigned int i;
+
+    conv.d = value;
+    for (i = 0U; i < 8U; i++) {
+        dst[i] = conv.b[i];
+    }
+}
+
+static int append_signal_processing_peak_debug(unsigned char *dst,
+                                                unsigned short max_len,
+                                                unsigned short *io_len)
+{
+    signal_processing_peak_debug_t dbg;
+    unsigned int offset;
+    const unsigned int ext_len = 72U;
+
+    if ((dst == 0) || (io_len == 0)) {
+        return -1;
+    }
+    if ((unsigned int)*io_len + ext_len > (unsigned int)max_len) {
+        return -1;
+    }
+
+    signal_processing_get_peak_debug(&dbg);
+    offset = (unsigned int)*io_len;
+
+    dst[offset++] = 'D';
+    dst[offset++] = 'S';
+    dst[offset++] = 'P';
+    dst[offset++] = 'K';
+    dst[offset++] = dbg.version;
+    dst[offset++] = (unsigned char)ext_len;
+    dst[offset++] = dbg.current_rbw_mode;
+    dst[offset++] = 0U;
+
+    write_u32_be(&dst[offset], dbg.point_index);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.pre_rbw_count);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.post_rbw_count);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.pre_rbw_power_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.post_rbw_power_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.pre_rbw_peak_freq_hz);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.pre_rbw_peak_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.post_rbw_peak_freq_hz);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.post_rbw_peak_dbfs);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.ddc_sample_count);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.ddc_power_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.ddc_dc_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.ddc_pos10k_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.ddc_neg10k_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.ddc_pos100k_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.ddc_neg100k_dbfs);
+    offset += 4U;
+
+    *io_len = (unsigned short)offset;
+    return 0;
+}
+
+static unsigned short read_u16_le(const unsigned char *src)
+{
+    return (unsigned short)(((unsigned short)src[1] << 8) | (unsigned short)src[0]);
+}
+
+static double read_f64_le(const unsigned char *src)
+{
+    union {
+        double d;
+        unsigned char b[8];
+    } conv;
+    unsigned int i;
+
+    for (i = 0U; i < 8U; i++) {
+        conv.b[i] = src[i];
+    }
+    return conv.d;
+}
+
+static unsigned short sanitize_point_count(unsigned short value)
+{
+    if (value < MIN_POINT_COUNT) {
+        return DEFAULT_POINT_COUNT;
+    }
+    if (value > MAX_POINT_COUNT) {
+        return MAX_POINT_COUNT;
+    }
+    return value;
+}
+
+static unsigned char sanitize_rbw_mode(unsigned char value)
+{
+    switch ((rbw_mode_t)value) {
+    case RBW_MODE_10K:
+    case RBW_MODE_30K:
+    case RBW_MODE_100K:
+    case RBW_MODE_300K:
+    case RBW_MODE_1M:
+    case RBW_MODE_1K:
+        return value;
+    default:
+        return (unsigned char)RBW_MODE_1M;
+    }
+}
+
+static double rbw_mode_to_hz(unsigned char mode, double fallback_hz)
+{
+    switch ((rbw_mode_t)mode) {
+    case RBW_MODE_1K:
+        return (double)RBW_1K_HZ;
+    case RBW_MODE_10K:
+        return (double)RBW_10K_HZ;
+    case RBW_MODE_30K:
+        return (double)RBW_30K_HZ;
+    case RBW_MODE_100K:
+        return (double)RBW_100K_HZ;
+    case RBW_MODE_300K:
+        return (double)RBW_300K_HZ;
+    case RBW_MODE_1M:
+        return (double)RBW_1M_HZ;
+    default:
+        return (fallback_hz > 0.0) ? fallback_hz : (double)RBW_1M_HZ;
+    }
+}

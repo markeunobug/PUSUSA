@@ -1,0 +1,116 @@
+{
+   "ActiveEmotionalView":"Default View",
+   "Default View_ScaleFactor":"0.711569",
+   "Default View_TopLeft":"-142,-169",
+   "ExpandedHierarchyInLayout":"",
+   "guistr":"# # String gsaved with Nlview 7.0r6  2020-01-29 bk=1.5227 VDI=41 GEI=36 GUI=JA:10.0 non-TLS
+#  -string -flagsOSRD
+preplace port DDR -pg 1 -lvl 10 -x 3410 -y 950 -defaultsOSRD
+preplace port FIXED_IO -pg 1 -lvl 10 -x 3410 -y 970 -defaultsOSRD
+preplace port GPIO_EMIO -pg 1 -lvl 10 -x 3410 -y 930 -defaultsOSRD
+preplace port AD8370_GPIO_0 -pg 1 -lvl 10 -x 3410 -y 1350 -defaultsOSRD
+preplace port GPIO_LMX2572 -pg 1 -lvl 10 -x 3410 -y 1200 -defaultsOSRD
+preplace port GPIO_LMX2572_MUX -pg 1 -lvl 10 -x 3410 -y 1220 -defaultsOSRD
+preplace port GPIO_RF_FRONTEND -pg 1 -lvl 10 -x 3410 -y 1630 -defaultsOSRD
+preplace port GPIO_LTC2208_CTRL -pg 1 -lvl 10 -x 3410 -y 1490 -defaultsOSRD
+preplace port port-id_clkout_p_0 -pg 1 -lvl 0 -x -10 -y 1280 -defaultsOSRD
+preplace port port-id_clkout_n_0 -pg 1 -lvl 0 -x -10 -y 980 -defaultsOSRD
+preplace port port-id_of_p_0 -pg 1 -lvl 0 -x -10 -y 1040 -defaultsOSRD
+preplace port port-id_of_n_0 -pg 1 -lvl 0 -x -10 -y 1060 -defaultsOSRD
+preplace portBus data_p_0 -pg 1 -lvl 0 -x -10 -y 1000 -defaultsOSRD
+preplace portBus data_n_0 -pg 1 -lvl 0 -x -10 -y 1020 -defaultsOSRD
+preplace inst processing_system7_0 -pg 1 -lvl 9 -x 3090 -y 990 -defaultsOSRD
+preplace inst axi_dma_0 -pg 1 -lvl 7 -x 2270 -y 780 -defaultsOSRD
+preplace inst axis_data_fifo_0 -pg 1 -lvl 6 -x 1950 -y 750 -defaultsOSRD
+preplace inst xlconcat_0 -pg 1 -lvl 8 -x 2620 -y 1040 -defaultsOSRD
+preplace inst axi_mem_intercon -pg 1 -lvl 8 -x 2620 -y 820 -defaultsOSRD
+preplace inst ps7_0_axi_periph -pg 1 -lvl 8 -x 2620 -y 1350 -defaultsOSRD
+preplace inst clk_wiz_0 -pg 1 -lvl 3 -x 770 -y 900 -defaultsOSRD
+preplace inst ila_0 -pg 1 -lvl 5 -x 1500 -y 910 -defaultsOSRD
+preplace inst util_vector_logic_0 -pg 1 -lvl 2 -x 520 -y 1140 -defaultsOSRD
+preplace inst proc_sys_reset_0 -pg 1 -lvl 1 -x 200 -y 1180 -defaultsOSRD
+preplace inst axi_gpio_1 -pg 1 -lvl 9 -x 3090 -y 1210 -defaultsOSRD
+preplace inst axi_gpio_2 -pg 1 -lvl 9 -x 3090 -y 1630 -defaultsOSRD
+preplace inst axi_gpio_3 -pg 1 -lvl 9 -x 3090 -y 1490 -defaultsOSRD
+preplace inst axi_gpio_0 -pg 1 -lvl 9 -x 3090 -y 1350 -defaultsOSRD
+preplace inst LTC2208_0 -pg 1 -lvl 4 -x 1020 -y 990 -defaultsOSRD -resize 240 216
+preplace inst util_vector_logic_1 -pg 1 -lvl 5 -x 1500 -y 750 -defaultsOSRD
+preplace inst adc_capture_axis_0 -pg 1 -lvl 5 -x 1500 -y 350 -defaultsOSRD
+preplace inst adc_capture_control_0 -pg 1 -lvl 9 -x 3090 -y 320 -defaultsOSRD
+preplace netloc LTC2208_0_adc_clk 1 4 5 1160 100 1740 150 NJ 150 NJ 150 NJ
+preplace netloc LTC2208_0_adc_data 1 4 1 1170 270n
+preplace netloc LTC2208_0_adc_of 1 4 1 1190 290n
+preplace netloc LTC2208_0_m_axis_aclk 1 4 1 1230 920n
+preplace netloc adc_capture_axis_0_status_backpressure_count 1 5 4 1720 550 NJ 550 NJ 550 NJ
+preplace netloc adc_capture_axis_0_status_backpressure_seen 1 5 4 1720J 250 NJ 250 NJ 250 2810
+preplace netloc adc_capture_axis_0_status_busy 1 5 4 NJ 180 NJ 180 NJ 180 2860
+preplace netloc adc_capture_axis_0_status_done 1 5 4 NJ 200 NJ 200 NJ 200 2860
+preplace netloc adc_capture_axis_0_status_error 1 5 4 NJ 220 NJ 220 NJ 220 2860
+preplace netloc adc_capture_axis_0_status_error_code 1 5 4 1750 410 NJ 410 NJ 410 NJ
+preplace netloc adc_capture_axis_0_status_frame_id 1 5 4 1750 390 NJ 390 NJ 390 NJ
+preplace netloc adc_capture_axis_0_status_overflow_count 1 5 4 1720 530 NJ 530 NJ 530 NJ
+preplace netloc adc_capture_axis_0_status_overflow_seen 1 5 4 1750J 260 NJ 260 NJ 260 2820
+preplace netloc adc_capture_axis_0_status_packet_count 1 5 4 1720 470 NJ 470 NJ 470 NJ
+preplace netloc adc_capture_axis_0_status_sample_count 1 5 4 1750 370 NJ 370 NJ 370 NJ
+preplace netloc adc_capture_axis_0_status_streaming 1 5 4 NJ 300 NJ 300 NJ 300 2860
+preplace netloc adc_capture_axis_0_status_tlast_seen 1 5 4 NJ 280 NJ 280 NJ 280 2860
+preplace netloc adc_capture_axis_0_status_total_sample_count_hi 1 5 4 1720 450 NJ 450 NJ 450 NJ
+preplace netloc adc_capture_axis_0_status_total_sample_count_lo 1 5 4 1720 430 NJ 430 NJ 430 NJ
+preplace netloc adc_capture_control_0_capture_abort 1 4 6 1230 610 NJ 610 2100J 590 NJ 590 2860J 610 3370
+preplace netloc adc_capture_control_0_capture_clear_counters 1 4 6 1240 620 1720J 590 2080J 600 NJ 600 2850J 620 3360
+preplace netloc adc_capture_control_0_capture_clear_status 1 4 6 1210 10 NJ 10 NJ 10 NJ 10 NJ 10 3390
+preplace netloc adc_capture_control_0_capture_continuous_mode 1 4 6 1220 20 NJ 20 NJ 20 NJ 20 NJ 20 3380
+preplace netloc adc_capture_control_0_capture_frame_id 1 4 6 1270 630 NJ 630 NJ 630 NJ 630 2810J 650 3320
+preplace netloc adc_capture_control_0_capture_frame_len 1 4 6 1220 650 NJ 650 2070J 620 NJ 620 2820J 660 3380
+preplace netloc adc_capture_control_0_capture_start 1 4 6 1230 30 NJ 30 NJ 30 NJ 30 NJ 30 3370
+preplace netloc adc_capture_control_0_capture_stream_enable 1 4 6 1260 600 NJ 600 2070J 610 NJ 610 2840J 630 3350
+preplace netloc adc_capture_control_0_fifo_resetn 1 4 6 1270 660 NJ 660 NJ 660 NJ 660 2810J 670 3340
+preplace netloc axi_dma_0_s2mm_introut 1 7 1 2450 810n
+preplace netloc clk_wiz_0_clk_out1 1 3 1 870 890n
+preplace netloc clkout_n_0_1 1 0 4 NJ 980 NJ 980 NJ 980 NJ
+preplace netloc clkout_p_0_1 1 0 4 10J 970 NJ 970 NJ 970 870J
+preplace netloc data_n_0_1 1 0 4 NJ 1020 NJ 1020 NJ 1020 NJ
+preplace netloc data_p_0_1 1 0 4 NJ 1000 NJ 1000 NJ 1000 NJ
+preplace netloc of_n_0_1 1 0 4 NJ 1060 NJ 1060 NJ 1060 NJ
+preplace netloc of_p_0_1 1 0 4 NJ 1040 NJ 1040 NJ 1040 NJ
+preplace netloc proc_sys_reset_0_peripheral_aresetn 1 1 8 370 1010 NJ 1010 860 740 1200 680 1720J 840 2090 670 2440 670 2800
+preplace netloc processing_system7_0_FCLK_CLK0 1 0 10 20 910 NJ 910 670 820 NJ 820 NJ 820 1740 850 2080 650 2460 650 2790 860 3340
+preplace netloc processing_system7_0_FCLK_RESET0_N 1 0 10 30 1070 NJ 1070 NJ 1070 880J 860 1180J 1000 1730J 970 NJ 970 NJ 970 2770J 870 3330
+preplace netloc util_vector_logic_0_Res 1 2 1 680 890n
+preplace netloc util_vector_logic_1_Res 1 5 1 1730 740n
+preplace netloc xlconcat_0_dout 1 8 1 2860J 1030n
+preplace netloc adc_capture_control_0_capture_frame_count 1 4 6 1250 640 NJ 640 NJ 640 NJ 640 NJ 640 3330
+preplace netloc adc_capture_axis_0_status_burst_active 1 5 4 1750 330 NJ 330 NJ 330 NJ
+preplace netloc adc_capture_axis_0_status_burst_done 1 5 4 1750 350 NJ 350 NJ 350 NJ
+preplace netloc adc_capture_axis_0_status_burst_packet_count 1 5 4 1720 490 NJ 490 NJ 490 NJ
+preplace netloc adc_capture_axis_0_status_burst_remaining 1 5 4 1720 510 NJ 510 NJ 510 NJ
+preplace netloc adc_capture_axis_0_m_axis 1 5 1 1730 160n
+preplace netloc axi_dma_0_M_AXI_S2MM 1 7 1 2450 730n
+preplace netloc axi_dma_0_M_AXI_SG 1 7 1 N 750
+preplace netloc axi_gpio_0_GPIO 1 9 1 NJ 1350
+preplace netloc axi_gpio_1_GPIO 1 9 1 NJ 1200
+preplace netloc axi_gpio_1_GPIO2 1 9 1 NJ 1220
+preplace netloc axi_gpio_2_GPIO 1 9 1 NJ 1630
+preplace netloc axi_gpio_3_GPIO 1 9 1 NJ 1490
+preplace netloc axi_mem_intercon_M00_AXI 1 8 1 2810 820n
+preplace netloc axis_data_fifo_0_M_AXIS 1 6 1 N 750
+preplace netloc processing_system7_0_DDR 1 9 1 NJ 950
+preplace netloc processing_system7_0_FIXED_IO 1 9 1 NJ 970
+preplace netloc processing_system7_0_GPIO_0 1 9 1 NJ 930
+preplace netloc processing_system7_0_M_AXI_GP0 1 7 3 2470 1110 NJ 1110 3320
+preplace netloc ps7_0_axi_periph_M00_AXI 1 6 3 2100 1120 NJ 1120 2770
+preplace netloc ps7_0_axi_periph_M01_AXI 1 8 1 2770 1320n
+preplace netloc ps7_0_axi_periph_M02_AXI 1 8 1 2860 1190n
+preplace netloc ps7_0_axi_periph_M03_AXI 1 8 1 2780 1360n
+preplace netloc ps7_0_axi_periph_M04_AXI 1 8 1 2770 1380n
+preplace netloc ps7_0_axi_periph_M05_AXI 1 8 1 2830 90n
+levelinfo -pg 1 -10 200 520 770 1020 1500 1950 2270 2620 3090 3410
+pagesize -pg 1 -db -bbox -sgen -160 0 3610 1710
+"
+}
+{
+   "da_axi4_cnt":"6",
+   "da_board_cnt":"4",
+   "da_clkrst_cnt":"18",
+   "da_ps7_cnt":"1"
+}

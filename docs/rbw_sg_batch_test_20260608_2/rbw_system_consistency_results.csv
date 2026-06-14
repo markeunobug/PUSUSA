@@ -1,0 +1,7 @@
+rbw,repeat,return_code,ok,points_received,peak_hz,peak_dbm,marker_hz,marker_dbm,error_vs_ref_db,suggested_correction_db,sweep_err,sweep_frame_ready,sweep_dma_err,sweep_dmasr,sweep_last_irq,sweep_accum,sweep_target,pl_mode,pl_fs_hz,pl_decim,pl_drop,pl_err,capture_csv
+1m,1,0,0,1,100000000,-79.02,100000000,-79.02,-69.02,69.02,,,,,,,,,,,,,C:\learning\pusu_V2\tools\serial_300k_rbw_capture_20260608_202832.csv
+300k,1,0,0,1,100000000,-84.02,100000000,-84.02,-74.02,74.02,,,,,,,,,,,,,C:\learning\pusu_V2\tools\serial_300k_rbw_capture_20260608_202842.csv
+100k,1,0,0,,,,,,,,,,,,,,,,,,,,C:\learning\pusu_V2\tools\serial_300k_rbw_capture_20260608_202852.csv
+30k,1,0,0,,,,,,,,,,,,,,,,,,,,C:\learning\pusu_V2\tools\serial_300k_rbw_capture_20260608_202923.csv
+10k,1,0,0,,,,,,,,,,,,,,,,,,,,C:\learning\pusu_V2\tools\serial_300k_rbw_capture_20260608_202953.csv
+1k,1,0,0,,,,,,,,,,,,,,,,,,,,C:\learning\pusu_V2\tools\serial_300k_rbw_capture_20260608_203023.csv

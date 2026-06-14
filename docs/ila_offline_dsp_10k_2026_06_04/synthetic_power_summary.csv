@@ -1,0 +1,3 @@
+input_freq_hz,sample_count,amp_code,amp_norm,decim_r,decim_outputs_before_post_fir,valid_outputs_after_post_fir,power_dbfs,unclamped_power_dbfs,power_dbm,relative_to_40mhz_db
+40000000,400000,78.1756194,0.00238573057,130,3076,2693,-52.4475746,-52.4475746,-44.4275746,0
+40100000,400000,78.1756194,0.00238573057,130,3076,2693,-113.9794,-209.479363,-105.9594,-61.5318254

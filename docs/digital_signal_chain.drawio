@@ -10,7 +10,7 @@
         <mxCell id="title" value="窄带频谱仪数字信号处理链路（比赛版）" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#1f2937;" vertex="1" parent="1">
           <mxGeometry x="60" y="30" width="540" height="40" as="geometry"/>
         </mxCell>
-        <mxCell id="note" value="假设末级 IF 固定为 50 MHz；若后续改为 60 MHz，仅需调整 NCO 频率与部分滤波参数，主结构不变。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;align=left;verticalAlign=middle;" vertex="1" parent="1">
+        <mxCell id="note" value="末级 IF 固定为 40 MHz；若后续改为其他中频，仅需调整 NCO 频率与部分滤波参数，主结构不变。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;align=left;verticalAlign=middle;" vertex="1" parent="1">
           <mxGeometry x="60" y="80" width="900" height="50" as="geometry"/>
         </mxCell>
         <mxCell id="pl_lane" value="PL / FPGA 实时处理区" style="swimlane;html=1;startSize=34;rounded=1;horizontal=0;swimlaneFillColor=#d5e8d4;fillColor=#f8fff7;strokeColor=#82b366;fontStyle=1;fontSize=18;" vertex="1" parent="1">
@@ -19,7 +19,7 @@
         <mxCell id="ps_lane" value="PS / ARM 控制与显示区" style="swimlane;html=1;startSize=34;rounded=1;horizontal=0;swimlaneFillColor=#dae8fc;fillColor=#f7fbff;strokeColor=#6c8ebf;fontStyle=1;fontSize=18;" vertex="1" parent="1">
           <mxGeometry x="40" y="560" width="1420" height="260" as="geometry"/>
         </mxCell>
-        <mxCell id="adc" value="ADC 采样&#xa;LTC2208&#xa;Fs ≈ 130 MSPS&#xa;输入: 固定 IF (50 MHz)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=15;" vertex="1" parent="1">
+        <mxCell id="adc" value="ADC 采样&#xa;LTC2208&#xa;Fs ≈ 130 MSPS&#xa;输入: 固定 IF (40 MHz)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=15;" vertex="1" parent="1">
           <mxGeometry x="80" y="250" width="150" height="90" as="geometry"/>
         </mxCell>
         <mxCell id="align" value="ADC 接口与对齐&#xa;LVDS 解串/时序对齐&#xa;去直流偏置&#xa;溢出检测" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=15;" vertex="1" parent="1">
@@ -28,7 +28,7 @@
         <mxCell id="fifo" value="采样缓冲&#xa;AXIS FIFO&#xa;跨时钟域/流控" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=15;" vertex="1" parent="1">
           <mxGeometry x="470" y="250" width="140" height="90" as="geometry"/>
         </mxCell>
-        <mxCell id="ddc" value="数字下变频 DDC&#xa;NCO = 50 MHz&#xa;I/Q 正交混频&#xa;IF → 基带" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=15;" vertex="1" parent="1">
+        <mxCell id="ddc" value="数字下变频 DDC&#xa;NCO = 40 MHz&#xa;I/Q 正交混频&#xa;IF → 基带" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=15;" vertex="1" parent="1">
           <mxGeometry x="650" y="250" width="170" height="90" as="geometry"/>
         </mxCell>
         <mxCell id="cic" value="CIC 抽取&#xa;粗降采样&#xa;减轻后级计算量" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=15;" vertex="1" parent="1">
@@ -70,7 +70,7 @@
         <mxCell id="milestone" value="首版最小可运行链路&#xa;ADC → DDC → CIC → FIR → 100 kHz RBW → 功率检测 → DMA → 显示" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=15;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="80" y="860" width="760" height="60" as="geometry"/>
         </mxCell>
-        <mxCell id="risk" value="注意事项&#xa;1. 低频直通通道与变频通道需统一幅度标定&#xa;2. RBW 首版建议先实现 100 kHz，再扩展 10k/30k/300k/1M&#xa;3. IF 若改为 60 MHz，只需调整 DDC 和滤波参数，不必重画整条链" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14;align=left;" vertex="1" parent="1">
+        <mxCell id="risk" value="注意事项&#xa;1. 低频直通通道与变频通道需统一幅度标定&#xa;2. RBW 首版建议先实现 100 kHz，再扩展 10k/30k/300k/1M&#xa;3. IF 当前为 40 MHz；若后续调整，只需修改 DDC 和滤波参数，不必重画整条链" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14;align=left;" vertex="1" parent="1">
           <mxGeometry x="880" y="850" width="580" height="90" as="geometry"/>
         </mxCell>
         <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;strokeColor=#666666;" edge="1" parent="1" source="adc" target="align">

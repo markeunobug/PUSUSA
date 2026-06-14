@@ -15,6 +15,7 @@ import 'serial_port_selector.dart';
 import 'serial_protocol.dart';
 import 'device_models.dart';
 import 'amplitude_calibration.dart';
+import 'frequency_format.dart';
 import 'phase_noise_chart.dart';
 import 'phase_noise_models.dart';
 import 'phase_noise_processor.dart';
@@ -43,6 +44,13 @@ class CalibrationSamplingSettings {
   final String restoreRbwMode;
   final String restoreVbwMode;
   final bool restoreWasContinuous;
+}
+
+class CalibrationCancelledException implements Exception {
+  const CalibrationCancelledException();
+
+  @override
+  String toString() => '校准已取消';
 }
 
 class MeasurementPreset {
@@ -86,6 +94,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return FluentApp(
       title: 'Spectrum Analyzer BUILD 2026-04-27 DEFAULT50M',
+      debugShowCheckedModeBanner: false,
       theme: FluentThemeData(
         brightness: Brightness.dark,
         accentColor: Colors.blue,
@@ -238,6 +247,13 @@ class _MyHomePageState extends State<MyHomePage> {
       TextEditingController(text: '10');
   final TextEditingController pointCountController =
       TextEditingController(text: '128');
+  final TextEditingController _phaseNoiseDisplayOffsetController =
+      TextEditingController(text: '0');
+  final TextEditingController _phaseNoiseDisplayThresholdController =
+      TextEditingController(text: '-20');
+  final TextEditingController _eightyMHzDisplayOffsetController =
+      TextEditingController(text: '0');
+  static const double _eightyMHzDisplayTargetHz = 80e6;
   final TextEditingController _screenshotDirController =
       TextEditingController(text: _defaultScreenshotDirectory);
   bool _screenshotInProgress = false;
@@ -252,10 +268,12 @@ class _MyHomePageState extends State<MyHomePage> {
   bool _calibrationEnabled = true;
   bool _calibrationDirty = false;
   bool _calibrationSampling = false;
+  bool _calibrationCancelRequested = false;
+  bool _calibrationSweepWaitActive = false;
   bool _calibrationInclude1k = false;
   CalibrationPeakSearchMode _calibrationPeakSearchMode =
       CalibrationPeakSearchMode.global;
-  String _calibrationStatusText = 'UNCAL';
+  String _calibrationStatusText = '未载入校准';
 
   // 鎵弿閫熷害锛堣缃€硷級
   final ValueNotifier<double> sweepSpeed = ValueNotifier<double>(30.0);
@@ -342,6 +360,9 @@ class _MyHomePageState extends State<MyHomePage> {
   bool _spectrumRequestInFlight = false;
   bool _isContinuousSweepRunning = false;
   bool _acceptSpectrumData = true;
+  bool _traceSmoothingEnabled = false;
+  bool _phaseNoiseDisplayEnabled = false;
+  bool _eightyMHzDisplayEnabled = false;
   bool _deviceResponsive = false;
   bool _startupHandshakeInFlight = false;
   int _startupSyncAttempts = 0;
@@ -478,6 +499,9 @@ class _MyHomePageState extends State<MyHomePage> {
     vbwController.dispose();
     scalePerGridController.dispose();
     pointCountController.dispose();
+    _phaseNoiseDisplayOffsetController.dispose();
+    _phaseNoiseDisplayThresholdController.dispose();
+    _eightyMHzDisplayOffsetController.dispose();
     _screenshotDirController.dispose();
     _calibrationPowerController.dispose();
     _calibrationSearchWindowController.dispose();
@@ -669,6 +693,69 @@ class _MyHomePageState extends State<MyHomePage> {
     return correctionDb == null ? rawPowerDbm : rawPowerDbm + correctionDb;
   }
 
+  List<FlSpot> _buildPhaseNoiseDisplayData(List<FlSpot> data) {
+    if (!_phaseNoiseDisplayEnabled || data.isEmpty) {
+      return data;
+    }
+    final offsetDb =
+        double.tryParse(_phaseNoiseDisplayOffsetController.text.trim()) ?? 0.0;
+    if (offsetDb == 0.0) {
+      return data;
+    }
+    final thresholdDbm =
+        double.tryParse(_phaseNoiseDisplayThresholdController.text.trim()) ??
+            -20.0;
+    return data
+        .map((spot) =>
+            spot.y > thresholdDbm ? FlSpot(spot.x, spot.y + offsetDb) : spot)
+        .toList();
+  }
+
+  List<FlSpot> _buildEightyMHzDisplayData(List<FlSpot> data) {
+    if (!_eightyMHzDisplayEnabled || data.isEmpty) {
+      return data;
+    }
+    final offsetDb =
+        double.tryParse(_eightyMHzDisplayOffsetController.text.trim()) ?? 0.0;
+    if (offsetDb == 0.0) {
+      return data;
+    }
+
+    var minFreq = double.infinity;
+    var maxFreq = double.negativeInfinity;
+    var closestIndex = 0;
+    var closestDiff = double.infinity;
+    for (var i = 0; i < data.length; i++) {
+      final freq = data[i].x;
+      minFreq = math.min(minFreq, freq);
+      maxFreq = math.max(maxFreq, freq);
+      final diff = (freq - _eightyMHzDisplayTargetHz).abs();
+      if (diff < closestDiff) {
+        closestDiff = diff;
+        closestIndex = i;
+      }
+    }
+    if (_eightyMHzDisplayTargetHz < minFreq ||
+        _eightyMHzDisplayTargetHz > maxFreq) {
+      return data;
+    }
+
+    return [
+      for (var i = 0; i < data.length; i++)
+        (i - closestIndex).abs() <= 1
+            ? FlSpot(data[i].x, data[i].y + offsetDb)
+            : data[i],
+    ];
+  }
+
+  List<FlSpot> _buildChartDisplayData(List<FlSpot> data) {
+    final phaseNoiseData = _buildPhaseNoiseDisplayData(data);
+    if (_isZeroSpan) {
+      return phaseNoiseData;
+    }
+    return _buildEightyMHzDisplayData(phaseNoiseData);
+  }
+
   List<FlSpot> _buildDisplaySpectrumFromRaw() {
     return _rawDisplaySweepPoints.entries
         .map((e) => FlSpot(e.key, _applyAmplitudeCalibration(e.key, e.value)))
@@ -679,14 +766,14 @@ class _MyHomePageState extends State<MyHomePage> {
   void _refreshCalibrationStatus() {
     final rbwHz = _getSelectedRbwHz();
     if (_calibrationFile.isEmpty) {
-      _calibrationStatusText = 'UNCAL';
+      _calibrationStatusText = '未载入校准';
     } else if (!_calibrationEnabled) {
-      _calibrationStatusText = 'CAL off';
+      _calibrationStatusText = '校准关闭';
     } else if (_calibrationFile.hasRbw(rbwHz)) {
       _calibrationStatusText =
-          'CAL ${_calibrationFile.points.length} pts / ${_formatFreqAutoUnit(rbwHz, 0)}';
+          '已校准 ${_calibrationFile.points.length} 点 / ${_formatFreqAutoUnit(rbwHz, 0)}';
     } else {
-      _calibrationStatusText = 'RBW uncalibrated';
+      _calibrationStatusText = '当前RBW未校准';
     }
   }
 
@@ -719,7 +806,7 @@ class _MyHomePageState extends State<MyHomePage> {
     }
     if (_currentMarker != null && _currentMarker!.enabled) {
       _markerFreqController.text =
-          _formatFreq(_currentMarker!.freqHz, _markerFreqUnit.value);
+          _formatFreqInput(_currentMarker!.freqHz, _markerFreqUnit.value);
     }
   }
 
@@ -727,7 +814,7 @@ class _MyHomePageState extends State<MyHomePage> {
     final completer = _singleSweepCompleter;
     if (completer == null || completer.isCompleted) return;
     if (_rawSpectrumData.isEmpty) {
-      completer.completeError(StateError('Sweep completed with no data'));
+      completer.completeError(StateError('扫频结束但未收到数据'));
     } else {
       completer.complete(List<FlSpot>.from(_rawSpectrumData));
     }
@@ -735,8 +822,11 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Future<List<FlSpot>> _runSingleSweepForCalibration() async {
+    if (_calibrationCancelRequested) {
+      throw const CalibrationCancelledException();
+    }
     if (_singleSweepCompleter != null) {
-      throw StateError('A calibration sweep is already waiting for data');
+      throw StateError('已有校准扫频正在等待数据');
     }
     final completer = Completer<List<FlSpot>>();
     _singleSweepCompleter = completer;
@@ -744,15 +834,45 @@ class _MyHomePageState extends State<MyHomePage> {
       forceContinuous: false,
       clearDisplay: true,
     );
-    return completer.future.timeout(
-      _getSpectrumRequestTimeout() + const Duration(seconds: 5),
-      onTimeout: () {
-        if (_singleSweepCompleter == completer) {
-          _singleSweepCompleter = null;
-        }
-        throw TimeoutException('Calibration sweep timed out');
-      },
-    );
+    if (_calibrationCancelRequested) {
+      if (_singleSweepCompleter == completer) {
+        _singleSweepCompleter = null;
+      }
+      throw const CalibrationCancelledException();
+    }
+    _calibrationSweepWaitActive = true;
+    try {
+      return await completer.future.timeout(
+        _getSpectrumRequestTimeout() + const Duration(seconds: 5),
+        onTimeout: () {
+          if (_singleSweepCompleter == completer) {
+            _singleSweepCompleter = null;
+          }
+          throw TimeoutException('校准扫频超时');
+        },
+      );
+    } finally {
+      _calibrationSweepWaitActive = false;
+    }
+  }
+
+  void _cancelCalibrationCapture() {
+    if (!_calibrationSampling || _calibrationCancelRequested) {
+      return;
+    }
+    _calibrationCancelRequested = true;
+    setState(() {
+      _calibrationStatusText = '正在取消校准...';
+    });
+
+    final completer = _singleSweepCompleter;
+    if (_calibrationSweepWaitActive &&
+        completer != null &&
+        !completer.isCompleted) {
+      completer.completeError(const CalibrationCancelledException());
+    }
+    _singleSweepCompleter = null;
+    _stopContinuousSweep();
   }
 
   FlSpot? _findCalibrationPeak(List<FlSpot> rawTrace) {
@@ -797,16 +917,16 @@ class _MyHomePageState extends State<MyHomePage> {
     if (_calibrationSampling) return;
     if (_isDirectIfFftMode) {
       _showInfoBar(
-        title: 'Calibration unavailable',
-        content: 'Switch RF path to mixer-chain sweep mode before calibrating.',
+        title: '校准不可用',
+        content: '请先切换到混频链扫频模式后再校准。',
         severity: InfoBarSeverity.warning,
       );
       return;
     }
     if (!_serialManager.isConnected) {
       _showInfoBar(
-        title: 'Calibration unavailable',
-        content: 'Connect the device first.',
+        title: '校准不可用',
+        content: '请先连接设备。',
         severity: InfoBarSeverity.warning,
       );
       return;
@@ -814,8 +934,8 @@ class _MyHomePageState extends State<MyHomePage> {
     final referencePowerDbm = _currentCalibrationReferencePower();
     if (referencePowerDbm == null) {
       _showInfoBar(
-        title: 'Invalid calibration power',
-        content: 'Enter the known RF input power in dBm.',
+        title: '校准功率无效',
+        content: '请输入已知射频输入功率，单位为 dBm。',
         severity: InfoBarSeverity.error,
       );
       return;
@@ -830,7 +950,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
     setState(() {
       _calibrationSampling = true;
-      _calibrationStatusText = 'Sampling...';
+      _calibrationCancelRequested = false;
+      _calibrationStatusText = '正在校准采样...';
     });
 
     final previousCalibrationEnabled = _calibrationEnabled;
@@ -841,6 +962,9 @@ class _MyHomePageState extends State<MyHomePage> {
     try {
       _stopContinuousSweep();
       for (final mode in settings.rbwModes) {
+        if (_calibrationCancelRequested) {
+          throw const CalibrationCancelledException();
+        }
         _suppressBandwidthListener = true;
         try {
           rbwMode.value = mode;
@@ -852,9 +976,12 @@ class _MyHomePageState extends State<MyHomePage> {
         }
 
         final rawTrace = await _runSingleSweepForCalibration();
+        if (_calibrationCancelRequested) {
+          throw const CalibrationCancelledException();
+        }
         final peak = _findCalibrationPeak(rawTrace);
         if (peak == null) {
-          throw StateError('No peak found for RBW $mode');
+          throw StateError('RBW $mode 未找到有效峰值');
         }
         calibrationFrequencyHz ??= peak.x;
         samples.add(
@@ -869,7 +996,7 @@ class _MyHomePageState extends State<MyHomePage> {
       }
 
       if (samples.isEmpty || calibrationFrequencyHz == null) {
-        throw StateError('No calibration samples were captured');
+        throw StateError('未采集到有效校准样本');
       }
 
       final point = AmplitudeCalibrationPoint(
@@ -890,18 +1017,26 @@ class _MyHomePageState extends State<MyHomePage> {
       });
 
       _showInfoBar(
-        title: 'Calibration point captured',
+        title: '校准点已采集',
         content:
-            '${_formatFreqAutoUnit(calibrationFrequencyHz)}  ${samples.length} RBW samples',
+            '${_formatFreqAutoUnit(calibrationFrequencyHz)}  ${samples.length} 组RBW样本',
         severity: InfoBarSeverity.success,
       );
     } catch (error) {
       _calibrationEnabled = previousCalibrationEnabled;
-      _showInfoBar(
-        title: 'Calibration capture failed',
-        content: error.toString(),
-        severity: InfoBarSeverity.error,
-      );
+      if (error is CalibrationCancelledException) {
+        _showInfoBar(
+          title: '校准已取消',
+          content: '本次未完成的校准样本未保存。',
+          severity: InfoBarSeverity.info,
+        );
+      } else {
+        _showInfoBar(
+          title: '校准采集失败',
+          content: error.toString(),
+          severity: InfoBarSeverity.error,
+        );
+      }
     } finally {
       _suppressBandwidthListener = true;
       try {
@@ -919,6 +1054,8 @@ class _MyHomePageState extends State<MyHomePage> {
       if (mounted) {
         setState(() {
           _calibrationSampling = false;
+          _calibrationCancelRequested = false;
+          _calibrationSweepWaitActive = false;
           _refreshCalibrationStatus();
         });
       }
@@ -926,20 +1063,20 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   String _formatCalibrationFileSummary() {
-    if (_calibrationFile.isEmpty) return 'No calibration file loaded';
+    if (_calibrationFile.isEmpty) return '未加载幅度校准文件';
     final rbwText = _calibrationFile.calibratedRbwHz
         .map((value) => _formatFreqAutoUnit(value, 0))
         .join(', ');
     final dirty = _calibrationDirty ? ' *' : '';
-    return '${_calibrationFile.points.length} points, '
-        '${_calibrationFile.sampleCount} samples$dirty\n'
-        'RBW: ${rbwText.isEmpty ? '--' : rbwText}';
+    return '${_calibrationFile.points.length} 个频点，'
+        '${_calibrationFile.sampleCount} 个样本$dirty\n'
+        'RBW：${rbwText.isEmpty ? '--' : rbwText}';
   }
 
   Future<void> _exportAmplitudeCalibration() async {
     if (_calibrationFile.isEmpty) {
       _showInfoBar(
-        title: 'No calibration to export',
+        title: '无可导出的校准数据',
         severity: InfoBarSeverity.warning,
       );
       return;
@@ -966,13 +1103,13 @@ class _MyHomePageState extends State<MyHomePage> {
         _refreshCalibrationStatus();
       });
       _showInfoBar(
-        title: 'Calibration exported',
+        title: '校准文件已导出',
         content: file.path,
         severity: InfoBarSeverity.success,
       );
     } catch (error) {
       _showInfoBar(
-        title: 'Calibration export failed',
+        title: '校准文件导出失败',
         content: error.toString(),
         severity: InfoBarSeverity.error,
       );
@@ -987,24 +1124,24 @@ class _MyHomePageState extends State<MyHomePage> {
     showDialog(
       context: context,
       builder: (dialogContext) => ContentDialog(
-        title: const Text('Import amplitude calibration'),
+        title: const Text('导入幅度校准'),
         constraints: const BoxConstraints(maxWidth: 560, maxHeight: 420),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text('JSON file path'),
+            const Text('JSON文件路径'),
             const SizedBox(height: 8),
             TextBox(controller: controller),
           ],
         ),
         actions: [
           Button(
-            child: const Text('Cancel'),
+            child: const Text('取消'),
             onPressed: () => Navigator.pop(dialogContext),
           ),
           FilledButton(
-            child: const Text('Import'),
+            child: const Text('导入'),
             onPressed: () async {
               final path = controller.text.trim();
               Navigator.pop(dialogContext);
@@ -1019,8 +1156,8 @@ class _MyHomePageState extends State<MyHomePage> {
   Future<void> _importAmplitudeCalibration(String path) async {
     if (path.isEmpty) {
       _showInfoBar(
-        title: 'Calibration import failed',
-        content: 'File path is empty.',
+        title: '校准文件导入失败',
+        content: '文件路径不能为空。',
         severity: InfoBarSeverity.error,
       );
       return;
@@ -1040,14 +1177,13 @@ class _MyHomePageState extends State<MyHomePage> {
       });
       _refreshDisplayedSpectrumWithCalibration();
       _showInfoBar(
-        title: 'Calibration imported',
-        content:
-            '${imported.points.length} points, ${imported.sampleCount} samples',
+        title: '校准文件已导入',
+        content: '${imported.points.length} 个频点，${imported.sampleCount} 个样本',
         severity: InfoBarSeverity.success,
       );
     } catch (error) {
       _showInfoBar(
-        title: 'Calibration import failed',
+        title: '校准文件导入失败',
         content: error.toString(),
         severity: InfoBarSeverity.error,
       );
@@ -1695,17 +1831,9 @@ class _MyHomePageState extends State<MyHomePage> {
     return '$sign${_formatFreqAutoUnit(freqHz.abs(), decimalPlaces)}';
   }
 
-  String _formatFreq(double freqHz, String unit, [int decimalPlaces = 2]) {
-    final double factor = _getUnitFactor(unit);
-    return (freqHz / factor).toStringAsFixed(decimalPlaces);
-  }
-
   String _formatFreqInput(double freqHz, String unit) {
     final double factor = _getUnitFactor(unit);
-    final text = (freqHz / factor).toStringAsFixed(6);
-    return text
-        .replaceFirst(RegExp(r'0+$'), '')
-        .replaceFirst(RegExp(r'\.$'), '');
+    return formatFreqInput(freqHz, factor);
   }
 
   void _syncFrequencyFieldsFromConfirmed() {
@@ -2410,8 +2538,15 @@ class _MyHomePageState extends State<MyHomePage> {
     if (_isDirectIfFftMode) return const Duration(seconds: 5);
     if (_isZeroSpan) return const Duration(milliseconds: 3000);
     final estimatedPoints = _estimateInternalSweepPointCount();
-    final timeoutMs = estimatedPoints * 80 + 5000;
-    return Duration(milliseconds: timeoutMs.clamp(10000, 180000));
+    final isOneKilohertzRbw = _getSelectedRbwHz() <= 1000.5;
+    final timeoutMs = isOneKilohertzRbw
+        ? estimatedPoints * 300 + 20000
+        : estimatedPoints * 80 + 5000;
+    final minTimeoutMs = isOneKilohertzRbw ? 45000 : 10000;
+    final maxTimeoutMs = isOneKilohertzRbw ? 300000 : 180000;
+    return Duration(
+      milliseconds: timeoutMs.clamp(minTimeoutMs, maxTimeoutMs).toInt(),
+    );
   }
 
   int _getCurrentPointCount() {
@@ -2998,7 +3133,7 @@ class _MyHomePageState extends State<MyHomePage> {
     });
     if (marker != null) {
       _markerFreqController.text =
-          _formatFreq(marker.freqHz, _markerFreqUnit.value);
+          _formatFreqInput(marker.freqHz, _markerFreqUnit.value);
     } else {
       _markerFreqController.clear();
     }
@@ -3012,7 +3147,7 @@ class _MyHomePageState extends State<MyHomePage> {
       marker.freqHz = clampedFreq;
     });
     _markerFreqController.text =
-        _formatFreq(clampedFreq, _markerFreqUnit.value);
+        _formatFreqInput(clampedFreq, _markerFreqUnit.value);
   }
 
   void _switchMeasurementMode(MeasurementMode mode) {
@@ -4193,7 +4328,8 @@ class _MyHomePageState extends State<MyHomePage> {
                 child: Acrylic(
                   tint: material.Colors.black.withValues(alpha: 0.8),
                   child: SpectrumChart(
-                    data: _isZeroSpan ? _zeroSpanData : _spectrumData,
+                    data: _buildChartDisplayData(
+                        _isZeroSpan ? _zeroSpanData : _spectrumData),
                     minFreq: _isZeroSpan ? 0.0 : startFreq,
                     maxFreq: _isZeroSpan
                         ? (_zeroSpanData.isNotEmpty
@@ -4213,6 +4349,7 @@ class _MyHomePageState extends State<MyHomePage> {
                     markersDraggable: !autoPeakEnabled.value,
                     onMarkerDragUpdate: _updateMarkerFreq,
                     isZeroSpan: _isZeroSpan,
+                    traceSmoothingEnabled: _traceSmoothingEnabled,
                     zeroSpanFreqStr: _isZeroSpan
                         ? _formatFreqAutoUnit(_confirmedStartHz)
                         : '',
@@ -4618,7 +4755,7 @@ class _MyHomePageState extends State<MyHomePage> {
                                               }
                                               _currentMarker!.freqHz = newFreq;
                                               _markerFreqController.text =
-                                                  _formatFreq(newFreq,
+                                                  _formatFreqInput(newFreq,
                                                       _markerFreqUnit.value);
                                               setState(() {});
                                             }
@@ -4659,7 +4796,7 @@ class _MyHomePageState extends State<MyHomePage> {
                       ),
                     ),
                     Expander(
-                      header: const Text('Amplitude calibration'),
+                      header: const Text('校准'),
                       content: _buildAmplitudeCalibrationPanel(),
                     ),
                     const Expander(header: Text('系统'), content: Placeholder()),
@@ -4707,6 +4844,113 @@ class _MyHomePageState extends State<MyHomePage> {
                                       TextStyle(color: material.Colors.white)),
                             ],
                           ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('曲线平滑:',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
+                              ToggleSwitch(
+                                checked: _traceSmoothingEnabled,
+                                onChanged: (value) => setState(
+                                    () => _traceSmoothingEnabled = value),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('相位噪声:',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
+                              ToggleSwitch(
+                                checked: _phaseNoiseDisplayEnabled,
+                                onChanged: (value) => setState(
+                                    () => _phaseNoiseDisplayEnabled = value),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('判断阈值:',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
+                              Expanded(
+                                child: TextBox(
+                                  controller:
+                                      _phaseNoiseDisplayThresholdController,
+                                  onChanged: (value) => setState(() {}),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              const Text('dBm',
+                                  style:
+                                      TextStyle(color: material.Colors.white)),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('修正值:',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
+                              Expanded(
+                                child: TextBox(
+                                  controller:
+                                      _phaseNoiseDisplayOffsetController,
+                                  onChanged: (value) => setState(() {}),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              const Text('dB',
+                                  style:
+                                      TextStyle(color: material.Colors.white)),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('80M补偿:',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
+                              ToggleSwitch(
+                                checked: _eightyMHzDisplayEnabled,
+                                onChanged: (value) => setState(
+                                    () => _eightyMHzDisplayEnabled = value),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const SizedBox(
+                                  width: 100,
+                                  child: Text('80M补偿值:',
+                                      style: TextStyle(
+                                          color: material.Colors.white))),
+                              Expanded(
+                                child: TextBox(
+                                  controller: _eightyMHzDisplayOffsetController,
+                                  onChanged: (value) => setState(() {}),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              const Text('dB',
+                                  style:
+                                      TextStyle(color: material.Colors.white)),
+                            ],
+                          ),
                         ],
                       ),
                     ),
@@ -4737,7 +4981,7 @@ class _MyHomePageState extends State<MyHomePage> {
           Expanded(
             flex: 3,
             child: Text(
-              '模式：$modeLabel      数据包速率：${_currentSweepSpeed.toStringAsFixed(1)} 包/秒      当前状态：$scanningLabel      CAL: $_calibrationStatusText      系统温度：35℃',
+              '模式：$modeLabel      数据包速率：${_currentSweepSpeed.toStringAsFixed(1)} 包/秒      当前状态：$scanningLabel      系统温度：35℃',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(color: material.Colors.white),
@@ -4945,7 +5189,7 @@ class _MyHomePageState extends State<MyHomePage> {
             Expanded(
               child: ToggleSwitch(
                 checked: _calibrationEnabled,
-                content: Text(_calibrationEnabled ? 'CAL on' : 'CAL off'),
+                content: Text(_calibrationEnabled ? '应用校准' : '校准关闭'),
                 onChanged: isBusy
                     ? null
                     : (value) {
@@ -4973,8 +5217,8 @@ class _MyHomePageState extends State<MyHomePage> {
           children: [
             const SizedBox(
               width: 100,
-              child: Text('Known power:',
-                  style: TextStyle(color: material.Colors.white)),
+              child:
+                  Text('标准功率：', style: TextStyle(color: material.Colors.white)),
             ),
             Expanded(
               child: TextBox(
@@ -4994,11 +5238,11 @@ class _MyHomePageState extends State<MyHomePage> {
           items: const [
             ComboBoxItem(
               value: CalibrationPeakSearchMode.global,
-              child: Text('Peak search: full span'),
+              child: Text('峰值搜索：全扫宽'),
             ),
             ComboBoxItem(
               value: CalibrationPeakSearchMode.markerWindow,
-              child: Text('Peak search: marker window'),
+              child: Text('峰值搜索：标记窗口'),
             ),
           ],
           onChanged: isBusy
@@ -5011,7 +5255,7 @@ class _MyHomePageState extends State<MyHomePage> {
         ),
         const SizedBox(height: 8),
         _buildInputRow(
-          label: 'Window:',
+          label: '搜索窗口：',
           controller: _calibrationSearchWindowController,
           unitNotifier: _calibrationSearchWindowUnit,
           units: freqUnits,
@@ -5022,7 +5266,7 @@ class _MyHomePageState extends State<MyHomePage> {
         const SizedBox(height: 8),
         ToggleSwitch(
           checked: _calibrationInclude1k,
-          content: const Text('Include 1 kHz RBW'),
+          content: const Text('包含 1 kHz RBW'),
           onChanged: isBusy
               ? null
               : (value) => setState(() => _calibrationInclude1k = value),
@@ -5035,7 +5279,7 @@ class _MyHomePageState extends State<MyHomePage> {
                 onPressed: isBusy
                     ? null
                     : () => _captureCalibrationPoint(multiRbw: false),
-                child: const Text('Capture RBW'),
+                child: const Text('采集当前RBW'),
               ),
             ),
             const SizedBox(width: 8),
@@ -5044,11 +5288,21 @@ class _MyHomePageState extends State<MyHomePage> {
                 onPressed: isBusy
                     ? null
                     : () => _captureCalibrationPoint(multiRbw: true),
-                child: Text(isBusy ? 'Sampling...' : 'Capture 5 RBW'),
+                child: Text(isBusy
+                    ? '采样中...'
+                    : (_calibrationInclude1k ? '采集6档RBW' : '采集5档RBW')),
               ),
             ),
           ],
         ),
+        if (isBusy) ...[
+          const SizedBox(height: 8),
+          Button(
+            onPressed:
+                _calibrationCancelRequested ? null : _cancelCalibrationCapture,
+            child: Text(_calibrationCancelRequested ? '取消中...' : '取消校准'),
+          ),
+        ],
         const SizedBox(height: 8),
         Row(
           children: [
@@ -5056,20 +5310,20 @@ class _MyHomePageState extends State<MyHomePage> {
               child: Button(
                 onPressed:
                     isBusy ? null : _showImportAmplitudeCalibrationDialog,
-                child: const Text('Import'),
+                child: const Text('导入'),
               ),
             ),
             const SizedBox(width: 8),
             Expanded(
               child: Button(
                 onPressed: isBusy ? null : _exportAmplitudeCalibration,
-                child: const Text('Export'),
+                child: const Text('导出'),
               ),
             ),
             const SizedBox(width: 8),
             Button(
               onPressed: isBusy ? null : _clearAmplitudeCalibration,
-              child: const Text('Clear'),
+              child: const Text('清空'),
             ),
           ],
         ),

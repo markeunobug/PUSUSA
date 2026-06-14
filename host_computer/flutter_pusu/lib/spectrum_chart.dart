@@ -1,6 +1,7 @@
 // spectrum_chart.dart
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart' as material;
+import 'frequency_format.dart';
 
 class Marker {
   final int id;
@@ -28,6 +29,7 @@ class SpectrumChart extends material.StatelessWidget {
   final bool markersDraggable;
   final MarkerDragUpdate? onMarkerDragUpdate;
   final bool isZeroSpan;
+  final bool traceSmoothingEnabled;
   final String zeroSpanFreqStr;
   final String zeroSpanElapsedStr;
 
@@ -48,6 +50,7 @@ class SpectrumChart extends material.StatelessWidget {
     this.markersDraggable = false,
     this.onMarkerDragUpdate,
     this.isZeroSpan = false,
+    this.traceSmoothingEnabled = false,
     this.zeroSpanFreqStr = '',
     this.zeroSpanElapsedStr = '',
   });
@@ -71,16 +74,6 @@ class SpectrumChart extends material.StatelessWidget {
     return closest.y;
   }
 
-  String _formatFreqAutoUnit(double freqHz, [int decimalPlaces = 3]) {
-    if (freqHz >= 1e9)
-      return '${(freqHz / 1e9).toStringAsFixed(decimalPlaces)} GHz';
-    if (freqHz >= 1e6)
-      return '${(freqHz / 1e6).toStringAsFixed(decimalPlaces)} MHz';
-    if (freqHz >= 1e3)
-      return '${(freqHz / 1e3).toStringAsFixed(decimalPlaces)} kHz';
-    return '${freqHz.toStringAsFixed(decimalPlaces)} Hz';
-  }
-
   material.Widget _buildMarkerInfoRow() {
     if (isZeroSpan) return const material.SizedBox.shrink();
     final enabledMarkers = markers.where((m) => m.enabled).toList();
@@ -94,7 +87,7 @@ class SpectrumChart extends material.StatelessWidget {
         spacing: 32,
         runSpacing: 8,
         children: enabledMarkers.map((m) {
-          final freqStr = _formatFreqAutoUnit(m.freqHz);
+          final freqStr = formatMarkerFreqAutoUnit(m.freqHz);
           final y = _getYAt(m.freqHz);
           return material.Text(
             'M${m.id}  $freqStr  ${y.toStringAsFixed(2)} dBm',
@@ -117,7 +110,7 @@ class SpectrumChart extends material.StatelessWidget {
         .map((m) {
       return VerticalLine(
         x: m.freqHz,
-        color: material.Colors.red.withOpacity(0.5),
+        color: material.Colors.red.withValues(alpha: 0.5),
         strokeWidth: 1,
         dashArray: null,
       );
@@ -141,12 +134,12 @@ class SpectrumChart extends material.StatelessWidget {
                       (maxFreq - minFreq) > 0 ? (maxFreq - minFreq) / 10 : 1.0,
                   horizontalInterval: scalePerGrid,
                   getDrawingHorizontalLine: (value) => FlLine(
-                    color: material.Colors.white.withOpacity(0.1),
+                    color: material.Colors.white.withValues(alpha: 0.1),
                     strokeWidth: 1,
                     dashArray: [2, 2],
                   ),
                   getDrawingVerticalLine: (value) => FlLine(
-                    color: material.Colors.white.withOpacity(0.1),
+                    color: material.Colors.white.withValues(alpha: 0.1),
                     strokeWidth: 1,
                     dashArray: [2, 2],
                   ),
@@ -199,7 +192,7 @@ class SpectrumChart extends material.StatelessWidget {
                           );
                         }
                         return LineTooltipItem(
-                          '${_formatFreqAutoUnit(spot.x)}\n'
+                          '${formatFreqAutoUnit(spot.x, decimalPlaces: 3)}\n'
                           '${spot.y.toStringAsFixed(2)} dBm',
                           const material.TextStyle(
                             color: material.Colors.white,
@@ -218,7 +211,9 @@ class SpectrumChart extends material.StatelessWidget {
                 lineBarsData: [
                   LineChartBarData(
                     spots: data,
-                    isCurved: false,
+                    isCurved: traceSmoothingEnabled && !isZeroSpan,
+                    preventCurveOverShooting: true,
+                    curveSmoothness: 0.18,
                     color: material.Colors.yellow,
                     barWidth: 2,
                     dotData: const FlDotData(show: false),
@@ -369,7 +364,7 @@ class SpectrumChart extends material.StatelessWidget {
       final yValue = _getYAt(m.freqHz);
       return HorizontalLine(
         y: yValue,
-        color: material.Colors.white.withOpacity(0.3),
+        color: material.Colors.white.withValues(alpha: 0.3),
         strokeWidth: 0,
         dashArray: null,
         label: HorizontalLineLabel(
@@ -489,6 +484,16 @@ class _MarkerLabelPainter extends material.CustomPainter {
       fontWeight: material.FontWeight.bold,
       height: 1,
     );
+    const labelEdgePadding = 4.0;
+    const labelMarkerGap = 6.0;
+
+    material.TextPainter buildLabelPainter(String text) {
+      return material.TextPainter(
+        text: material.TextSpan(text: text, style: labelStyle),
+        textAlign: material.TextAlign.center,
+        textDirection: material.TextDirection.ltr,
+      )..layout();
+    }
 
     for (final marker in markers) {
       if (!marker.enabled ||
@@ -503,20 +508,26 @@ class _MarkerLabelPainter extends material.CustomPainter {
       final y =
           plotRect.bottom - (((yValue - minDbm) / dbmRange) * plotRect.height);
 
-      final textPainter = material.TextPainter(
-        text: material.TextSpan(text: 'M${marker.id}\n▼', style: labelStyle),
-        textAlign: material.TextAlign.center,
-        textDirection: material.TextDirection.ltr,
-      )..layout();
+      final abovePainter = buildLabelPainter('M${marker.id}\n\u25BC');
+      final paintAbove =
+          y - abovePainter.height - labelMarkerGap >= plotRect.top;
+      final textPainter = paintAbove
+          ? abovePainter
+          : buildLabelPainter('\u25B2\nM${marker.id}');
 
-      final dx = (x - textPainter.width / 2).clamp(
-        0.0,
-        (size.width - textPainter.width).clamp(0.0, size.width),
-      );
-      final dy = (y - textPainter.height - 6).clamp(
-        0.0,
-        (size.height - textPainter.height).clamp(0.0, size.height),
-      );
+      final minDx = plotRect.left + labelEdgePadding;
+      final maxDx = plotRect.right - labelEdgePadding - textPainter.width;
+      final preferredDx = x - textPainter.width / 2;
+      final dx =
+          maxDx < minDx ? minDx : preferredDx.clamp(minDx, maxDx).toDouble();
+
+      final minDy = plotRect.top + labelEdgePadding;
+      final maxDy = plotRect.bottom - labelEdgePadding - textPainter.height;
+      final preferredDy = paintAbove
+          ? y - textPainter.height - labelMarkerGap
+          : y + labelMarkerGap;
+      final dy =
+          maxDy < minDy ? minDy : preferredDy.clamp(minDy, maxDy).toDouble();
 
       textPainter.paint(canvas, material.Offset(dx, dy));
     }
