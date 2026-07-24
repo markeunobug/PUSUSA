@@ -1,0 +1,4 @@
+frame_index,timestamp,total_points,current_index,done,freq_hz,amp_dbm
+2,2,3,0,0,999995000,-39.620018
+3,2,3,1,0,1000000000,-44.679203
+4,2,3,2,1,1000005000,-46.536709

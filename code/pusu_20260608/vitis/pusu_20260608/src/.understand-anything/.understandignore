@@ -1,0 +1,12 @@
+# .understandignore - patterns for files/dirs to exclude from analysis
+# Syntax: same as .gitignore
+.git/
+Debug/
+Release/
+build/
+*.o
+*.elf
+*.map
+*.log
+.understand-anything/intermediate/
+.understand-anything/tmp/

@@ -32,6 +32,13 @@ static int protocol_sweep_control_handler(unsigned char action, const device_con
 static int protocol_rf_frontend_handler(const device_rf_frontend_config_t *config);
 static int protocol_phase_noise_handler(phase_noise_engine_action_t action,
                                         const phase_noise_config_t *config);
+static int protocol_capture_stream_smoke_handler(
+    u32 sample_count,
+    dma_capture_stream_smoke_result_t *result);
+static int protocol_capture_sg_smoke_handler(
+    u32 samples_per_bd,
+    u32 bd_count,
+    dma_capture_sg_smoke_result_t *result);
 static int protocol_phase_noise_data_callback(const phase_noise_data_t *point,
                                               void *context);
 static int protocol_phase_noise_status_callback(const phase_noise_status_t *status,
@@ -132,6 +139,10 @@ int main(void)
     device_protocol_set_sweep_control_handler(protocol_sweep_control_handler);
     device_protocol_set_rf_frontend_handler(protocol_rf_frontend_handler);
     device_protocol_set_phase_noise_handler(protocol_phase_noise_handler);
+    device_protocol_set_capture_stream_smoke_handler(
+        protocol_capture_stream_smoke_handler);
+    device_protocol_set_capture_sg_smoke_handler(
+        protocol_capture_sg_smoke_handler);
 
     (void)start_background_capture();
 
@@ -564,6 +575,65 @@ static int protocol_phase_noise_handler(phase_noise_engine_action_t action,
     default:
         return -1;
     }
+}
+
+static int protocol_capture_stream_smoke_handler(
+    u32 sample_count,
+    dma_capture_stream_smoke_result_t *result)
+{
+    int status;
+
+    if ((phase_noise_engine_is_active(&g_phase_noise_engine) != 0) ||
+        (sweep_engine_is_active(&g_sweep_engine) != 0)) {
+        if (result != 0) {
+            result->version = DMA_CAPTURE_STREAM_SMOKE_RESULT_VERSION;
+            result->result_code = DMA_CAPTURE_STREAM_SMOKE_BUSY;
+            result->requested_samples = sample_count;
+            result->transfer_bytes = sample_count * (u32)sizeof(u16);
+        }
+        return XST_FAILURE;
+    }
+
+    release_background_capture();
+    status = dma_capture_continuous_smoke_test(sample_count, result);
+    reset_and_resume_background_capture_if_idle();
+
+    if (status != XST_SUCCESS) {
+        g_dma_error_count++;
+    }
+
+    return status;
+}
+
+static int protocol_capture_sg_smoke_handler(
+    u32 samples_per_bd,
+    u32 bd_count,
+    dma_capture_sg_smoke_result_t *result)
+{
+    int status;
+
+    if ((phase_noise_engine_is_active(&g_phase_noise_engine) != 0) ||
+        (sweep_engine_is_active(&g_sweep_engine) != 0)) {
+        if (result != 0) {
+            result->version = DMA_CAPTURE_SG_SMOKE_RESULT_VERSION;
+            result->result_code = DMA_CAPTURE_SG_SMOKE_BUSY;
+            result->samples_per_bd = samples_per_bd;
+            result->bd_count = bd_count;
+            result->requested_samples = samples_per_bd * bd_count;
+            result->requested_bytes = result->requested_samples * (u32)sizeof(u16);
+        }
+        return XST_FAILURE;
+    }
+
+    release_background_capture();
+    status = dma_capture_sg_smoke_test(samples_per_bd, bd_count, result);
+    reset_and_resume_background_capture_if_idle();
+
+    if (status != XST_SUCCESS) {
+        g_dma_error_count++;
+    }
+
+    return status;
 }
 
 static int protocol_phase_noise_data_callback(const phase_noise_data_t *point,

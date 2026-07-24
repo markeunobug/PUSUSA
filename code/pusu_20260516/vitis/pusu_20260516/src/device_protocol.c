@@ -7,6 +7,7 @@
 #include "app_config.h"
 #include "profile_timer.h"
 #include "rf_frontend.h"
+#include "signal_processing.h"
 #include "sweep_plan.h"
 
 void ad8370_set_gain_code(unsigned char code);
@@ -32,6 +33,8 @@ void ad8370_set_gain_code(unsigned char code);
 #define CMD_START_PHASE_NOISE      0x10U
 #define CMD_STOP_PHASE_NOISE       0x11U
 #define CMD_GET_PHASE_NOISE_STATUS 0x12U
+#define CMD_CAPTURE_STREAM_SMOKE   0x13U
+#define CMD_CAPTURE_SG_SMOKE       0x14U
 
 
 #define CMD_ACK            0x81U
@@ -41,6 +44,8 @@ void ad8370_set_gain_code(unsigned char code);
 #define CMD_PROFILE_DATA   0x85U
 #define CMD_PHASE_NOISE_DATA   0x86U
 #define CMD_PHASE_NOISE_STATUS 0x87U
+#define CMD_CAPTURE_STREAM_SMOKE_RESULT 0x88U
+#define CMD_CAPTURE_SG_SMOKE_RESULT     0x89U
 
 
 #define ACK_OK             0x01U
@@ -57,6 +62,8 @@ void ad8370_set_gain_code(unsigned char code);
 #define PHASE_NOISE_CONFIG_PAYLOAD_SIZE 36U
 #define PHASE_NOISE_DATA_PAYLOAD_SIZE   42U
 #define PHASE_NOISE_STATUS_PAYLOAD_SIZE 64U
+#define CAPTURE_STREAM_SMOKE_RESULT_PAYLOAD_SIZE 76U
+#define CAPTURE_SG_SMOKE_RESULT_PAYLOAD_SIZE 100U
 #define UART_RX_DRAIN_LIMIT     4096U
 #define DEFAULT_POINT_COUNT     256U
 #define MIN_POINT_COUNT         8U
@@ -77,6 +84,8 @@ typedef struct {
     device_protocol_sweep_control_t sweep_control;
     device_protocol_rf_frontend_control_t rf_frontend_control;
     device_protocol_phase_noise_control_t phase_noise_control;
+    device_protocol_capture_stream_smoke_control_t capture_stream_smoke_control;
+    device_protocol_capture_sg_smoke_control_t capture_sg_smoke_control;
     spectrum_point_t spectrum_points[MAX_POINT_COUNT];
     unsigned char tx_buffer[TX_FRAME_MAX_SIZE];
     unsigned int stream_timestamp;
@@ -98,6 +107,10 @@ static void send_status(void);
 static void send_spectrum(void);
 static void send_rf_frontend_status(void);
 static void send_profile(void);
+static void send_capture_stream_smoke_result(
+    const dma_capture_stream_smoke_result_t *result);
+static void send_capture_sg_smoke_result(
+    const dma_capture_sg_smoke_result_t *result);
 
 static int start_sweep(void);
 static int stop_sweep(void);
@@ -119,6 +132,9 @@ static void write_u32_be(unsigned char *dst, unsigned int value);
 static void write_u32_le(unsigned char *dst, unsigned int value);
 static void write_f32_le(unsigned char *dst, float value);
 static void write_f64_le(unsigned char *dst, double value);
+static int append_signal_processing_peak_debug(unsigned char *dst,
+                                               unsigned short max_len,
+                                               unsigned short *io_len);
 static unsigned short read_u16_le(const unsigned char *src);
 static double read_f64_le(const unsigned char *src);
 static unsigned short sanitize_point_count(unsigned short value);
@@ -261,6 +277,17 @@ void device_protocol_set_phase_noise_handler(device_protocol_phase_noise_control
     g_protocol.phase_noise_control = handler;
 }
 
+void device_protocol_set_capture_stream_smoke_handler(
+    device_protocol_capture_stream_smoke_control_t handler)
+{
+    g_protocol.capture_stream_smoke_control = handler;
+}
+
+void device_protocol_set_capture_sg_smoke_handler(
+    device_protocol_capture_sg_smoke_control_t handler)
+{
+    g_protocol.capture_sg_smoke_control = handler;
+}
 void device_protocol_send_rf_frontend_status(void)
 {
     send_rf_frontend_status();
@@ -630,6 +657,74 @@ static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned 
             send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
         }
         break;
+    case CMD_CAPTURE_STREAM_SMOKE:
+        if ((length == 0U) || (length == 4U)) {
+            dma_capture_stream_smoke_result_t result;
+            u32 sample_count = 4096U;
+
+            if (length == 4U) {
+                sample_count = ((u32)data[0] << 24U) |
+                               ((u32)data[1] << 16U) |
+                               ((u32)data[2] << 8U) |
+                               (u32)data[3];
+            }
+
+            memset(&result, 0, sizeof(result));
+            result.version = DMA_CAPTURE_STREAM_SMOKE_RESULT_VERSION;
+            result.result_code = DMA_CAPTURE_STREAM_SMOKE_PL_UNAVAILABLE;
+            result.requested_samples = sample_count;
+            result.transfer_bytes = sample_count * (u32)sizeof(u16);
+
+            if ((g_protocol.capture_stream_smoke_control != 0) &&
+                (g_protocol.capture_stream_smoke_control(sample_count,
+                                                         &result) == XST_SUCCESS)) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+            send_capture_stream_smoke_result(&result);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
+    case CMD_CAPTURE_SG_SMOKE:
+        if ((length == 0U) || (length == 8U)) {
+            dma_capture_sg_smoke_result_t result;
+            u32 samples_per_bd = 4096U;
+            u32 bd_count = 4U;
+
+            if (length == 8U) {
+                samples_per_bd = ((u32)data[0] << 24U) |
+                                 ((u32)data[1] << 16U) |
+                                 ((u32)data[2] << 8U) |
+                                 (u32)data[3];
+                bd_count = ((u32)data[4] << 24U) |
+                           ((u32)data[5] << 16U) |
+                           ((u32)data[6] << 8U) |
+                           (u32)data[7];
+            }
+
+            memset(&result, 0, sizeof(result));
+            result.version = DMA_CAPTURE_SG_SMOKE_RESULT_VERSION;
+            result.result_code = DMA_CAPTURE_SG_SMOKE_UNSUPPORTED;
+            result.samples_per_bd = samples_per_bd;
+            result.bd_count = bd_count;
+            result.requested_samples = samples_per_bd * bd_count;
+            result.requested_bytes = result.requested_samples * (u32)sizeof(u16);
+
+            if ((g_protocol.capture_sg_smoke_control != 0) &&
+                (g_protocol.capture_sg_smoke_control(samples_per_bd,
+                                                     bd_count,
+                                                     &result) == XST_SUCCESS)) {
+                send_ack(cmd, ACK_OK, ERR_NONE);
+            } else {
+                send_ack(cmd, ACK_FAIL, ERR_INTERNAL);
+            }
+            send_capture_sg_smoke_result(&result);
+        } else {
+            send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        }
+        break;
     default:
         send_ack(cmd, ACK_FAIL, ERR_BAD_CMD);
         break;
@@ -738,9 +833,132 @@ static void send_profile(void)
         return;
     }
 
+    if (append_signal_processing_peak_debug(&g_protocol.tx_buffer[4],
+                                             (unsigned short)(TX_FRAME_MAX_SIZE - 7U),
+                                             &payload_length) != 0) {
+        send_ack(CMD_GET_PROFILE, ACK_FAIL, ERR_INTERNAL);
+        return;
+    }
+
     send_frame_inplace(CMD_PROFILE_DATA, payload_length);
 }
 
+static void send_capture_stream_smoke_result(
+    const dma_capture_stream_smoke_result_t *result)
+{
+    unsigned char payload[CAPTURE_STREAM_SMOKE_RESULT_PAYLOAD_SIZE];
+    unsigned int offset = 0U;
+
+    if (result == 0) {
+        return;
+    }
+
+    write_u32_be(&payload[offset], result->version);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->result_code);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->requested_samples);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->transfer_bytes);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->dma_completed);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->dma_error);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->timed_out);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->wait_loops);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->raw_status);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->status_error_code);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->total_sample_count_lo);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->total_sample_count_hi);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->packet_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->overflow_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->backpressure_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->s2mm_dmacr);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->s2mm_dmasr);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->irq_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->last_irq_status);
+
+    send_frame(CMD_CAPTURE_STREAM_SMOKE_RESULT,
+               payload,
+               CAPTURE_STREAM_SMOKE_RESULT_PAYLOAD_SIZE);
+}
+static void send_capture_sg_smoke_result(
+    const dma_capture_sg_smoke_result_t *result)
+{
+    unsigned char payload[CAPTURE_SG_SMOKE_RESULT_PAYLOAD_SIZE];
+    unsigned int offset = 0U;
+
+    if (result == 0) {
+        return;
+    }
+
+    write_u32_be(&payload[offset], result->version);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->result_code);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->samples_per_bd);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->bd_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->requested_samples);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->requested_bytes);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->completed_bd_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->completed_bytes);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->dma_completed);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->dma_error);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->timed_out);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->wait_loops);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->first_bd_status);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->last_bd_status);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->raw_status);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->status_error_code);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->total_sample_count_lo);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->total_sample_count_hi);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->packet_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->overflow_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->backpressure_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->s2mm_dmacr);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->s2mm_dmasr);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->irq_count);
+    offset += 4U;
+    write_u32_be(&payload[offset], result->last_irq_status);
+
+    send_frame(CMD_CAPTURE_SG_SMOKE_RESULT,
+               payload,
+               CAPTURE_SG_SMOKE_RESULT_PAYLOAD_SIZE);
+}
 //·¢ËÍÆµÆ×
 static void send_spectrum(void)
 {
@@ -1027,6 +1245,70 @@ static void write_f64_le(unsigned char *dst, double value)
     for (i = 0U; i < 8U; i++) {
         dst[i] = conv.b[i];
     }
+}
+
+static int append_signal_processing_peak_debug(unsigned char *dst,
+                                                unsigned short max_len,
+                                                unsigned short *io_len)
+{
+    signal_processing_peak_debug_t dbg;
+    unsigned int offset;
+    const unsigned int ext_len = 72U;
+
+    if ((dst == 0) || (io_len == 0)) {
+        return -1;
+    }
+    if ((unsigned int)*io_len + ext_len > (unsigned int)max_len) {
+        return -1;
+    }
+
+    signal_processing_get_peak_debug(&dbg);
+    offset = (unsigned int)*io_len;
+
+    dst[offset++] = 'D';
+    dst[offset++] = 'S';
+    dst[offset++] = 'P';
+    dst[offset++] = 'K';
+    dst[offset++] = dbg.version;
+    dst[offset++] = (unsigned char)ext_len;
+    dst[offset++] = dbg.current_rbw_mode;
+    dst[offset++] = 0U;
+
+    write_u32_be(&dst[offset], dbg.point_index);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.pre_rbw_count);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.post_rbw_count);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.pre_rbw_power_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.post_rbw_power_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.pre_rbw_peak_freq_hz);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.pre_rbw_peak_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.post_rbw_peak_freq_hz);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.post_rbw_peak_dbfs);
+    offset += 4U;
+    write_u32_be(&dst[offset], dbg.ddc_sample_count);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.ddc_power_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.ddc_dc_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.ddc_pos10k_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.ddc_neg10k_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.ddc_pos100k_dbfs);
+    offset += 4U;
+    write_f32_le(&dst[offset], dbg.ddc_neg100k_dbfs);
+    offset += 4U;
+
+    *io_len = (unsigned short)offset;
+    return 0;
 }
 
 static unsigned short read_u16_le(const unsigned char *src)

@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Generate first-pass RBW R=130 validation FIR coefficients.
+
+This is a narrow validation helper for the temporary 10 kHz RBW experiment
+where the mode uses CIC R=130, N=5, so Fs_out is 1 MHz.
+"""
+
+from __future__ import annotations
+
+import csv
+import math
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+from scipy.signal import firwin, freqz
+
+
+ROOT = Path(__file__).resolve().parents[1]
+OUT_DIR = ROOT / "docs" / "rbw_filter_analysis" / "r130_validation"
+ADC_FS_HZ = 130_000_000.0
+FS_OUT_HZ = 1_000_000.0
+CIC_R = 130
+CIC_N = 5
+
+
+@dataclass(frozen=True)
+class Design:
+    mode: str
+    rbw_hz: float
+    taps: int
+    cutoff_hz: float
+    kaiser_beta: float
+
+
+DESIGNS = (
+    Design("10K", 10_000.0, 256, 6_500.0, 6.0),
+)
+
+
+def cic_mag(freq_hz: np.ndarray) -> np.ndarray:
+    freq_hz = np.asarray(freq_hz, dtype=np.float64)
+    numerator = np.sin(np.pi * freq_hz * CIC_R / ADC_FS_HZ)
+    denominator = CIC_R * np.sin(np.pi * freq_hz / ADC_FS_HZ)
+    response = np.ones_like(freq_hz)
+    mask = np.abs(denominator) > 1e-30
+    response[mask] = np.abs(numerator[mask] / denominator[mask]) ** CIC_N
+    return response
+
+
+def db20(mag: np.ndarray | float) -> np.ndarray | float:
+    return 20.0 * np.log10(np.maximum(mag, 1e-300))
+
+
+def design_fir(design: Design) -> np.ndarray:
+    coeffs = firwin(
+        design.taps,
+        design.cutoff_hz,
+        window=("kaiser", design.kaiser_beta),
+        fs=FS_OUT_HZ,
+        pass_zero="lowpass",
+    )
+    return coeffs / np.sum(coeffs)
+
+
+def total_mag(freq_hz: np.ndarray, coeffs: np.ndarray) -> np.ndarray:
+    _, h = freqz(coeffs, worN=np.asarray(freq_hz, dtype=np.float64), fs=FS_OUT_HZ)
+    return cic_mag(np.asarray(freq_hz, dtype=np.float64)) * np.abs(h)
+
+
+def find_bandwidth(freq_hz: np.ndarray, mag: np.ndarray, db_down: float) -> float:
+    target = 10.0 ** (-db_down / 20.0)
+    below = np.flatnonzero(mag <= target)
+    if below.size == 0:
+        return float("nan")
+    idx = int(below[0])
+    if idx == 0:
+        return float(freq_hz[0])
+    x0, x1 = float(freq_hz[idx - 1]), float(freq_hz[idx])
+    y0, y1 = float(mag[idx - 1]), float(mag[idx])
+    if y1 == y0:
+        return x1
+    return x0 + (target - y0) * (x1 - x0) / (y1 - y0)
+
+
+def analyze(design: Design, coeffs: np.ndarray) -> dict[str, float | str | int]:
+    enbw_grid = np.linspace(0.0, FS_OUT_HZ / 2.0, 40_001)
+    enbw_mag = total_mag(enbw_grid, coeffs)
+    enbw_hz = 2.0 * float(np.trapezoid(enbw_mag * enbw_mag, enbw_grid))
+
+    response_grid = np.linspace(0.0, min(FS_OUT_HZ / 2.0, 12.0 * design.rbw_hz), 12_001)
+    response_mag = total_mag(response_grid, coeffs)
+    passband_freq = np.linspace(0.0, 0.4 * design.rbw_hz, 401)
+    passband_db = db20(total_mag(passband_freq, coeffs))
+
+    row: dict[str, float | str | int] = {
+        "mode": design.mode,
+        "cic_r": CIC_R,
+        "cic_n": CIC_N,
+        "fs_out_hz": FS_OUT_HZ,
+        "rbw_hz": design.rbw_hz,
+        "taps": design.taps,
+        "design_method": "kaiser",
+        "cutoff_hz": design.cutoff_hz,
+        "kaiser_beta": design.kaiser_beta,
+        "enbw_hz": enbw_hz,
+        "enbw_over_rbw": enbw_hz / design.rbw_hz,
+        "correction_db": 10.0 * math.log10(enbw_hz / design.rbw_hz),
+        "passband_flatness_db": float(np.max(np.abs(passband_db - passband_db[0]))),
+        "bw_3db_hz": find_bandwidth(response_grid, response_mag, 3.01029995664),
+        "bw_6db_hz": find_bandwidth(response_grid, response_mag, 6.0),
+    }
+    for factor in (0.5, 1.0, 2.0, 5.0, 10.0):
+        field = str(factor).replace(".", "p")
+        row[f"att_{field}_x_rbw_db"] = float(db20(total_mag(np.array([factor * design.rbw_hz]), coeffs))[0])
+    for freq in (40_000.0, 40_100.0, 100_000.0, 100_100.0):
+        row[f"att_{int(freq)}hz_db"] = float(db20(total_mag(np.array([freq]), coeffs))[0])
+    return row
+
+
+def write_outputs(rows: list[dict[str, float | str | int]], coeffs_by_mode: dict[str, np.ndarray]) -> None:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    metrics_path = OUT_DIR / "rbw_r130_validation_metrics.csv"
+    with metrics_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    coeff_path = OUT_DIR / "rbw_r130_validation_coefficients_float.csv"
+    with coeff_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["mode", "tap_index", "coefficient"])
+        for design in DESIGNS:
+            coeffs = coeffs_by_mode[design.mode]
+            for idx, coeff in enumerate(coeffs):
+                writer.writerow([design.mode, idx, f"{coeff:.17g}"])
+
+    c_path = OUT_DIR / "rbw_r130_validation_coefficients.c.inc"
+    with c_path.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("/* Generated by tools/rbw_r130_validation_coeffs.py. */\n")
+        for design in DESIGNS:
+            array_name = f"rbw_coeffs_{design.mode.lower()}"
+            f.write(f"\nstatic const float {array_name}[{design.taps}] = {{\n")
+            coeffs = coeffs_by_mode[design.mode]
+            for start in range(0, len(coeffs), 4):
+                chunk = coeffs[start : start + 4]
+                f.write("    " + ", ".join(f"{value:.12g}f" for value in chunk))
+                f.write(",\n" if start + 4 < len(coeffs) else "\n")
+            f.write("};\n")
+
+    md_path = OUT_DIR / "rbw_r130_validation_summary.md"
+    with md_path.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("# RBW R=130 Validation FIR Summary\n\n")
+        f.write("Generated by `tools/rbw_r130_validation_coeffs.py`.\n\n")
+        f.write("The validation mode uses `CIC R=130, N=5`, so `Fs_out=1 MHz`.\n\n")
+        f.write("| Mode | Taps | Method | ENBW | ENBW/RBW | Correction | Flatness | 2x | 5x | 40 kHz | 40.1 kHz | Note |\n")
+        f.write("| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n")
+        for row in rows:
+            note = "first-pass validation"
+            line = (
+                "| {mode} | {taps} | kaiser cutoff={cutoff_hz:.0f} beta={kaiser_beta:.1f} | "
+                "{enbw_hz:.2f} Hz | {enbw_over_rbw:.4f} | {correction_db:+.2f} dB | "
+                "{passband_flatness_db:.3f} dB | {att_2p0_x_rbw_db:.2f} dB | "
+                "{att_5p0_x_rbw_db:.2f} dB | {att_40000hz_db:.2f} dB | "
+                "{att_40100hz_db:.2f} dB | " + note + " |\n"
+            )
+            f.write(line.format(**row))
+
+
+def main() -> int:
+    rows: list[dict[str, float | str | int]] = []
+    coeffs_by_mode: dict[str, np.ndarray] = {}
+    for design in DESIGNS:
+        coeffs = design_fir(design)
+        coeffs_by_mode[design.mode] = coeffs
+        rows.append(analyze(design, coeffs))
+    write_outputs(rows, coeffs_by_mode)
+    for row in rows:
+        print(
+            "{mode}: Fs_out={fs_out_hz:.0f} Hz taps={taps} ENBW={enbw_hz:.2f} Hz "
+            "ENBW/RBW={enbw_over_rbw:.4f} 2x={att_2p0_x_rbw_db:.2f} dB "
+            "5x={att_5p0_x_rbw_db:.2f} dB".format(**row)
+        )
+    print(f"Wrote {OUT_DIR}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

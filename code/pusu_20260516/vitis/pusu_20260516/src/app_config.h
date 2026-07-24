@@ -20,10 +20,10 @@
 #define TRANSFER_LENGTH     (FFT_SIZE * 2U)
 #define DMA_MAX_SAMPLES     65536U
 #define DMA_MAX_BYTES       (DMA_MAX_SAMPLES * 2U)
-/* AXI DMA S2MM length width is 16 bits in the exported BSP, so one simple
- * transfer must stay below 65536 bytes. Seven FFT blocks is the largest safe
- * block-aligned sweep transfer: 7 * 4096 samples * 2 bytes = 57344 bytes. */
-#define DMA_SWEEP_MAX_BLOCKS_PER_TRANSFER   7U
+/* Stage-1 PL capture control accepts up to 16384 samples per frame. Keep sweep
+ * simple transfers block-aligned and inside that controlled-frame limit:
+ * 4 * 4096 samples * 2 bytes = 32768 bytes. */
+#define DMA_SWEEP_MAX_BLOCKS_PER_TRANSFER   4U
 #define DMA_SWEEP_MAX_SAMPLES_PER_TRANSFER  (DMA_SWEEP_MAX_BLOCKS_PER_TRANSFER * FFT_SIZE)
 #define DMA_SIMPLE_MAX_BYTES                65535U
 #define SPECTRUM_BINS       (FFT_SIZE / 2U)
@@ -36,7 +36,7 @@
 
 #define DDC_BYPASS          0
 #define ADC_SAMPLE_RATE_HZ  130000000.0f
-#define DDC_IF_HZ           50000000.0f
+#define DDC_IF_HZ           40000000.0f
 #define UART_BASEADDR       XPAR_XUARTPS_0_BASEADDR
 
 #define AD8370_GPIO_DEVICE_ID   XPAR_AXI_GPIO_0_DEVICE_ID
@@ -111,6 +111,11 @@
 #define AMPLITUDE_FREQ_CAL_DB_3       0.0f
 
 #define SIGNAL_PROCESSING_VERBOSE 0
+/* DDC tone diagnostics for leakage bring-up. Disable for normal sweep speed. */
+#define SIGNAL_PROCESSING_DDC_DEBUG_ENABLE 0
+/* Expensive diagnostic peak search for RBW bring-up. Keep disabled for normal
+ * sweep speed; it scans -200 kHz..+200 kHz with per-sample sin/cos work. */
+#define SIGNAL_PROCESSING_PEAK_SEARCH_ENABLE 0
 #define SWEEP_PROFILE_ENABLE 1
 
 /* ADC full-scale reference: LTC2208 2.25 Vpp diff 閳拷 1:2 balun 閳拷 50鎯� */
@@ -133,18 +138,42 @@
 #define RBW_100K_CIC_N        5U
 #define RBW_30K_CIC_R         433U
 #define RBW_30K_CIC_N         5U
-#define RBW_10K_CIC_R         1300U
+#define RBW_10K_CIC_R         130U
 #define RBW_10K_CIC_N         5U
-#define RBW_1K_CIC_R          13000U
+#define RBW_1K_CIC_R          1300U
 #define RBW_1K_CIC_N          5U
 
+/* Validation switch: bypass CIC only for RBW_MODE_10K and use a direct
+ * low-pass FIR decimator from 130 MHz to 1 MHz instead. */
+#define RBW_10K_USE_FIR_DECIMATOR       1
+#define RBW_10K_FIR_DECIMATOR_R         130U
+#define RBW_10K_FIR_DECIMATOR_TAPS      8192U
+#define RBW_10K_FIR_DECIMATOR_CUTOFF_HZ 50000.0f
+#define RBW_10K_FIR_DECIMATOR_BETA      6.0f
+
+/* Temporary 10 kHz RBW DDC synthesis mode for decimator diagnosis.
+ * 0 = real ADC/DDC data
+ * 1 = pure complex +100 kHz tone
+ * 2 = ideal real-signal DDC model: +100 kHz plus -80.100 MHz image
+ * 3 = mode 2, but reset synthetic phase at each DMA/FFT block boundary
+ * Return this to 0 after the alias/image diagnostic is complete. */
+#define RBW_10K_SYNTH_DDC_MODE_REAL_ADC         0
+#define RBW_10K_SYNTH_DDC_MODE_COMPLEX_100K     1
+#define RBW_10K_SYNTH_DDC_MODE_REAL_IMAGE       2
+#define RBW_10K_SYNTH_DDC_MODE_REAL_IMAGE_BLOCK_RESET 3
+#define RBW_10K_SYNTH_DDC_MODE                  RBW_10K_SYNTH_DDC_MODE_REAL_IMAGE_BLOCK_RESET
+#define RBW_10K_SYNTH_DDC_MAIN_FREQ_HZ          100000.0f
+#define RBW_10K_SYNTH_DDC_IMAGE_FREQ_HZ         (-80100000.0f)
+#define RBW_10K_SYNTH_DDC_MAIN_AMPLITUDE        0.5f
+#define RBW_10K_SYNTH_DDC_IMAGE_AMPLITUDE       0.5f
+
 /* Compensating FIR filter taps per RBW mode */
-#define RBW_1M_FIR_TAPS       64U
+#define RBW_1M_FIR_TAPS       96U
 #define RBW_300K_FIR_TAPS     128U
 #define RBW_100K_FIR_TAPS     128U
 #define RBW_30K_FIR_TAPS      256U
 #define RBW_10K_FIR_TAPS      256U
-#define RBW_1K_FIR_TAPS       256U
+#define RBW_1K_FIR_TAPS       768U
 
 /* Decimated output target per sweep point (post-CIC, post-FIR-transient).
  * Chosen for ~0.6-1.0 dB power measurement accuracy (锜� 閳拷 4.34/閳瓊_indep).
@@ -153,7 +182,7 @@
 #define RBW_300K_OBSERVE_POINTS 384U
 #define RBW_100K_OBSERVE_POINTS 384U
 #define RBW_30K_OBSERVE_POINTS  256U
-#define RBW_10K_OBSERVE_POINTS  256U
+#define RBW_10K_OBSERVE_POINTS  2560U
 #define RBW_1K_OBSERVE_POINTS   256U
 
 /* FIR transient skip: ceil(fir_taps/2) per mode */
@@ -165,10 +194,10 @@
 #define RBW_1K_SKIP_POINTS      128U
 
 /* Accumulation buffer: holds decimated CIC output across DMA transfers.
- * Max needed = observe + skip + fir_taps:
- *   RBW_10K: 256 + 128 + 256 = 640
- *   RBW_1K:  256 + 128 + 256 = 640 */
-#define ACCUM_BUFFER_SIZE     768U
+ * Scheme B / R=130 validation max needed = observe + skip + fir_taps:
+ *   RBW_10K: 2560 + 128 + 256 = 2944
+ *   RBW_1K:   256 + 128 + 768 = 1152 */
+#define ACCUM_BUFFER_SIZE     2944U
 
 typedef enum {
     RBW_MODE_10K = 0,

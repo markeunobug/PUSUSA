@@ -1,5 +1,6 @@
 #include "signal_processing.h"
 #include "cic_decimator.h"
+#include "rbw_filter_coeffs.h"
 
 #include <math.h>
 #include <string.h>
@@ -27,12 +28,43 @@ static float32_t accum_q[ACCUM_BUFFER_SIZE];
 static int       accum_count;
 static int       accum_target;
 static u32       current_dma_samples = FFT_SIZE;
+static float32_t current_decimated_sample_rate_hz = ADC_SAMPLE_RATE_HZ;
+static signal_processing_peak_debug_t peak_debug = {1U};
+static signal_processing_peak_debug_t last_peak_debug = {1U};
+static u8 peak_debug_valid = 0U;
 
-static float32_t comp_fir_coeffs[RBW_1K_FIR_TAPS];
+typedef struct {
+    float32_t freq_hz;
+    float32_t acc_re;
+    float32_t acc_im;
+    float32_t osc_re;
+    float32_t osc_im;
+    float32_t step_re;
+    float32_t step_im;
+} ddc_debug_tone_t;
+
+static ddc_debug_tone_t ddc_debug_tones[5];
+static float32_t ddc_debug_power_sum;
+static u32       ddc_debug_sample_count;
+#if RBW_10K_SYNTH_DDC_MODE != RBW_10K_SYNTH_DDC_MODE_REAL_ADC
+static float32_t rbw10k_synth_ddc_main_phase;
+static float32_t rbw10k_synth_ddc_image_phase;
+#endif
+
+static const float32_t *comp_fir_coeffs;
 static float32_t comp_fir_state[ACCUM_BUFFER_SIZE + RBW_1K_FIR_TAPS];
 static arm_fir_instance_f32 comp_fir_instance;
 static int       comp_fir_taps;
 static int       comp_fir_skip;
+
+#if RBW_10K_USE_FIR_DECIMATOR
+static float32_t rbw10k_fir_decim_coeffs[RBW_10K_FIR_DECIMATOR_TAPS];
+static float32_t rbw10k_fir_decim_hist_i[RBW_10K_FIR_DECIMATOR_TAPS];
+static float32_t rbw10k_fir_decim_hist_q[RBW_10K_FIR_DECIMATOR_TAPS];
+static int       rbw10k_fir_decim_write;
+static int       rbw10k_fir_decim_phase;
+static int       rbw10k_fir_decim_coeffs_ready;
+#endif
 
 /* ── NCO precomputed lookup table ─────────────────────────────────── */
 static float32_t nco_cos_table[FFT_SIZE];
@@ -66,10 +98,176 @@ static void fft_report_peak(void);
 static void nco_table_build(float32_t if_hz);
 static void ddc_mix_to_time_domain(volatile u16 *rx_buffer);
 static void ddc_mix_to_time_domain_sweep(volatile u16 *rx_buffer);
+#if RBW_10K_SYNTH_DDC_MODE != RBW_10K_SYNTH_DDC_MODE_REAL_ADC
+static void ddc_generate_synthetic_10k_block(void);
+#endif
 static void sweep_configure_for_rbw(rbw_mode_t mode);
-static void compensating_fir_init(float32_t cutoff_hz, int taps);
 static void apply_compensating_fir(void);
 static float32_t measure_power_dbfs_accumulated(void);
+static float32_t measure_complex_power_dbfs(const float32_t *i_data,
+                                            const float32_t *q_data,
+                                            int len);
+static float32_t measure_complex_tone_dbfs(const float32_t *i_data,
+                                           const float32_t *q_data,
+                                           int len,
+                                           float32_t freq_hz,
+                                           float32_t sample_rate_hz);
+static void measure_complex_peak_dbfs(const float32_t *i_data,
+                                      const float32_t *q_data,
+                                      int len,
+                                      float32_t sample_rate_hz,
+                                      float32_t *out_peak_freq_hz,
+                                      float32_t *out_peak_dbfs);
+static void ddc_debug_reset(void);
+#if SIGNAL_PROCESSING_DDC_DEBUG_ENABLE
+static void ddc_debug_accumulate_current_block(void);
+static void ddc_debug_finalize(signal_processing_peak_debug_t *out_debug);
+static float32_t ddc_debug_tone_dbfs(const ddc_debug_tone_t *tone,
+                                     u32 sample_count);
+#endif
+#if RBW_10K_USE_FIR_DECIMATOR
+static float32_t rbw10k_fir_decimator_i0(float32_t x);
+static void rbw10k_fir_decimator_build_coeffs(void);
+static void rbw10k_fir_decimator_reset(void);
+static int rbw10k_fir_decimator_process(const float32_t *i_in,
+                                         const float32_t *q_in,
+                                         int in_len,
+                                         float32_t *i_out,
+                                         float32_t *q_out,
+                                         int out_capacity);
+#endif
+
+static void ddc_debug_reset(void)
+{
+    static const float32_t freqs_hz[5] = {
+        0.0f, 10000.0f, -10000.0f, 100000.0f, -100000.0f
+    };
+    int i;
+
+    ddc_debug_power_sum = 0.0f;
+    ddc_debug_sample_count = 0U;
+    for (i = 0; i < 5; i++) {
+        float32_t step = 2.0f * PI * freqs_hz[i] / ADC_SAMPLE_RATE_HZ;
+
+        ddc_debug_tones[i].freq_hz = freqs_hz[i];
+        ddc_debug_tones[i].acc_re = 0.0f;
+        ddc_debug_tones[i].acc_im = 0.0f;
+        ddc_debug_tones[i].osc_re = 1.0f;
+        ddc_debug_tones[i].osc_im = 0.0f;
+        ddc_debug_tones[i].step_re = arm_cos_f32(step);
+        ddc_debug_tones[i].step_im = arm_sin_f32(step);
+    }
+
+    peak_debug.ddc_sample_count = 0U;
+    peak_debug.ddc_power_dbfs = 0.0f;
+    peak_debug.ddc_dc_dbfs = 0.0f;
+    peak_debug.ddc_pos10k_dbfs = 0.0f;
+    peak_debug.ddc_neg10k_dbfs = 0.0f;
+    peak_debug.ddc_pos100k_dbfs = 0.0f;
+    peak_debug.ddc_neg100k_dbfs = 0.0f;
+}
+
+#if SIGNAL_PROCESSING_DDC_DEBUG_ENABLE
+static void ddc_debug_accumulate_current_block(void)
+{
+    uint32_t i;
+    int tone_idx;
+
+    for (i = 0U; i < FFT_SIZE; i++) {
+        float32_t sample_i = time_domain_real[i];
+        float32_t sample_q = time_domain_imag[i];
+
+        ddc_debug_power_sum += (sample_i * sample_i) + (sample_q * sample_q);
+        for (tone_idx = 0; tone_idx < 5; tone_idx++) {
+            ddc_debug_tone_t *tone = &ddc_debug_tones[tone_idx];
+            float32_t osc_re = tone->osc_re;
+            float32_t osc_im = tone->osc_im;
+            float32_t next_re;
+            float32_t next_im;
+
+            tone->acc_re += (sample_i * osc_re) + (sample_q * osc_im);
+            tone->acc_im += (sample_q * osc_re) - (sample_i * osc_im);
+
+            next_re = (osc_re * tone->step_re) - (osc_im * tone->step_im);
+            next_im = (osc_im * tone->step_re) + (osc_re * tone->step_im);
+            tone->osc_re = next_re;
+            tone->osc_im = next_im;
+        }
+    }
+
+    ddc_debug_sample_count += FFT_SIZE;
+    for (tone_idx = 0; tone_idx < 5; tone_idx++) {
+        float32_t mag_sq = (ddc_debug_tones[tone_idx].osc_re *
+                            ddc_debug_tones[tone_idx].osc_re) +
+                           (ddc_debug_tones[tone_idx].osc_im *
+                            ddc_debug_tones[tone_idx].osc_im);
+        if (mag_sq > EPSILON) {
+            float32_t inv_mag = 1.0f / sqrtf(mag_sq);
+            ddc_debug_tones[tone_idx].osc_re *= inv_mag;
+            ddc_debug_tones[tone_idx].osc_im *= inv_mag;
+        }
+    }
+}
+
+static float32_t ddc_debug_tone_dbfs(const ddc_debug_tone_t *tone,
+                                     u32 sample_count)
+{
+    float32_t acc_re;
+    float32_t acc_im;
+    float32_t tone_power;
+
+    if ((tone == 0) || (sample_count == 0U)) {
+        return -120.0f;
+    }
+
+    acc_re = tone->acc_re / (float32_t)sample_count;
+    acc_im = tone->acc_im / (float32_t)sample_count;
+    tone_power = (acc_re * acc_re) + (acc_im * acc_im);
+    if (tone_power < EPSILON) {
+        tone_power = EPSILON;
+    }
+
+    return 10.0f * log10f(tone_power / FULL_SCALE_COMPLEX_POWER);
+}
+
+static void ddc_debug_finalize(signal_processing_peak_debug_t *out_debug)
+{
+    float32_t mean_power;
+
+    if (out_debug == 0) {
+        return;
+    }
+
+    out_debug->ddc_sample_count = ddc_debug_sample_count;
+    if (ddc_debug_sample_count == 0U) {
+        out_debug->ddc_power_dbfs = -120.0f;
+        out_debug->ddc_dc_dbfs = -120.0f;
+        out_debug->ddc_pos10k_dbfs = -120.0f;
+        out_debug->ddc_neg10k_dbfs = -120.0f;
+        out_debug->ddc_pos100k_dbfs = -120.0f;
+        out_debug->ddc_neg100k_dbfs = -120.0f;
+        return;
+    }
+
+    mean_power = ddc_debug_power_sum / (float32_t)ddc_debug_sample_count;
+    if (mean_power < EPSILON) {
+        mean_power = EPSILON;
+    }
+
+    out_debug->ddc_power_dbfs =
+        10.0f * log10f(mean_power / FULL_SCALE_COMPLEX_POWER);
+    out_debug->ddc_dc_dbfs = ddc_debug_tone_dbfs(&ddc_debug_tones[0],
+                                                 ddc_debug_sample_count);
+    out_debug->ddc_pos10k_dbfs = ddc_debug_tone_dbfs(&ddc_debug_tones[1],
+                                                     ddc_debug_sample_count);
+    out_debug->ddc_neg10k_dbfs = ddc_debug_tone_dbfs(&ddc_debug_tones[2],
+                                                     ddc_debug_sample_count);
+    out_debug->ddc_pos100k_dbfs = ddc_debug_tone_dbfs(&ddc_debug_tones[3],
+                                                      ddc_debug_sample_count);
+    out_debug->ddc_neg100k_dbfs = ddc_debug_tone_dbfs(&ddc_debug_tones[4],
+                                                      ddc_debug_sample_count);
+}
+#endif
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
@@ -83,6 +281,7 @@ void signal_processing_init(void)
 void signal_processing_apply_rbw_mode(rbw_mode_t mode)
 {
     current_rbw_mode = mode;
+    peak_debug.current_rbw_mode = (u8)mode;
 
     /* FFT-path legacy LPF for signal_processing_process_frame() */
     rbw_lpf_init(rbw_mode_cutoff_hz(mode));
@@ -193,15 +392,38 @@ void signal_processing_accumulate_dma(volatile u16 *rx_buffer, u32 dma_samples)
 
     for (offset = 0; offset < dma_samples; offset += FFT_SIZE) {
         sweep_profile_begin(SWEEP_PROFILE_SECTION_ACC_DDC);
-        ddc_mix_to_time_domain_sweep(rx_buffer + offset);
+#if RBW_10K_SYNTH_DDC_MODE != RBW_10K_SYNTH_DDC_MODE_REAL_ADC
+        if (current_rbw_mode == RBW_MODE_10K) {
+            ddc_generate_synthetic_10k_block();
+        } else
+#endif
+        {
+            ddc_mix_to_time_domain_sweep(rx_buffer + offset);
+        }
         sweep_profile_end(SWEEP_PROFILE_SECTION_ACC_DDC);
 
+#if SIGNAL_PROCESSING_DDC_DEBUG_ENABLE
+        ddc_debug_accumulate_current_block();
+#endif
+
         sweep_profile_begin(SWEEP_PROFILE_SECTION_ACC_CIC);
-        produced = cic_decimator_process(time_domain_real, time_domain_imag,
-                                         (int)FFT_SIZE,
-                                         accum_i + accum_count,
-                                         accum_q + accum_count,
-                                         (int)ACCUM_BUFFER_SIZE - accum_count);
+#if RBW_10K_USE_FIR_DECIMATOR
+        if (current_rbw_mode == RBW_MODE_10K) {
+            produced = rbw10k_fir_decimator_process(time_domain_real,
+                                                    time_domain_imag,
+                                                    (int)FFT_SIZE,
+                                                    accum_i + accum_count,
+                                                    accum_q + accum_count,
+                                                    (int)ACCUM_BUFFER_SIZE - accum_count);
+        } else
+#endif
+        {
+            produced = cic_decimator_process(time_domain_real, time_domain_imag,
+                                             (int)FFT_SIZE,
+                                             accum_i + accum_count,
+                                             accum_q + accum_count,
+                                             (int)ACCUM_BUFFER_SIZE - accum_count);
+        }
         sweep_profile_end(SWEEP_PROFILE_SECTION_ACC_CIC);
         accum_count += produced;
     }
@@ -220,22 +442,83 @@ int signal_processing_measure_accumulated_power_dbm(float *out_power_dbm)
         return -1;
     }
 
+#if SIGNAL_PROCESSING_DDC_DEBUG_ENABLE
+    ddc_debug_finalize(&peak_debug);
+#else
+    peak_debug.ddc_sample_count = 0U;
+    peak_debug.ddc_power_dbfs = 0.0f;
+    peak_debug.ddc_dc_dbfs = 0.0f;
+    peak_debug.ddc_pos10k_dbfs = 0.0f;
+    peak_debug.ddc_neg10k_dbfs = 0.0f;
+    peak_debug.ddc_pos100k_dbfs = 0.0f;
+    peak_debug.ddc_neg100k_dbfs = 0.0f;
+#endif
+    peak_debug.pre_rbw_count = (u32)accum_count;
+    peak_debug.pre_rbw_power_dbfs = measure_complex_power_dbfs(accum_i, accum_q, accum_count);
+#if SIGNAL_PROCESSING_PEAK_SEARCH_ENABLE
+    measure_complex_peak_dbfs(accum_i, accum_q, accum_count,
+                              current_decimated_sample_rate_hz,
+                              &peak_debug.pre_rbw_peak_freq_hz,
+                              &peak_debug.pre_rbw_peak_dbfs);
+#else
+    peak_debug.pre_rbw_peak_freq_hz = 0.0f;
+    peak_debug.pre_rbw_peak_dbfs = peak_debug.pre_rbw_power_dbfs;
+#endif
+
     apply_compensating_fir();
     power_dbfs = measure_power_dbfs_accumulated();
     *out_power_dbm = power_dbfs + ADC_INPUT_FULL_SCALE_DBM;
+
+    peak_debug.post_rbw_count = (u32)accum_count;
+    peak_debug.post_rbw_power_dbfs = power_dbfs;
+#if SIGNAL_PROCESSING_PEAK_SEARCH_ENABLE
+    measure_complex_peak_dbfs(accum_i, accum_q, accum_count,
+                              current_decimated_sample_rate_hz,
+                              &peak_debug.post_rbw_peak_freq_hz,
+                              &peak_debug.post_rbw_peak_dbfs);
+#else
+    peak_debug.post_rbw_peak_freq_hz = 0.0f;
+    peak_debug.post_rbw_peak_dbfs = power_dbfs;
+#endif
+    last_peak_debug = peak_debug;
+    peak_debug_valid = 1U;
     return 0;
 }
 
 void signal_processing_reset_accumulation(void)
 {
     accum_count = 0;
+    peak_debug.pre_rbw_count = 0U;
+    peak_debug.post_rbw_count = 0U;
+    ddc_debug_reset();
     sweep_nco_phase = 0.0f;
+#if RBW_10K_SYNTH_DDC_MODE != RBW_10K_SYNTH_DDC_MODE_REAL_ADC
+    rbw10k_synth_ddc_main_phase = 0.0f;
+    rbw10k_synth_ddc_image_phase = 0.0f;
+#endif
     cic_decimator_reset();
+#if RBW_10K_USE_FIR_DECIMATOR
+    rbw10k_fir_decimator_reset();
+#endif
 }
 
 u32 signal_processing_get_dma_samples(void)
 {
     return current_dma_samples;
+}
+
+void signal_processing_set_debug_point_index(u32 point_index)
+{
+    peak_debug.point_index = point_index;
+}
+
+void signal_processing_get_peak_debug(signal_processing_peak_debug_t *out_debug)
+{
+    if (out_debug != 0) {
+        *out_debug = (peak_debug_valid != 0U)
+            ? last_peak_debug
+            : peak_debug;
+    }
 }
 
 /* ── Spectrum read-back (FFT path) ───────────────────────────────── */
@@ -341,72 +624,226 @@ static int get_rbw_skip_points(rbw_mode_t mode)
 static void sweep_configure_for_rbw(rbw_mode_t mode)
 {
     const rbw_mode_config_t *cfg = get_rbw_config(mode);
+    const rbw_filter_config_t *filter_cfg = rbw_filter_get_config(mode);
 
     cic_decimator_init(cfg->cic_n, cfg->cic_r);
     accum_count = 0;
+    peak_debug.pre_rbw_count = 0U;
+    peak_debug.post_rbw_count = 0U;
+    ddc_debug_reset();
     sweep_nco_phase = 0.0f;
+#if RBW_10K_SYNTH_DDC_MODE != RBW_10K_SYNTH_DDC_MODE_REAL_ADC
+    rbw10k_synth_ddc_main_phase = 0.0f;
+    rbw10k_synth_ddc_image_phase = 0.0f;
+#endif
+#if RBW_10K_USE_FIR_DECIMATOR
+    rbw10k_fir_decimator_reset();
+    if (mode == RBW_MODE_10K) {
+        rbw10k_fir_decimator_build_coeffs();
+    }
+#endif
 
-    /* Compensating FIR: RBW lowpass at the decimated rate.
-     * fs_out = ADC_SAMPLE_RATE_HZ / cfg->cic_r */
-    compensating_fir_init(rbw_mode_cutoff_hz(mode), cfg->fir_taps);
+    comp_fir_coeffs = filter_cfg->coeffs;
+    comp_fir_taps = (int)filter_cfg->tap_count;
 
     comp_fir_skip = get_rbw_skip_points(mode);
 
     /* Accumulation target: observe_points + skip + fir_taps margin */
-    accum_target = (int)cfg->accum_target_obs + comp_fir_skip + cfg->fir_taps;
+    accum_target = (int)cfg->accum_target_obs + comp_fir_skip + comp_fir_taps;
     if (accum_target > (int)ACCUM_BUFFER_SIZE) {
         accum_target = (int)ACCUM_BUFFER_SIZE;
     }
+#if RBW_10K_USE_FIR_DECIMATOR
+    if (mode == RBW_MODE_10K) {
+        current_decimated_sample_rate_hz = ADC_SAMPLE_RATE_HZ /
+            (float32_t)RBW_10K_FIR_DECIMATOR_R;
+    } else
+#endif
+    {
+        current_decimated_sample_rate_hz = ADC_SAMPLE_RATE_HZ / (float32_t)cfg->cic_r;
+    }
 
-    /* The PL stream is validated as one FFT_SIZE frame per DMA trigger.
-     * Requesting several frames in one simple-transfer can complete while later
-     * blocks contain no useful samples; for RBW_300K the first valid CIC outputs
-     * are then discarded by FIR transient/skip, leaving the EPSILON floor.
-     * Keep each DMA transfer to one frame and let the sweep state machine rearm
-     * until accum_target is reached.
+    /* Choose the largest useful controlled frame while staying inside the PL
+     * Stage-1 max frame length. This reduces PS rearm overhead without moving
+     * to continuous/cyclic DMA yet.
      */
-    current_dma_samples = FFT_SIZE;
+    {
+        u32 blocks_per_transfer = 1U;
+        u32 decimated_per_block;
+
+#if RBW_10K_USE_FIR_DECIMATOR
+        if (mode == RBW_MODE_10K) {
+            decimated_per_block = FFT_SIZE / RBW_10K_FIR_DECIMATOR_R;
+        } else
+#endif
+        {
+            decimated_per_block = FFT_SIZE / (u32)cfg->cic_r;
+        }
+
+        if (decimated_per_block > 0U) {
+            blocks_per_transfer =
+                ((u32)accum_target + decimated_per_block - 1U) /
+                decimated_per_block;
+        }
+        if (blocks_per_transfer < 1U) {
+            blocks_per_transfer = 1U;
+        }
+        if (blocks_per_transfer > DMA_SWEEP_MAX_BLOCKS_PER_TRANSFER) {
+            blocks_per_transfer = DMA_SWEEP_MAX_BLOCKS_PER_TRANSFER;
+        }
+
+        current_dma_samples = blocks_per_transfer * FFT_SIZE;
+    }
+
+#if SIGNAL_PROCESSING_VERBOSE && RBW_10K_USE_FIR_DECIMATOR
+    if (mode == RBW_MODE_10K) {
+        xil_printf("RBW_10K_DECIMATOR,FIR,R=%d,TAPS=%d,CUTOFF_HZ=%d\r\n",
+                   (int)RBW_10K_FIR_DECIMATOR_R,
+                   (int)RBW_10K_FIR_DECIMATOR_TAPS,
+                   (int)RBW_10K_FIR_DECIMATOR_CUTOFF_HZ);
+    }
+#endif
 }
 
 /* ── Static: compensating FIR design ─────────────────────────────── */
 
-static void compensating_fir_init(float32_t cutoff_hz, int taps)
-{
-    int n;
-    const rbw_mode_config_t *cfg = get_rbw_config(current_rbw_mode);
-    const float32_t fs_out = ADC_SAMPLE_RATE_HZ / (float32_t)cfg->cic_r;
-    const float32_t fc_norm = cutoff_hz / fs_out;
-    const int mid = taps / 2;
-    float32_t coeff_sum = 0.0f;
+/* ── Static: apply compensating FIR to accumulated data ──────────── */
 
-    for (n = 0; n < taps; n++) {
-        int k = n - mid;
+#if RBW_10K_USE_FIR_DECIMATOR
+static float32_t rbw10k_fir_decimator_i0(float32_t x)
+{
+    float32_t ax = fabsf(x);
+    float32_t y;
+
+    if (ax < 3.75f) {
+        y = x / 3.75f;
+        y *= y;
+        return 1.0f + y * (3.5156229f + y * (3.0899424f +
+               y * (1.2067492f + y * (0.2659732f +
+               y * (0.0360768f + y * 0.0045813f)))));
+    }
+
+    y = 3.75f / ax;
+    return (expf(ax) / sqrtf(ax)) *
+           (0.39894228f + y * (0.01328592f + y * (0.00225319f +
+           y * (-0.00157565f + y * (0.00916281f + y * (-0.02057706f +
+           y * (0.02635537f + y * (-0.01647633f + y * 0.00392377f))))))));
+}
+
+static void rbw10k_fir_decimator_build_coeffs(void)
+{
+    uint32_t n;
+    float32_t coeff_sum = 0.0f;
+    const float32_t cutoff_norm =
+        RBW_10K_FIR_DECIMATOR_CUTOFF_HZ / ADC_SAMPLE_RATE_HZ;
+    const float32_t center =
+        0.5f * (float32_t)(RBW_10K_FIR_DECIMATOR_TAPS - 1U);
+    const float32_t i0_beta =
+        rbw10k_fir_decimator_i0(RBW_10K_FIR_DECIMATOR_BETA);
+
+    if (rbw10k_fir_decim_coeffs_ready) {
+        return;
+    }
+
+    for (n = 0U; n < RBW_10K_FIR_DECIMATOR_TAPS; n++) {
+        float32_t k = (float32_t)n - center;
         float32_t sinc_val;
+        float32_t rel = k / center;
+        float32_t window_arg = 1.0f - rel * rel;
         float32_t window;
 
-        if (k == 0) {
-            sinc_val = 2.0f * fc_norm;
+        if (fabsf(k) < 1.0e-6f) {
+            sinc_val = 2.0f * cutoff_norm;
         } else {
-            float32_t x = 2.0f * PI * fc_norm * (float32_t)k;
-            sinc_val = arm_sin_f32(x) / (PI * (float32_t)k);
+            float32_t x = 2.0f * PI * cutoff_norm * k;
+            sinc_val = arm_sin_f32(x) / (PI * k);
         }
 
-        window = 0.54f - 0.46f * arm_cos_f32(2.0f * PI * (float32_t)n
-                                              / (float32_t)(taps - 1));
-        comp_fir_coeffs[n] = sinc_val * window;
-        coeff_sum += comp_fir_coeffs[n];
+        if (window_arg < 0.0f) {
+            window_arg = 0.0f;
+        }
+        window = rbw10k_fir_decimator_i0(
+                     RBW_10K_FIR_DECIMATOR_BETA * sqrtf(window_arg)) /
+                 i0_beta;
+
+        rbw10k_fir_decim_coeffs[n] = sinc_val * window;
+        coeff_sum += rbw10k_fir_decim_coeffs[n];
     }
 
     if (fabsf(coeff_sum) > EPSILON) {
-        for (n = 0; n < taps; n++) {
-            comp_fir_coeffs[n] /= coeff_sum;
+        for (n = 0U; n < RBW_10K_FIR_DECIMATOR_TAPS; n++) {
+            rbw10k_fir_decim_coeffs[n] /= coeff_sum;
         }
     }
 
-    comp_fir_taps = taps;
+    rbw10k_fir_decim_coeffs_ready = 1;
 }
 
-/* ── Static: apply compensating FIR to accumulated data ──────────── */
+static void rbw10k_fir_decimator_reset(void)
+{
+    memset(rbw10k_fir_decim_hist_i, 0, sizeof(rbw10k_fir_decim_hist_i));
+    memset(rbw10k_fir_decim_hist_q, 0, sizeof(rbw10k_fir_decim_hist_q));
+    rbw10k_fir_decim_write = 0;
+    rbw10k_fir_decim_phase = 0;
+}
+
+static int rbw10k_fir_decimator_process(const float32_t *i_in,
+                                         const float32_t *q_in,
+                                         int in_len,
+                                         float32_t *i_out,
+                                         float32_t *q_out,
+                                         int out_capacity)
+{
+    int i;
+    int produced = 0;
+
+    rbw10k_fir_decimator_build_coeffs();
+
+    for (i = 0; i < in_len; i++) {
+        rbw10k_fir_decim_hist_i[rbw10k_fir_decim_write] = i_in[i];
+        rbw10k_fir_decim_hist_q[rbw10k_fir_decim_write] = q_in[i];
+
+        rbw10k_fir_decim_write++;
+        if (rbw10k_fir_decim_write >= (int)RBW_10K_FIR_DECIMATOR_TAPS) {
+            rbw10k_fir_decim_write = 0;
+        }
+
+        rbw10k_fir_decim_phase++;
+        if (rbw10k_fir_decim_phase >= (int)RBW_10K_FIR_DECIMATOR_R) {
+            rbw10k_fir_decim_phase = 0;
+
+            if (produced < out_capacity) {
+                uint32_t tap;
+                int hist_index = rbw10k_fir_decim_write - 1;
+                float32_t acc_i_val = 0.0f;
+                float32_t acc_q_val = 0.0f;
+
+                if (hist_index < 0) {
+                    hist_index = (int)RBW_10K_FIR_DECIMATOR_TAPS - 1;
+                }
+
+                for (tap = 0U; tap < RBW_10K_FIR_DECIMATOR_TAPS; tap++) {
+                    float32_t coeff = rbw10k_fir_decim_coeffs[tap];
+
+                    acc_i_val += coeff * rbw10k_fir_decim_hist_i[hist_index];
+                    acc_q_val += coeff * rbw10k_fir_decim_hist_q[hist_index];
+
+                    hist_index--;
+                    if (hist_index < 0) {
+                        hist_index = (int)RBW_10K_FIR_DECIMATOR_TAPS - 1;
+                    }
+                }
+
+                i_out[produced] = acc_i_val;
+                q_out[produced] = acc_q_val;
+                produced++;
+            }
+        }
+    }
+
+    return produced;
+}
+#endif
 
 static void apply_compensating_fir(void)
 {
@@ -484,6 +921,112 @@ static float32_t measure_power_dbfs_accumulated(void)
     return 10.0f * log10f(mean_power / FULL_SCALE_COMPLEX_POWER);
 }
 
+static float32_t measure_complex_power_dbfs(const float32_t *i_data,
+                                            const float32_t *q_data,
+                                            int len)
+{
+    int i;
+    float32_t power_sum = 0.0f;
+    float32_t mean_power;
+
+    if ((i_data == 0) || (q_data == 0) || (len < 1)) {
+        return -120.0f;
+    }
+
+    for (i = 0; i < len; i++) {
+        power_sum += i_data[i] * i_data[i];
+        power_sum += q_data[i] * q_data[i];
+    }
+
+    mean_power = power_sum / (float32_t)len;
+    if (mean_power < EPSILON) {
+        mean_power = EPSILON;
+    }
+
+    return 10.0f * log10f(mean_power / FULL_SCALE_COMPLEX_POWER);
+}
+
+static float32_t measure_complex_tone_dbfs(const float32_t *i_data,
+                                           const float32_t *q_data,
+                                           int len,
+                                           float32_t freq_hz,
+                                           float32_t sample_rate_hz)
+{
+    int i;
+    float32_t acc_re = 0.0f;
+    float32_t acc_im = 0.0f;
+    float32_t phase = 0.0f;
+    float32_t phase_step;
+    float32_t tone_power;
+
+    if ((i_data == 0) || (q_data == 0) || (len < 1) || (sample_rate_hz <= 0.0f)) {
+        return -120.0f;
+    }
+
+    phase_step = 2.0f * PI * freq_hz / sample_rate_hz;
+    for (i = 0; i < len; i++) {
+        float32_t c = arm_cos_f32(phase);
+        float32_t sn = arm_sin_f32(phase);
+
+        acc_re += (i_data[i] * c) + (q_data[i] * sn);
+        acc_im += (q_data[i] * c) - (i_data[i] * sn);
+
+        phase += phase_step;
+        if (phase >= 2.0f * PI) {
+            phase -= 2.0f * PI;
+        } else if (phase <= -2.0f * PI) {
+            phase += 2.0f * PI;
+        }
+    }
+
+    acc_re /= (float32_t)len;
+    acc_im /= (float32_t)len;
+    tone_power = (acc_re * acc_re) + (acc_im * acc_im);
+    if (tone_power < EPSILON) {
+        tone_power = EPSILON;
+    }
+
+    return 10.0f * log10f(tone_power / FULL_SCALE_COMPLEX_POWER);
+}
+
+static void measure_complex_peak_dbfs(const float32_t *i_data,
+                                      const float32_t *q_data,
+                                      int len,
+                                      float32_t sample_rate_hz,
+                                      float32_t *out_peak_freq_hz,
+                                      float32_t *out_peak_dbfs)
+{
+    float32_t freq_hz;
+    float32_t best_freq_hz = 0.0f;
+    float32_t best_dbfs = -120.0f;
+
+    if (out_peak_freq_hz != 0) {
+        *out_peak_freq_hz = 0.0f;
+    }
+    if (out_peak_dbfs != 0) {
+        *out_peak_dbfs = -120.0f;
+    }
+    if ((i_data == 0) || (q_data == 0) || (len < 1) || (sample_rate_hz <= 0.0f)) {
+        return;
+    }
+
+    for (freq_hz = -200000.0f; freq_hz <= 200000.0f; freq_hz += 2000.0f) {
+        float32_t tone_dbfs = measure_complex_tone_dbfs(i_data, q_data, len,
+                                                        freq_hz, sample_rate_hz);
+        if (tone_dbfs > best_dbfs) {
+            best_dbfs = tone_dbfs;
+            best_freq_hz = freq_hz;
+        }
+    }
+
+    if (out_peak_freq_hz != 0) {
+        *out_peak_freq_hz = best_freq_hz;
+    }
+    if (out_peak_dbfs != 0) {
+        *out_peak_dbfs = best_dbfs;
+    }
+}
+
 /* ── Static: NCO lookup table (precomputed, ~32 KB) ───────────────── */
 
 static void nco_table_build(float32_t if_hz)
@@ -539,6 +1082,68 @@ static void ddc_mix_to_time_domain_sweep(volatile u16 *rx_buffer)
         sweep_nco_phase -= 2.0f * PI;
     }
 }
+
+#if RBW_10K_SYNTH_DDC_MODE != RBW_10K_SYNTH_DDC_MODE_REAL_ADC
+/* Temporary diagnostic synthesis before the 10 kHz FIR decimator.
+ * Mode 2 models a real 40.100 MHz ADC tone mixed by a 40 MHz complex NCO:
+ * +100 kHz desired term plus the -80.100 MHz image term.
+ * Mode 3 resets synthetic phase at every DMA/FFT block boundary to simulate
+ * DMA rearm / block-to-block phase discontinuity; FIR decimator state is not
+ * reset here, so this tests discontinuous input with continuous filter
+ * history. */
+static void ddc_generate_synthetic_10k_block(void)
+{
+    uint32_t i;
+    float32_t main_phase = rbw10k_synth_ddc_main_phase;
+    float32_t image_phase = rbw10k_synth_ddc_image_phase;
+    const float32_t main_step =
+        2.0f * PI * RBW_10K_SYNTH_DDC_MAIN_FREQ_HZ / ADC_SAMPLE_RATE_HZ;
+    const float32_t image_step =
+        2.0f * PI * RBW_10K_SYNTH_DDC_IMAGE_FREQ_HZ / ADC_SAMPLE_RATE_HZ;
+    const uint8_t include_image =
+        (RBW_10K_SYNTH_DDC_MODE == RBW_10K_SYNTH_DDC_MODE_REAL_IMAGE) ||
+        (RBW_10K_SYNTH_DDC_MODE == RBW_10K_SYNTH_DDC_MODE_REAL_IMAGE_BLOCK_RESET);
+
+    if (RBW_10K_SYNTH_DDC_MODE ==
+        RBW_10K_SYNTH_DDC_MODE_REAL_IMAGE_BLOCK_RESET) {
+        main_phase = 0.0f;
+        image_phase = 0.0f;
+    }
+
+    for (i = 0; i < FFT_SIZE; i++) {
+        float32_t sample_i =
+            RBW_10K_SYNTH_DDC_MAIN_AMPLITUDE * arm_cos_f32(main_phase);
+        float32_t sample_q =
+            RBW_10K_SYNTH_DDC_MAIN_AMPLITUDE * arm_sin_f32(main_phase);
+
+        if (include_image) {
+            sample_i += RBW_10K_SYNTH_DDC_IMAGE_AMPLITUDE *
+                        arm_cos_f32(image_phase);
+            sample_q += RBW_10K_SYNTH_DDC_IMAGE_AMPLITUDE *
+                        arm_sin_f32(image_phase);
+        }
+
+        time_domain_real[i] = sample_i;
+        time_domain_imag[i] = sample_q;
+
+        main_phase += main_step;
+        image_phase += image_step;
+        if (main_phase >= 2.0f * PI) {
+            main_phase -= 2.0f * PI;
+        } else if (main_phase < 0.0f) {
+            main_phase += 2.0f * PI;
+        }
+        if (image_phase >= 2.0f * PI) {
+            image_phase -= 2.0f * PI;
+        } else if (image_phase < 0.0f) {
+            image_phase += 2.0f * PI;
+        }
+    }
+
+    rbw10k_synth_ddc_main_phase = main_phase;
+    rbw10k_synth_ddc_image_phase = image_phase;
+}
+#endif
 
 /* ══════════════════════════════════════════════════════════════════�? * Below: FFT-path static implementations (unchanged from original)
  * ══════════════════════════════════════════════════════════════════�?*/

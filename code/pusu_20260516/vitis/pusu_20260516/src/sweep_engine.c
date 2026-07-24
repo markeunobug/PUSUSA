@@ -127,6 +127,7 @@ int sweep_engine_poll(sweep_engine_t *engine)
         signal_processing_apply_rbw_mode(engine->plan.rbw_mode);
         sweep_profile_set_rbw_mode((uint8_t)engine->plan.rbw_mode);
         engine->current_point = 0U;
+        signal_processing_set_debug_point_index(engine->current_point);
         engine->state = SWEEP_ENGINE_STATE_SET_LO1;
         return SWEEP_ENGINE_OK;
 
@@ -139,6 +140,7 @@ int sweep_engine_poll(sweep_engine_t *engine)
         }
 
         engine->current_rf_hz = sweep_plan_get_rf_hz(&engine->plan, engine->current_point);
+        signal_processing_set_debug_point_index(engine->current_point);
         sweep_profile_begin(SWEEP_PROFILE_SECTION_POINT_TOTAL);
         sweep_profile_begin(SWEEP_PROFILE_SECTION_SET_LO1);
         if (lo_control_set_lo1_for_rf_hz(engine->current_rf_hz) != XST_SUCCESS) {

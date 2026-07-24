@@ -52,3 +52,35 @@ platform clean
 platform generate
 platform clean
 platform generate
+platform clean
+platform generate
+platform clean
+platform generate
+platform clean
+platform generate
+platform active {system_wrapper_1}
+platform config -updatehw {C:/learning/pusu_V2/code/pusu_20260516/vitis/system_wrapper.xsa}
+platform generate -domains 
+platform config -updatehw {C:/learning/pusu_V2/code/pusu_20260516/vitis/system_wrapper.xsa}
+platform generate -domains 
+platform config -updatehw {C:/learning/pusu_V2/code/pusu_20260516/vitis/system_wrapper.xsa}
+platform generate -domains 
+platform config -updatehw {C:/learning/pusu_V2/code/pusu_20260516/vitis/system_wrapper.xsa}
+platform clean
+platform generate
+platform config -updatehw {C:/learning/pusu_V2/code/pusu_20260516/vitis/system_wrapper.xsa}
+platform generate -domains 
+platform config -updatehw {C:/learning/pusu_V2/code/pusu_20260516/vitis/system_wrapper.xsa}
+platform generate -domains 
+platform clean
+platform generate
+platform config -updatehw {C:/learning/pusu_V2/code/pusu_20260516/vitis/system_wrapper.xsa}
+platform generate -domains 
+platform active {system_wrapper_1}
+platform config -updatehw {C:/learning/pusu_V2/code/pusu_20260516/vitis/system_wrapper.xsa}
+platform clean
+platform generate
+platform clean
+platform generate
+platform config -updatehw {C:/learning/pusu_V2/code/pusu_20260516/vitis/system_wrapper.xsa}
+platform generate -domains standalone_ps7_cortexa9_0 

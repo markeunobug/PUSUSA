@@ -5,6 +5,7 @@
 
 #include "xstatus.h"
 
+#include "dma_capture.h"
 #include "phase_noise_engine.h"
 
 typedef struct {
@@ -92,6 +93,13 @@ typedef int (*device_protocol_rf_frontend_control_t)(
 typedef int (*device_protocol_phase_noise_control_t)(
     phase_noise_engine_action_t action,
     const phase_noise_config_t *config);
+typedef int (*device_protocol_capture_stream_smoke_control_t)(
+    u32 sample_count,
+    dma_capture_stream_smoke_result_t *result);
+typedef int (*device_protocol_capture_sg_smoke_control_t)(
+    u32 samples_per_bd,
+    u32 bd_count,
+    dma_capture_sg_smoke_result_t *result);
 
 #define DEVICE_PROTOCOL_SWEEP_START 1U
 #define DEVICE_PROTOCOL_SWEEP_STOP  2U
@@ -106,6 +114,10 @@ void device_protocol_set_status_provider(device_protocol_status_provider_t provi
 void device_protocol_set_sweep_control_handler(device_protocol_sweep_control_t handler);
 void device_protocol_set_rf_frontend_handler(device_protocol_rf_frontend_control_t handler);
 void device_protocol_set_phase_noise_handler(device_protocol_phase_noise_control_t handler);
+void device_protocol_set_capture_stream_smoke_handler(
+    device_protocol_capture_stream_smoke_control_t handler);
+void device_protocol_set_capture_sg_smoke_handler(
+    device_protocol_capture_sg_smoke_control_t handler);
 int device_protocol_stream_spectrum_point(uint32_t freq_hz,
                                           float amp_dbm,
                                           uint16_t total_points,

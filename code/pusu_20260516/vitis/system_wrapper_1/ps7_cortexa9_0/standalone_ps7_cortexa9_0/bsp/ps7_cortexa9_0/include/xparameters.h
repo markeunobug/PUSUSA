@@ -231,6 +231,11 @@
 #define XPAR_PS7_SLCR_0_S_AXI_HIGHADDR 0xF8000FFF
 
 
+/* Peripheral Definitions for peripheral ADC_CAPTURE_CONTROL_0 */
+#define XPAR_ADC_CAPTURE_CONTROL_0_BASEADDR 0x43C00000
+#define XPAR_ADC_CAPTURE_CONTROL_0_HIGHADDR 0x43C0FFFF
+
+
 /******************************************************************/
 
 
@@ -268,6 +273,11 @@
 
 
 
+
+
+/* Canonical Definitions for peripheral ADC_CAPTURE_CONTROL_0 */
+#define XPAR_ADC_CAPTURE_CONTROL_AXI_0_BASEADDR 0x43C00000
+#define XPAR_ADC_CAPTURE_CONTROL_AXI_0_HIGHADDR 0x43C0FFFF
 
 
 /******************************************************************/

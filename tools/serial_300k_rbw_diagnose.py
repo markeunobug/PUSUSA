@@ -20,6 +20,7 @@ CMD_SET_AMPLITUDE = 0x02
 CMD_SET_BW = 0x03
 CMD_SET_SWEEP = 0x05
 CMD_GET_SPECTRUM = 0x06
+CMD_GET_STATUS = 0x07
 CMD_STOP_SWEEP = 0x0A
 CMD_SET_VGA_GAIN = 0x0B
 CMD_SET_RF_FRONTEND = 0x0C
@@ -28,6 +29,7 @@ CMD_GET_PROFILE = 0x0E
 
 CMD_ACK = 0x81
 CMD_SPECTRUM_DATA = 0x82
+CMD_STATUS_DATA = 0x83
 CMD_RF_FRONTEND_STATUS = 0x84
 CMD_PROFILE_DATA = 0x85
 
@@ -64,6 +66,8 @@ VGA_CODES = {
     "30": 0xD0,
     "34": 0xFF,
 }
+
+NOMINAL_IF_HZ = 40.0e6
 
 
 @dataclass
@@ -207,6 +211,41 @@ def describe_frame(cmd: int, payload: bytes, frame_index: int) -> str:
             f"lna={payload[0]} path={payload[1]} atten_code={payload[2]} "
             f"gpio=0x{payload[3]:02X} error={payload[4]}"
         )
+    if cmd == CMD_STATUS_DATA and len(payload) >= 59:
+        temperature_c = struct.unpack("<d", payload[0:8])[0]
+        desc = (
+            "STATUS "
+            f"temp={temperature_c:.1f}C battery={payload[8]} error={payload[9]} "
+            f"dma_start={struct.unpack('>I', payload[10:14])[0]} "
+            f"dma_error={struct.unpack('>I', payload[14:18])[0]} "
+            f"frame_ready={struct.unpack('>I', payload[18:22])[0]} "
+            f"process_frame={struct.unpack('>I', payload[22:26])[0]} "
+            f"spectrum_valid={payload[26]} "
+            f"s2mm_dmacr=0x{struct.unpack('>I', payload[27:31])[0]:08X} "
+            f"s2mm_dmasr=0x{struct.unpack('>I', payload[31:35])[0]:08X} "
+            f"dma_irq={struct.unpack('>I', payload[35:39])[0]} "
+            f"last_irq=0x{struct.unpack('>I', payload[39:43])[0]:08X} "
+            f"uart_bad={struct.unpack('>I', payload[43:47])[0]} "
+            f"uart_crc={struct.unpack('>I', payload[47:51])[0]} "
+            f"uart_overrun={struct.unpack('>I', payload[51:55])[0]} "
+            f"uart_resync={struct.unpack('>I', payload[55:59])[0]}"
+        )
+        if len(payload) >= 103:
+            desc += (
+                " PL "
+                f"avail={payload[59]} mode={payload[60]} out={payload[61]} "
+                f"status=0x{struct.unpack('>I', payload[63:67])[0]:08X} "
+                f"fs={struct.unpack('>I', payload[67:71])[0]} "
+                f"decim={struct.unpack('>I', payload[71:75])[0]} "
+                f"frame_words={struct.unpack('>I', payload[75:79])[0]} "
+                f"fmt=0x{struct.unpack('>I', payload[79:83])[0]:08X} "
+                f"ver=0x{struct.unpack('>I', payload[83:87])[0]:08X} "
+                f"in={struct.unpack('>I', payload[87:91])[0]} "
+                f"out_count={struct.unpack('>I', payload[91:95])[0]} "
+                f"drop={struct.unpack('>I', payload[95:99])[0]} "
+                f"err={struct.unpack('>I', payload[99:103])[0]}"
+            )
+        return desc
     if cmd == CMD_PROFILE_DATA and len(payload) >= 24:
         version = payload[0]
         enabled = payload[1]
@@ -216,11 +255,59 @@ def describe_frame(cmd: int, payload: bytes, frame_index: int) -> str:
         point_count = struct.unpack(">I", payload[12:16])[0]
         dma_rearm_count = struct.unpack(">I", payload[16:20])[0]
         section_count = struct.unpack(">H", payload[20:22])[0]
+        base_len = 24 + section_count * 30
+        dsp_debug = ""
+        if len(payload) >= base_len + 44 and payload[base_len:base_len + 4] == b"DSPK":
+            o = base_len
+            ext_len = payload[o + 5]
+            dsp_debug = (
+                " DSP_PEAK "
+                f"version={payload[o + 4]} ext_len={ext_len} "
+                f"current_rbw_mode={payload[o + 6]} "
+                f"point_index={struct.unpack('>I', payload[o + 8:o + 12])[0]} "
+                f"pre_count={struct.unpack('>I', payload[o + 12:o + 16])[0]} "
+                f"post_count={struct.unpack('>I', payload[o + 16:o + 20])[0]} "
+                f"pre_power_dbfs={struct.unpack('<f', payload[o + 20:o + 24])[0]:.2f} "
+                f"post_power_dbfs={struct.unpack('<f', payload[o + 24:o + 28])[0]:.2f} "
+                f"pre_peak_freq_hz={struct.unpack('<f', payload[o + 28:o + 32])[0]:+.0f} "
+                f"pre_peak_dbfs={struct.unpack('<f', payload[o + 32:o + 36])[0]:.2f} "
+                f"post_peak_freq_hz={struct.unpack('<f', payload[o + 36:o + 40])[0]:+.0f} "
+                f"post_peak_dbfs={struct.unpack('<f', payload[o + 40:o + 44])[0]:.2f}"
+            )
+            if len(payload) >= base_len + 72 and ext_len >= 72:
+                dsp_debug += (
+                    " DDC "
+                    f"ddc_count={struct.unpack('>I', payload[o + 44:o + 48])[0]} "
+                    f"ddc_power_dbfs={struct.unpack('<f', payload[o + 48:o + 52])[0]:.2f} "
+                    f"ddc_dc_dbfs={struct.unpack('<f', payload[o + 52:o + 56])[0]:.2f} "
+                    f"ddc_pos10k_dbfs={struct.unpack('<f', payload[o + 56:o + 60])[0]:.2f} "
+                    f"ddc_neg10k_dbfs={struct.unpack('<f', payload[o + 60:o + 64])[0]:.2f} "
+                    f"ddc_pos100k_dbfs={struct.unpack('<f', payload[o + 64:o + 68])[0]:.2f} "
+                    f"ddc_neg100k_dbfs={struct.unpack('<f', payload[o + 68:o + 72])[0]:.2f}"
+                )
+            if len(payload) >= base_len + 112 and ext_len >= 112:
+                dsp_debug += (
+                    " SWEEP "
+                    f"state={payload[o + 72]} "
+                    f"err={payload[o + 73]} "
+                    f"frame_ready={payload[o + 74]} "
+                    f"dma_err={payload[o + 75]} "
+                    f"wait={struct.unpack('>I', payload[o + 76:o + 80])[0]} "
+                    f"dma_start={struct.unpack('>I', payload[o + 80:o + 84])[0]} "
+                    f"dmasr=0x{struct.unpack('>I', payload[o + 84:o + 88])[0]:08X} "
+                    f"last_irq=0x{struct.unpack('>I', payload[o + 88:o + 92])[0]:08X} "
+                    f"pl_out_arm={struct.unpack('>I', payload[o + 92:o + 96])[0]} "
+                    f"pl_out_now={struct.unpack('>I', payload[o + 96:o + 100])[0]} "
+                    f"accum={struct.unpack('>I', payload[o + 100:o + 104])[0]} "
+                    f"target={struct.unpack('>I', payload[o + 104:o + 108])[0]} "
+                    f"bytes={struct.unpack('>I', payload[o + 108:o + 112])[0]}"
+                )
         return (
             "PROFILE "
             f"version={version} enabled={enabled} rbw_mode={rbw_mode} "
             f"cps={counts_per_second} sweeps={sweep_count} "
             f"points={point_count} dma_rearms={dma_rearm_count} sections={section_count}"
+            f"{dsp_debug}"
         )
     if cmd == CMD_SPECTRUM_DATA:
         points = parse_spectrum_payload(payload, frame_index)
@@ -388,6 +475,50 @@ def default_csv_path() -> Path:
     return Path("tools") / f"serial_300k_rbw_capture_{stamp}.csv"
 
 
+def apply_fixed_rf_if_mapping(args: argparse.Namespace) -> str | None:
+    has_mapping_arg = (
+        args.rf_input_hz is not None
+        or args.target_if_hz is not None
+        or args.target_if_offset_hz is not None
+    )
+    if not has_mapping_arg:
+        return None
+
+    if args.rf_input_hz is None:
+        raise ValueError("--rf-input-hz is required when using IF mapping")
+    if args.target_if_hz is not None and args.target_if_offset_hz is not None:
+        raise ValueError("Use only one of --target-if-hz and --target-if-offset-hz")
+
+    if args.target_if_hz is not None:
+        if_offset_hz = args.target_if_hz - args.nominal_if_hz
+        target_if_hz = args.target_if_hz
+    elif args.target_if_offset_hz is not None:
+        if_offset_hz = args.target_if_offset_hz
+        target_if_hz = args.nominal_if_hz + if_offset_hz
+    else:
+        raise ValueError("--target-if-hz or --target-if-offset-hz is required when using IF mapping")
+
+    center_hz = args.rf_input_hz - if_offset_hz
+    span_hz = args.span_hz if args.span_hz is not None else max(args.rbw_hz, 10_000.0)
+    if span_hz < 0.0:
+        raise ValueError("--span-hz must be greater than or equal to 0")
+
+    args.start_hz = center_hz - span_hz / 2.0
+    args.stop_hz = center_hz + span_hz / 2.0
+    if args.marker_hz is None:
+        args.marker_hz = center_hz
+
+    return (
+        "IF mapping "
+        f"rf_input={args.rf_input_hz / 1e6:.6f} MHz "
+        f"nominal_if={args.nominal_if_hz / 1e6:.6f} MHz "
+        f"target_if={target_if_hz / 1e6:.6f} MHz "
+        f"if_offset={if_offset_hz:+.0f} Hz "
+        f"=> sweep_center={center_hz / 1e6:.6f} MHz "
+        f"span={span_hz / 1e3:.3f} kHz"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Diagnose PuSuSA 300 kHz RBW data directly from serial, bypassing Flutter."
@@ -396,8 +527,13 @@ def main() -> int:
     parser.add_argument("--baud", type=int, default=921600)
     parser.add_argument("--start-hz", type=float, default=900.0e6)
     parser.add_argument("--stop-hz", type=float, default=1.1e9)
-    parser.add_argument("--marker-hz", type=float, default=1.0e9)
+    parser.add_argument("--marker-hz", type=float, default=None)
     parser.add_argument("--rbw", choices=sorted(RBW_MODES.keys()), default="300k")
+    parser.add_argument("--span-hz", type=float, default=None)
+    parser.add_argument("--rf-input-hz", type=float, default=None)
+    parser.add_argument("--nominal-if-hz", type=float, default=NOMINAL_IF_HZ)
+    parser.add_argument("--target-if-hz", type=float, default=None)
+    parser.add_argument("--target-if-offset-hz", type=float, default=None)
     parser.add_argument("--point-count", type=int, default=2048)
     parser.add_argument("--timeout-s", type=float, default=45.0)
     parser.add_argument("--sweep-speed", type=float, default=1.0)
@@ -413,13 +549,25 @@ def main() -> int:
     parser.add_argument("--print-points", action="store_true", help="Print every spectrum point while streaming.")
     args = parser.parse_args()
 
-    if args.stop_hz <= args.start_hz:
-        print("--stop-hz must be greater than --start-hz")
+    rbw_mode, rbw_hz = RBW_MODES[args.rbw]
+    args.rbw_hz = rbw_hz
+    try:
+        mapping_description = apply_fixed_rf_if_mapping(args)
+    except ValueError as exc:
+        print(exc)
         return 2
 
-    rbw_mode, rbw_hz = RBW_MODES[args.rbw]
-    expected_internal_points = int((args.stop_hz - args.start_hz) // (rbw_hz / 2.0)) + 1
-    expected_internal_points = max(2, min(expected_internal_points, 4096))
+    if args.stop_hz < args.start_hz:
+        print("--stop-hz must be greater than or equal to --start-hz")
+        return 2
+    if args.marker_hz is None:
+        args.marker_hz = (args.start_hz + args.stop_hz) / 2.0
+
+    if args.stop_hz == args.start_hz:
+        expected_internal_points = 1
+    else:
+        expected_internal_points = int((args.stop_hz - args.start_hz) // (rbw_hz / 2.0)) + 1
+        expected_internal_points = max(2, min(expected_internal_points, 4096))
     csv_path = args.csv if args.csv is not None else default_csv_path()
 
     print(
@@ -429,6 +577,8 @@ def main() -> int:
         f"RBW={rbw_hz / 1e3:.0f} kHz expected_internal_points~{expected_internal_points} "
         f"RF(lna={args.lna}, path={args.path}, atten_code={args.atten_code}, vga={args.vga_db} dB)"
     )
+    if mapping_description:
+        print(mapping_description)
 
     try:
         with serial.Serial(args.port, args.baud, timeout=0.05) as ser:
@@ -459,8 +609,10 @@ def main() -> int:
                 )
 
             send_command(ser, "GET_RF_FRONTEND", CMD_GET_RF_FRONTEND)
+            send_command(ser, "GET_STATUS_BEFORE", CMD_GET_STATUS)
             send_command(ser, "GET_PROFILE_BEFORE", CMD_GET_PROFILE)
             points = stream_spectrum(ser, args.point_count, args.timeout_s, args.print_points)
+            send_command(ser, "GET_STATUS_AFTER", CMD_GET_STATUS)
             send_command(ser, "GET_PROFILE_AFTER", CMD_GET_PROFILE)
 
     except serial.SerialException as exc:
