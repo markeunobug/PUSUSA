@@ -68,6 +68,7 @@ int phase_noise_plan_build(double start_offset_hz,
         point->offset_hz = offset_hz;
         point->rbw_mode = rbw_mode;
         point->rbw_hz = rbw_hz;
+        point->enbw_hz = phase_noise_plan_enbw_hz(rbw_mode);
         point->warning_code = ((float)offset_hz < rbw_hz) ?
             PHASE_NOISE_PLAN_WARN_OFFSET_BELOW_RBW : PHASE_NOISE_PLAN_WARN_NONE;
 
@@ -109,16 +110,42 @@ float phase_noise_plan_rbw_hz(rbw_mode_t mode)
     }
 }
 
+float phase_noise_plan_enbw_hz(rbw_mode_t mode)
+{
+    switch (mode) {
+    case RBW_MODE_1K:
+        return RBW_1K_ENBW_HZ;
+    case RBW_MODE_10K:
+        return RBW_10K_ENBW_HZ;
+    case RBW_MODE_30K:
+        return RBW_30K_ENBW_HZ;
+    case RBW_MODE_100K:
+        return RBW_100K_ENBW_HZ;
+    case RBW_MODE_300K:
+        return RBW_300K_ENBW_HZ;
+    case RBW_MODE_1M:
+        return RBW_1M_ENBW_HZ;
+    default:
+        return RBW_100K_ENBW_HZ;
+    }
+}
+
 static rbw_mode_t rbw_mode_for_offset(uint32_t offset_hz)
 {
-    if (offset_hz <= 10000U) {
-        return RBW_MODE_1K;
+    /* Keep the close-in trace on one calibrated filter path through 300 kHz.
+     * The 10 kHz mode is intentionally skipped to avoid a discontinuity at
+     * 100 kHz; switch directly from 1 kHz to 30 kHz at 300 kHz. */
+    if (offset_hz >= 10000000U) {
+        return RBW_MODE_1M;
     }
-    if (offset_hz < 100000U) {
-        return RBW_MODE_10K;
+    if (offset_hz >= 3000000U) {
+        return RBW_MODE_300K;
     }
-    if (offset_hz <= 1000000U) {
+    if (offset_hz >= 1000000U) {
+        return RBW_MODE_100K;
+    }
+    if (offset_hz >= 300000U) {
         return RBW_MODE_30K;
     }
-    return RBW_MODE_100K;
+    return RBW_MODE_1K;
 }

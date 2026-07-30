@@ -6,6 +6,7 @@
 #include "amplitude_correction.h"
 #include "dma_capture.h"
 #include "lo_control.h"
+#include "pl_capture_control.h"
 #include "profile_timer.h"
 #include "signal_processing.h"
 #include "xstatus.h"
@@ -43,6 +44,7 @@ static int emit_data_point(phase_noise_engine_t *engine, uint8_t done);
 static int prepare_measurement(phase_noise_engine_t *engine);
 static int start_current_point(phase_noise_engine_t *engine);
 static int finish_current_measurement(phase_noise_engine_t *engine);
+static int try_sg_burst_capture(void);
 static uint64_t current_target_rf_hz(const phase_noise_engine_t *engine);
 static uint64_t carrier_search_target_hz(const phase_noise_engine_t *engine);
 static rbw_mode_t carrier_search_rbw_mode(const phase_noise_engine_t *engine);
@@ -111,7 +113,6 @@ int phase_noise_engine_configure(phase_noise_engine_t *engine,
     engine->last_error = PN_ERR_OK;
     engine->state = PN_STATE_CONFIGURED;
     engine->step = PN_STEP_IDLE;
-    memset(engine->average_noise_mw, 0, sizeof(engine->average_noise_mw));
     return 0;
 }
 
@@ -160,8 +161,6 @@ int phase_noise_engine_start(phase_noise_engine_t *engine)
     engine->wait_counter = 0U;
     engine->last_warning = engine->plan_warning;
     engine->last_error = PN_ERR_OK;
-    memset(engine->average_noise_mw, 0, sizeof(engine->average_noise_mw));
-
     engine->state = PN_STATE_SEARCHING_CARRIER;
     engine->step = PN_STEP_PREPARE_CARRIER;
     begin_carrier_search(engine);
@@ -233,6 +232,12 @@ int phase_noise_engine_poll(phase_noise_engine_t *engine)
         return 0;
 
     case PN_STEP_ARM_DMA:
+        if (try_sg_burst_capture() != 0) {
+            engine->step = (signal_processing_accumulation_ready() != 0) ?
+                PN_STEP_MEASURE : PN_STEP_REARM_DMA;
+            return 0;
+        }
+
         sweep_profile_begin(SWEEP_PROFILE_SECTION_DMA_RESET);
         if (dma_capture_reset() != XST_SUCCESS) {
             sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_RESET);
@@ -241,12 +246,37 @@ int phase_noise_engine_poll(phase_noise_engine_t *engine)
             return -1;
         }
         sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_RESET);
-        /* fall through */
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_DMA_START);
+        if (dma_capture_start((u32)(signal_processing_get_dma_samples() * 2U)) != XST_SUCCESS) {
+            sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_START);
+            sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
+            set_error(engine, PN_ERR_DMA_TIMEOUT);
+            return -1;
+        }
+        sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_START);
+
+        engine->wait_counter = 0U;
+        engine->step = PN_STEP_WAIT_FRAME;
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_DMA_WAIT);
+        return 0;
 
     case PN_STEP_REARM_DMA:
-        if (engine->step == PN_STEP_REARM_DMA) {
-            sweep_profile_note_dma_rearm();
+        sweep_profile_note_dma_rearm();
+        if (try_sg_burst_capture() != 0) {
+            engine->step = (signal_processing_accumulation_ready() != 0) ?
+                PN_STEP_MEASURE : PN_STEP_REARM_DMA;
+            return 0;
         }
+
+        sweep_profile_begin(SWEEP_PROFILE_SECTION_DMA_RESET);
+        if (dma_capture_reset() != XST_SUCCESS) {
+            sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_RESET);
+            sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
+            set_error(engine, PN_ERR_DMA_TIMEOUT);
+            return -1;
+        }
+        sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_RESET);
+
         sweep_profile_begin(SWEEP_PROFILE_SECTION_DMA_START);
         if (dma_capture_start((u32)(signal_processing_get_dma_samples() * 2U)) != XST_SUCCESS) {
             sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_START);
@@ -383,9 +413,6 @@ static int validate_config(const phase_noise_config_t *config)
     if ((config->flags & ~(PHASE_NOISE_FLAG_CONTINUOUS |
                            PHASE_NOISE_FLAG_ALLOW_ESTIMATED_ENBW |
                            PHASE_NOISE_FLAG_EMIT_INTERMEDIATE_AVERAGES)) != 0U) {
-        return -1;
-    }
-    if ((config->flags & PHASE_NOISE_FLAG_ALLOW_ESTIMATED_ENBW) == 0U) {
         return -1;
     }
     if ((config->carrier_mode != PHASE_NOISE_CARRIER_MANUAL) &&
@@ -606,7 +633,7 @@ static int emit_data_point(phase_noise_engine_t *engine, uint8_t done)
 {
     phase_noise_data_t data;
     const phase_noise_plan_point_t *plan_point;
-    float averaged_noise_dbm;
+    float raw_noise_dbm;
     float enbw_hz;
 
     if (engine == 0) {
@@ -619,11 +646,11 @@ static int emit_data_point(phase_noise_engine_t *engine, uint8_t done)
         return -1;
     }
 
-    averaged_noise_dbm = 10.0f * log10f(engine->average_noise_mw[engine->current_index]);
-    enbw_hz = (float)plan_point->rbw_hz;
+    raw_noise_dbm = engine->current_power_dbm;
+    enbw_hz = plan_point->enbw_hz;
 
     memset(&data, 0, sizeof(data));
-    data.version = PHASE_NOISE_VERSION;
+    data.version = PHASE_NOISE_DATA_VERSION;
     data.flags = 0U;
     if (done != 0U) {
         data.flags |= PHASE_NOISE_DATA_FLAG_DONE;
@@ -641,14 +668,14 @@ static int emit_data_point(phase_noise_engine_t *engine, uint8_t done)
     data.carrier_level_dbm = (engine->carrier_valid != 0U) ?
         engine->carrier_level_dbm : 0.0f;
     data.offset_hz = plan_point->offset_hz;
-    data.noise_power_dbm = averaged_noise_dbm;
+    data.noise_power_dbm = raw_noise_dbm;
     data.rbw_hz = (uint32_t)(plan_point->rbw_hz + 0.5f);
     data.error_code = (uint8_t)engine->last_error;
 
     if (engine->carrier_valid != 0U) {
         data.flags |= PHASE_NOISE_DATA_FLAG_CARRIER_VALID;
         data.phase_noise_dbc_hz =
-            averaged_noise_dbm - (10.0f * log10f(enbw_hz)) - engine->carrier_level_dbm;
+            raw_noise_dbm - (10.0f * log10f(enbw_hz)) - engine->carrier_level_dbm;
         data.flags |= PHASE_NOISE_DATA_FLAG_PHASE_NOISE_VALID;
     } else {
         data.phase_noise_dbc_hz = 0.0f;
@@ -731,10 +758,6 @@ static int start_current_point(phase_noise_engine_t *engine)
         engine->current_offset_hz = point->offset_hz;
         engine->current_rbw_hz = (uint32_t)(point->rbw_hz + 0.5f);
         engine->last_warning = point->warning_code;
-        if ((engine->last_warning == PHASE_NOISE_WARN_NONE) &&
-            ((engine->config.flags & PHASE_NOISE_FLAG_ALLOW_ESTIMATED_ENBW) != 0U)) {
-            engine->last_warning = PHASE_NOISE_WARN_ENBW_ESTIMATED;
-        }
 
         signal_processing_apply_rbw_mode(point->rbw_mode);
         sweep_profile_set_rbw_mode((uint8_t)point->rbw_mode);
@@ -820,21 +843,63 @@ static int finish_current_measurement(phase_noise_engine_t *engine)
         return -1;
     }
 
-    {
-        float sample_mw = powf(10.0f, corrected_power_dbm / 10.0f);
-        uint16_t n = engine->average_index;
-
-        if (n <= 1U) {
-            engine->average_noise_mw[engine->current_index] = sample_mw;
-        } else {
-            float old = engine->average_noise_mw[engine->current_index];
-            engine->average_noise_mw[engine->current_index] =
-                ((old * (float)(n - 1U)) + sample_mw) / (float)n;
-        }
-    }
-
     engine->step = PN_STEP_EMIT_POINT;
     return 0;
+}
+
+static int try_sg_burst_capture(void)
+{
+    u32 sg_samples;
+    u32 samples_per_bd;
+    u32 capture_samples;
+    u32 bd_count;
+    u32 captured_samples = 0U;
+
+#if DMA_SWEEP_SG_BURST_ENABLE == 0U
+    return 0;
+#endif
+
+    if (dma_capture_sg_is_supported() == 0) {
+        return 0;
+    }
+
+    sg_samples = signal_processing_get_sg_dma_samples();
+    samples_per_bd = PL_CAPTURE_MAX_FRAME_LEN;
+    if ((sg_samples <= signal_processing_get_dma_samples()) ||
+        (sg_samples < (FFT_SIZE * 2U)) ||
+        ((samples_per_bd % FFT_SIZE) != 0U)) {
+        return 0;
+    }
+
+    capture_samples =
+        ((sg_samples + samples_per_bd - 1U) / samples_per_bd) * samples_per_bd;
+    if ((capture_samples == 0U) || (capture_samples > DMA_MAX_SAMPLES)) {
+        return 0;
+    }
+
+    bd_count = capture_samples / samples_per_bd;
+    if ((bd_count < 2U) || (bd_count > DMA_SWEEP_SG_MAX_BLOCKS_PER_TRANSFER)) {
+        return 0;
+    }
+
+    sweep_profile_begin(SWEEP_PROFILE_SECTION_DMA_WAIT);
+    if (dma_capture_sg_burst_capture(samples_per_bd,
+                                     bd_count,
+                                     &captured_samples,
+                                     0) != XST_SUCCESS) {
+        sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_WAIT);
+        return 0;
+    }
+    sweep_profile_end(SWEEP_PROFILE_SECTION_DMA_WAIT);
+
+    if (captured_samples < sg_samples) {
+        return 0;
+    }
+
+    sweep_profile_begin(SWEEP_PROFILE_SECTION_ACCUMULATE);
+    signal_processing_accumulate_dma(dma_capture_get_rx_buffer(), sg_samples);
+    sweep_profile_end(SWEEP_PROFILE_SECTION_ACCUMULATE);
+    return 1;
 }
 
 static uint64_t current_target_rf_hz(const phase_noise_engine_t *engine)

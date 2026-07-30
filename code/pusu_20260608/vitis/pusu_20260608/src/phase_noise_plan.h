@@ -15,6 +15,7 @@ typedef struct {
     uint32_t offset_hz;
     rbw_mode_t rbw_mode;
     float rbw_hz;
+    float enbw_hz;
     uint16_t warning_code;
 } phase_noise_plan_point_t;
 
@@ -35,5 +36,6 @@ const phase_noise_plan_point_t *phase_noise_plan_get_point(
     const phase_noise_plan_t *plan,
     uint32_t point_index);
 float phase_noise_plan_rbw_hz(rbw_mode_t mode);
+float phase_noise_plan_enbw_hz(rbw_mode_t mode);
 
 #endif

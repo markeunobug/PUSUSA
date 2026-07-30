@@ -90,6 +90,11 @@
 #define LMX2572_LO2_OUTPUT_POWER_DBM 4
 #define LMX2572_DEFAULT_OUTPUT_POWER_DBM LMX2572_LO1_OUTPUT_POWER_DBM
 
+/* Fractional-N tuning policy. Keep this switch available for A/B testing
+ * against the previous fixed-denominator implementation. */
+#define LMX2572_FRACTIONAL_OPT_ENABLE       1
+#define LMX2572_FRACTIONAL_DENOMINATOR      0xFFFFFFFFULL
+
 #if defined(XPAR_AXI_GPIO_2_DEVICE_ID)
 #define RF_FRONTEND_GPIO_AVAILABLE 1
 #define RF_FRONTEND_GPIO_DEVICE_ID XPAR_AXI_GPIO_2_DEVICE_ID
@@ -133,6 +138,16 @@
 #define RBW_100K_HZ         100000.0f
 #define RBW_300K_HZ         300000.0f
 #define RBW_1M_HZ           1000000.0f
+
+/* Two-sided equivalent noise bandwidth of the complete CIC/FIR chain.
+ * Values are obtained by integrating |H(f)|^2 over the ADC Nyquist band.
+ * Phase-noise density must use ENBW, not the nominal -6 dB RBW/cutoff. */
+#define RBW_1K_ENBW_HZ      2137.2954f
+#define RBW_10K_ENBW_HZ     18695.7919f
+#define RBW_30K_ENBW_HZ     56098.7139f
+#define RBW_100K_ENBW_HZ    183915.0079f
+#define RBW_300K_ENBW_HZ    557799.3887f
+#define RBW_1M_ENBW_HZ      1844700.0551f
 #define RBW_LPF_TAP_NUM     129U
 
 /* CIC decimation ratio per RBW mode */

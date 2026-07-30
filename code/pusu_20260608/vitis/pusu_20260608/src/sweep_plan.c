@@ -75,7 +75,7 @@ int sweep_plan_build(const device_control_config_t *config, sweep_plan_t *plan)
     }
 
     span_hz = stop_hz - start_hz;
-    raw_point_count = (span_hz / step_hz) + 1ULL;
+    raw_point_count = ((span_hz + step_hz - 1ULL) / step_hz) + 1ULL;
     if (raw_point_count > SWEEP_PLAN_MAX_POINTS) {
         raw_point_count = SWEEP_PLAN_MAX_POINTS;
     }
@@ -95,6 +95,8 @@ int sweep_plan_build(const device_control_config_t *config, sweep_plan_t *plan)
 
 uint64_t sweep_plan_get_rf_hz(const sweep_plan_t *plan, uint32_t point_index)
 {
+    uint64_t rf_hz;
+
     if (plan == 0) {
         return 0ULL;
     }
@@ -103,5 +105,6 @@ uint64_t sweep_plan_get_rf_hz(const sweep_plan_t *plan, uint32_t point_index)
         point_index = plan->point_count - 1U;
     }
 
-    return plan->start_hz + (uint64_t)point_index * plan->step_hz;
+    rf_hz = plan->start_hz + (uint64_t)point_index * plan->step_hz;
+    return (rf_hz > plan->stop_hz) ? plan->stop_hz : rf_hz;
 }

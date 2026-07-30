@@ -7,6 +7,7 @@
 
 #include "dma_capture.h"
 #include "phase_noise_engine.h"
+#include "realtime_if_fft_engine.h"
 
 typedef struct {
     double start_hz;
@@ -115,6 +116,9 @@ typedef int (*device_protocol_rf_frontend_control_t)(
 typedef int (*device_protocol_phase_noise_control_t)(
     phase_noise_engine_action_t action,
     const phase_noise_config_t *config);
+typedef int (*device_protocol_realtime_if_fft_control_t)(
+    realtime_if_fft_engine_action_t action,
+    const realtime_if_fft_engine_config_t *config);
 typedef int (*device_protocol_capture_stream_smoke_control_t)(
     u32 sample_count,
     dma_capture_stream_smoke_result_t *result);
@@ -144,6 +148,8 @@ void device_protocol_set_status_provider(device_protocol_status_provider_t provi
 void device_protocol_set_sweep_control_handler(device_protocol_sweep_control_t handler);
 void device_protocol_set_rf_frontend_handler(device_protocol_rf_frontend_control_t handler);
 void device_protocol_set_phase_noise_handler(device_protocol_phase_noise_control_t handler);
+void device_protocol_set_realtime_if_fft_handler(
+    device_protocol_realtime_if_fft_control_t handler);
 void device_protocol_set_capture_stream_smoke_handler(
     device_protocol_capture_stream_smoke_control_t handler);
 void device_protocol_set_capture_main_smoke_handler(
@@ -158,6 +164,8 @@ int device_protocol_stream_spectrum_point(uint32_t freq_hz,
                                           uint16_t current_index,
                                           uint8_t done);
 int device_protocol_stream_phase_noise_point(const phase_noise_data_t *point);
+int device_protocol_stream_realtime_if_fft_trace(const realtime_if_fft_trace_t *trace, const realtime_if_fft_engine_status_t *status);
+int device_protocol_send_realtime_if_fft_status(const realtime_if_fft_engine_status_t *status);
 int device_protocol_send_phase_noise_status(const phase_noise_status_t *status);
 void device_protocol_send_rf_frontend_status(void);
 

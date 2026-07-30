@@ -5,6 +5,7 @@
 #include "lo_control.h"
 #include "platform.h"
 #include "phase_noise_engine.h"
+#include "realtime_if_fft_engine.h"
 #include "rf_frontend.h"
 #include "signal_processing.h"
 #include "sweep_engine.h"
@@ -34,6 +35,9 @@ static int protocol_sweep_point_callback(uint32_t freq_hz,
                                          void *context);
 static int protocol_sweep_control_handler(unsigned char action, const device_control_config_t *config);
 static int protocol_rf_frontend_handler(const device_rf_frontend_config_t *config);
+static int protocol_realtime_if_fft_handler(realtime_if_fft_engine_action_t action, const realtime_if_fft_engine_config_t *config);
+static int protocol_realtime_if_fft_trace_callback(const realtime_if_fft_trace_t *trace, const realtime_if_fft_engine_status_t *status, void *context);
+static int protocol_realtime_if_fft_status_callback(const realtime_if_fft_engine_status_t *status, void *context);
 static int protocol_phase_noise_handler(phase_noise_engine_action_t action,
                                         const phase_noise_config_t *config);
 static int protocol_capture_stream_smoke_handler(
@@ -78,6 +82,7 @@ static unsigned int g_dma_error_bg_reset_count = 0U;
 static unsigned int g_dma_error_sweep_reset_count = 0U;
 static unsigned int g_dma_error_direct_if_count = 0U;
 static unsigned int g_dma_error_phase_noise_count = 0U;
+static unsigned int g_dma_error_realtime_if_fft_count = 0U;
 static unsigned int g_dma_error_capture_test_count = 0U;
 static unsigned int g_frame_ready_count = 0U;
 static unsigned int g_process_frame_count = 0U;
@@ -86,6 +91,7 @@ static background_capture_state_t g_background_capture_state =
 static unsigned int g_background_capture_backoff_loops = 0U;
 static sweep_engine_t g_sweep_engine;//扫描相关参数，包括扫描计划、扫频后结果
 static phase_noise_engine_t g_phase_noise_engine;
+static realtime_if_fft_engine_t g_realtime_if_fft_engine;
 static protocol_sweep_stream_context_t g_sweep_stream_context;
 static int g_last_sweep_error = 0;
 static unsigned char g_background_dma_error_code = 0U;
@@ -148,6 +154,7 @@ static float g_direct_if_spectrum_dbfs[SPECTRUM_BINS];
 
 #define BACKGROUND_DMA_ERR_RESET 0xD1U
 #define BACKGROUND_DMA_ERR_START 0xD2U
+#define BACKGROUND_DMA_ERR_RT_FFT_RESET 0xD3U
 #define DIRECT_IF_FRAME_TIMEOUT_LOOPS 500000U
 #define BACKGROUND_CAPTURE_BACKOFF_LOOPS 50000U
 
@@ -213,6 +220,12 @@ int main(void)
                                      protocol_phase_noise_status_callback,
                                      0);
 
+    status = realtime_if_fft_engine_init(&g_realtime_if_fft_engine);
+    if (status != 0) { cleanup_platform(); return -1; }
+    realtime_if_fft_engine_set_callbacks(&g_realtime_if_fft_engine,
+                                         protocol_realtime_if_fft_trace_callback, 0,
+                                         protocol_realtime_if_fft_status_callback, 0);
+
     status = dma_capture_init();
     if (status != XST_SUCCESS) {
         cleanup_platform();
@@ -224,6 +237,7 @@ int main(void)
     device_protocol_set_sweep_control_handler(protocol_sweep_control_handler);
     device_protocol_set_rf_frontend_handler(protocol_rf_frontend_handler);
     device_protocol_set_phase_noise_handler(protocol_phase_noise_handler);
+    device_protocol_set_realtime_if_fft_handler(protocol_realtime_if_fft_handler);
     device_protocol_set_capture_stream_smoke_handler(
         protocol_capture_stream_smoke_handler);
     device_protocol_set_capture_main_smoke_handler(
@@ -237,6 +251,15 @@ int main(void)
 
     while (1) {
         device_protocol_poll();
+
+        if (realtime_if_fft_engine_is_active(&g_realtime_if_fft_engine) != 0) {
+            (void)realtime_if_fft_engine_poll(&g_realtime_if_fft_engine);
+            if (realtime_if_fft_engine_is_active(&g_realtime_if_fft_engine) == 0) {
+                lock_indicator_toggle_activity();
+                reset_and_resume_background_capture_if_idle();
+            }
+            continue;
+        }
 
         if (phase_noise_engine_is_active(&g_phase_noise_engine) != 0) {
             pn_status = phase_noise_engine_poll(&g_phase_noise_engine);
@@ -435,10 +458,8 @@ static int foreground_capture_is_idle(void)
         return 0;
     }
 
-    if (phase_noise_engine_is_active(&g_phase_noise_engine) != 0) {
-        return 0;
-    }
-
+    if (phase_noise_engine_is_active(&g_phase_noise_engine) != 0) { return 0; }
+    if (realtime_if_fft_engine_is_active(&g_realtime_if_fft_engine) != 0) { return 0; }
     return 1;
 }
 
@@ -457,9 +478,8 @@ static int protocol_spectrum_provider(const device_control_config_t *config,
         return -1;
     }
 
-    if (phase_noise_engine_is_active(&g_phase_noise_engine) != 0) {
-        return -1;
-    }
+    if ((phase_noise_engine_is_active(&g_phase_noise_engine) != 0) ||
+        (realtime_if_fft_engine_is_active(&g_realtime_if_fft_engine) != 0)) { return -1; }
 
     {
         const rf_frontend_state_t *rf_state = rf_frontend_get_state();
@@ -648,9 +668,8 @@ static int protocol_sweep_control_handler(unsigned char action, const device_con
         return -1;
     }
 
-    if (phase_noise_engine_is_active(&g_phase_noise_engine) != 0) {
-        return -1;
-    }
+    if ((phase_noise_engine_is_active(&g_phase_noise_engine) != 0) ||
+        (realtime_if_fft_engine_is_active(&g_realtime_if_fft_engine) != 0)) { return -1; }
 
     g_sweep_stream_context.points = 0;
     g_sweep_stream_context.max_points = 0U;
@@ -742,50 +761,82 @@ static int protocol_status_provider(device_status_t *status)
     status->uart_rx_resync_count = 0U;
     return 0;
 }
-static int protocol_phase_noise_handler(phase_noise_engine_action_t action,
-                                        const phase_noise_config_t *config)
+static int protocol_phase_noise_handler(phase_noise_engine_action_t action, const phase_noise_config_t *config)
 {
     phase_noise_status_t status;
+    switch (action) {
+    case PHASE_NOISE_ENGINE_ACTION_CONFIGURE: return phase_noise_engine_configure(&g_phase_noise_engine, config);
+    case PHASE_NOISE_ENGINE_ACTION_START:
+        if (realtime_if_fft_engine_is_active(&g_realtime_if_fft_engine) != 0) return -1;
+        if (sweep_engine_is_active(&g_sweep_engine) != 0) { sweep_engine_stop(&g_sweep_engine); g_last_sweep_error=sweep_engine_poll(&g_sweep_engine); sweep_engine_set_point_callback(&g_sweep_engine,0,0); if(g_last_sweep_error!=0 || sweep_engine_is_active(&g_sweep_engine)!=0) return -1; }
+        release_background_capture();
+        if (dma_capture_reset()!=XST_SUCCESS) { NOTE_DMA_ERROR(g_dma_error_phase_noise_count); g_background_dma_error_code=BACKGROUND_DMA_ERR_RESET; reset_and_resume_background_capture_if_idle(); return -1; }
+        if (phase_noise_engine_start(&g_phase_noise_engine)!=0) { reset_and_resume_background_capture_if_idle(); return -1; }
+        return 0;
+    case PHASE_NOISE_ENGINE_ACTION_STOP: phase_noise_engine_stop(&g_phase_noise_engine); if(phase_noise_engine_is_active(&g_phase_noise_engine)==0){phase_noise_engine_get_status(&g_phase_noise_engine,&status);(void)device_protocol_send_phase_noise_status(&status);reset_and_resume_background_capture_if_idle();} return 0;
+    case PHASE_NOISE_ENGINE_ACTION_GET_STATUS: phase_noise_engine_get_status(&g_phase_noise_engine,&status); return device_protocol_send_phase_noise_status(&status);
+    default: return -1;
+    }
+}
+
+static int protocol_realtime_if_fft_trace_callback(const realtime_if_fft_trace_t *trace, const realtime_if_fft_engine_status_t *status, void *context)
+{ (void)context; return device_protocol_stream_realtime_if_fft_trace(trace, status); }
+static int protocol_realtime_if_fft_status_callback(const realtime_if_fft_engine_status_t *status, void *context)
+{ (void)context; return device_protocol_send_realtime_if_fft_status(status); }
+static int protocol_realtime_if_fft_handler(realtime_if_fft_engine_action_t action, const realtime_if_fft_engine_config_t *config)
+{
+    realtime_if_fft_engine_status_t status;
+    int start_status;
+    const rf_frontend_state_t *rf_state;
 
     switch (action) {
-    case PHASE_NOISE_ENGINE_ACTION_CONFIGURE:
-        return phase_noise_engine_configure(&g_phase_noise_engine, config);
+    case REALTIME_IF_FFT_ENGINE_ACTION_CONFIGURE:
+        return realtime_if_fft_engine_configure(&g_realtime_if_fft_engine, config);
 
-    case PHASE_NOISE_ENGINE_ACTION_START:
-        if (sweep_engine_is_active(&g_sweep_engine) != 0) {
+    case REALTIME_IF_FFT_ENGINE_ACTION_START:
+        /* RT FFT is defined only for the RF mixer chain; do not silently
+         * retarget the RF switch when a Direct-IF user session is active. */
+        rf_state = rf_frontend_get_state();
+        if ((rf_state == 0) || (rf_state->path_mode != RF_PATH_MIXER_CHAIN)) {
             return -1;
+        }
+        if (phase_noise_engine_is_active(&g_phase_noise_engine) != 0) return -1;
+        if (sweep_engine_is_active(&g_sweep_engine) != 0) {
+            sweep_engine_stop(&g_sweep_engine);
+            g_last_sweep_error = sweep_engine_poll(&g_sweep_engine);
+            sweep_engine_set_point_callback(&g_sweep_engine, 0, 0);
+            if ((g_last_sweep_error != 0) ||
+                (sweep_engine_is_active(&g_sweep_engine) != 0)) return -1;
         }
         release_background_capture();
         if (dma_capture_reset() != XST_SUCCESS) {
-            NOTE_DMA_ERROR(g_dma_error_phase_noise_count);
-            g_background_dma_error_code = BACKGROUND_DMA_ERR_RESET;
+            NOTE_DMA_ERROR(g_dma_error_realtime_if_fft_count);
+            g_background_dma_error_code = BACKGROUND_DMA_ERR_RT_FFT_RESET;
             reset_and_resume_background_capture_if_idle();
             return -1;
         }
-        if (phase_noise_engine_start(&g_phase_noise_engine) != 0) {
-            reset_and_resume_background_capture_if_idle();
-            return -1;
-        }
-        return 0;
-
-    case PHASE_NOISE_ENGINE_ACTION_STOP:
-        phase_noise_engine_stop(&g_phase_noise_engine);
-        if (phase_noise_engine_is_active(&g_phase_noise_engine) == 0) {
-            phase_noise_engine_get_status(&g_phase_noise_engine, &status);
-            (void)device_protocol_send_phase_noise_status(&status);
+        start_status = realtime_if_fft_engine_start(&g_realtime_if_fft_engine);
+        if (start_status != 0) {
+            /* No RT FFT owner was acquired; give the background producer back
+             * its DMA path even for e.g. an unconfigured START command. */
             reset_and_resume_background_capture_if_idle();
         }
+        return start_status;
+
+    case REALTIME_IF_FFT_ENGINE_ACTION_STOP:
+        /* Non-blocking: the main loop polls the state machine, releases DMA,
+         * emits final idle status, then restores the background capture. */
+        realtime_if_fft_engine_stop(&g_realtime_if_fft_engine);
         return 0;
 
-    case PHASE_NOISE_ENGINE_ACTION_GET_STATUS:
-        phase_noise_engine_get_status(&g_phase_noise_engine, &status);
-        return device_protocol_send_phase_noise_status(&status);
+    case REALTIME_IF_FFT_ENGINE_ACTION_GET_STATUS:
+        realtime_if_fft_engine_get_status(&g_realtime_if_fft_engine, &status);
+        return device_protocol_send_realtime_if_fft_status(&status);
 
     default:
         return -1;
     }
 }
-
 static int protocol_capture_stream_smoke_handler(
     u32 sample_count,
     dma_capture_stream_smoke_result_t *result)
@@ -793,6 +844,7 @@ static int protocol_capture_stream_smoke_handler(
     int status;
 
     if ((phase_noise_engine_is_active(&g_phase_noise_engine) != 0) ||
+        (realtime_if_fft_engine_is_active(&g_realtime_if_fft_engine) != 0) ||
         (sweep_engine_is_active(&g_sweep_engine) != 0)) {
         if (result != 0) {
             result->version = DMA_CAPTURE_STREAM_SMOKE_RESULT_VERSION;
@@ -821,6 +873,7 @@ static int protocol_capture_main_smoke_handler(
     int status;
 
     if ((phase_noise_engine_is_active(&g_phase_noise_engine) != 0) ||
+        (realtime_if_fft_engine_is_active(&g_realtime_if_fft_engine) != 0) ||
         (sweep_engine_is_active(&g_sweep_engine) != 0)) {
         if (result != 0) {
             result->version = DMA_CAPTURE_STREAM_SMOKE_RESULT_VERSION;
@@ -850,6 +903,7 @@ static int protocol_capture_sg_smoke_handler(
     int status;
 
     if ((phase_noise_engine_is_active(&g_phase_noise_engine) != 0) ||
+        (realtime_if_fft_engine_is_active(&g_realtime_if_fft_engine) != 0) ||
         (sweep_engine_is_active(&g_sweep_engine) != 0)) {
         if (result != 0) {
             result->version = DMA_CAPTURE_SG_SMOKE_RESULT_VERSION;
@@ -882,6 +936,7 @@ static int protocol_capture_sg_ring_smoke_handler(
     int status;
 
     if ((phase_noise_engine_is_active(&g_phase_noise_engine) != 0) ||
+        (realtime_if_fft_engine_is_active(&g_realtime_if_fft_engine) != 0) ||
         (sweep_engine_is_active(&g_sweep_engine) != 0)) {
         if (result != 0) {
             result->version = DMA_CAPTURE_SG_SMOKE_RESULT_VERSION;
@@ -926,6 +981,13 @@ static int protocol_rf_frontend_handler(const device_rf_frontend_config_t *confi
     rf_frontend_state_t state;
 
     if (config == 0) {
+        return XST_FAILURE;
+    }
+
+    /* The RT engine fixes LO1 and interprets all bins through the mixer
+     * chain.  Do not permit a UART RF-path/attenuator/LNA update to mutate
+     * that context while it owns DMA. */
+    if (realtime_if_fft_engine_is_active(&g_realtime_if_fft_engine) != 0) {
         return XST_FAILURE;
     }
 

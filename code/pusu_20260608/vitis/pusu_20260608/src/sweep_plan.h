@@ -6,7 +6,7 @@
 #include "app_config.h"
 #include "device_protocol.h"
 
-#define SWEEP_PLAN_MAX_POINTS 4096U
+#define SWEEP_PLAN_MAX_POINTS 10000U
 
 typedef struct {
     uint64_t start_hz;

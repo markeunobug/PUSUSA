@@ -323,9 +323,8 @@ int8_t LMX2572_SetFrequency(LMX2572_Device *dev, uint64_t frequency_hz)
 {
     const uint16_t chdiv_list[] = {1, 2, 4, 8, 16, 32, 64, 128, 256};
     uint16_t selected_chdiv = 0U;
-    uint64_t f_vco_target = 0U;
     uint32_t pll_n = 0U;
-    const uint32_t pll_den = 1000000UL;
+    uint32_t pll_den = 0U;
     uint32_t pll_num = 0U;
     uint8_t pfd_dly_sel = 0U;
     uint8_t chdiv_found = 0U;
@@ -339,8 +338,75 @@ int8_t LMX2572_SetFrequency(LMX2572_Device *dev, uint64_t frequency_hz)
         return 0;
     }
 
+#if LMX2572_FRACTIONAL_OPT_ENABLE
+    {
+        uint64_t fpd_hz = (uint64_t)(dev->fpd_hz + 0.5);
+        uint8_t best_is_integer = 0U;
+
+        if (fpd_hz == 0U) {
+            return 0;
+        }
+
+        pll_den = (uint32_t)LMX2572_FRACTIONAL_DENOMINATOR;
+
+        /* Prefer a true integer-N candidate. For non-integer targets, retain
+         * the old first-legal-divider behavior until measured spur data
+         * justifies a stronger CHDIV cost function. */
+        for (i = 0U; i < 9U; i++) {
+            uint16_t chdiv = chdiv_list[i];
+            uint64_t candidate_vco_hz = frequency_hz * (uint64_t)chdiv;
+            uint64_t candidate_n;
+            uint64_t remainder_hz;
+            uint64_t candidate_num;
+            uint32_t min_pll_n;
+            uint8_t candidate_pfd_dly_sel;
+            uint8_t candidate_is_integer;
+
+            if ((candidate_vco_hz < 3200000000ULL) ||
+                (candidate_vco_hz > 6400000000ULL)) {
+                continue;
+            }
+
+            candidate_n = candidate_vco_hz / fpd_hz;
+            remainder_hz = candidate_vco_hz % fpd_hz;
+            candidate_num = ((remainder_hz * (uint64_t)pll_den) +
+                             (fpd_hz / 2U)) / fpd_hz;
+
+            if (candidate_num >= (uint64_t)pll_den) {
+                candidate_num = 0U;
+                candidate_n++;
+            }
+
+            if (candidate_vco_hz < 4000000000ULL) {
+                min_pll_n = 26U;
+                candidate_pfd_dly_sel = 1U;
+            } else {
+                min_pll_n = 30U;
+                candidate_pfd_dly_sel = 2U;
+            }
+
+            if (candidate_n < (uint64_t)min_pll_n) {
+                continue;
+            }
+
+            candidate_is_integer = (candidate_num == 0U) ? 1U : 0U;
+            if ((chdiv_found == 0U) ||
+                ((candidate_is_integer != 0U) && (best_is_integer == 0U))) {
+                selected_chdiv = chdiv;
+                pll_n = (uint32_t)candidate_n;
+                pll_num = (uint32_t)candidate_num;
+                pfd_dly_sel = candidate_pfd_dly_sel;
+                best_is_integer = candidate_is_integer;
+                chdiv_found = 1U;
+            }
+        }
+    }
+#else
+    pll_den = 1000000UL;
+
     for (i = 0U; i < 9U; i++) {
         uint16_t chdiv = chdiv_list[i];
+        uint64_t f_vco_target;
         double n_total;
         double frac;
         uint32_t min_pll_n;
@@ -377,6 +443,7 @@ int8_t LMX2572_SetFrequency(LMX2572_Device *dev, uint64_t frequency_hz)
             break;
         }
     }
+#endif
 
     if (chdiv_found == 0U) {
         return 0;

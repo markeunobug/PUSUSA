@@ -39,6 +39,10 @@ void ad8370_set_gain_code(unsigned char code);
 #define CMD_CAPTURE_MAIN_SMOKE     0x15U
 #define CMD_CAPTURE_SG_RING_SMOKE  0x16U
 #define CMD_CAPTURE_SG_BURST_SMOKE 0x17U
+#define CMD_RT_FFT_CONFIG 0x18U
+#define CMD_RT_FFT_START  0x19U
+#define CMD_RT_FFT_STOP   0x1AU
+#define CMD_RT_FFT_GET_STATUS 0x1BU
 
 
 #define CMD_ACK            0x81U
@@ -50,6 +54,8 @@ void ad8370_set_gain_code(unsigned char code);
 #define CMD_PHASE_NOISE_STATUS 0x87U
 #define CMD_CAPTURE_STREAM_SMOKE_RESULT 0x88U
 #define CMD_CAPTURE_SG_SMOKE_RESULT     0x89U
+#define CMD_RT_FFT_DATA                 0x8AU
+#define CMD_RT_FFT_STATUS_DATA          0x8BU
 
 
 #define ACK_OK             0x01U
@@ -68,6 +74,10 @@ void ad8370_set_gain_code(unsigned char code);
 #define PHASE_NOISE_STATUS_PAYLOAD_SIZE 64U
 #define CAPTURE_STREAM_SMOKE_RESULT_PAYLOAD_SIZE 76U
 #define CAPTURE_SG_SMOKE_RESULT_PAYLOAD_SIZE 120U
+#define RT_FFT_CONFIG_PAYLOAD_SIZE 12U
+#define RT_FFT_STATUS_PAYLOAD_SIZE 28U
+#define RT_FFT_DATA_HEADER_SIZE 36U
+#define RT_FFT_DATA_PAYLOAD_SIZE (RT_FFT_DATA_HEADER_SIZE + (REALTIME_IF_FFT_BIN_COUNT * 4U))
 #define UART_RX_DRAIN_LIMIT     4096U
 #define DEFAULT_POINT_COUNT     256U
 #define MIN_POINT_COUNT         8U
@@ -88,6 +98,7 @@ typedef struct {
     device_protocol_sweep_control_t sweep_control;
     device_protocol_rf_frontend_control_t rf_frontend_control;
     device_protocol_phase_noise_control_t phase_noise_control;
+    device_protocol_realtime_if_fft_control_t realtime_if_fft_control;
     device_protocol_capture_stream_smoke_control_t capture_stream_smoke_control;
     device_protocol_capture_main_smoke_control_t capture_main_smoke_control;
     device_protocol_capture_sg_smoke_control_t capture_sg_smoke_control;
@@ -379,6 +390,11 @@ void device_protocol_set_phase_noise_handler(device_protocol_phase_noise_control
     g_protocol.phase_noise_control = handler;
 }
 
+void device_protocol_set_realtime_if_fft_handler(device_protocol_realtime_if_fft_control_t handler)
+{
+    g_protocol.realtime_if_fft_control = handler;
+}
+
 void device_protocol_set_capture_stream_smoke_handler(
     device_protocol_capture_stream_smoke_control_t handler)
 {
@@ -535,6 +551,30 @@ int device_protocol_send_phase_noise_status(const phase_noise_status_t *status)
 
     send_frame_inplace(CMD_PHASE_NOISE_STATUS, payload_length);
     return 0;
+}
+int device_protocol_send_realtime_if_fft_status(const realtime_if_fft_engine_status_t *status)
+{
+    unsigned int o = 4U;
+    if ((status == 0) || (RT_FFT_STATUS_PAYLOAD_SIZE + 7U > TX_FRAME_MAX_SIZE)) return -1;
+    g_protocol.tx_buffer[o++]=status->version; g_protocol.tx_buffer[o++]=status->state;
+    g_protocol.tx_buffer[o++]=status->flags; g_protocol.tx_buffer[o++]=status->error_code;
+    write_u32_le(&g_protocol.tx_buffer[o],status->next_trace_id);o+=4U;
+    write_u32_le(&g_protocol.tx_buffer[o],status->frames_sent);o+=4U;
+    write_u32_le(&g_protocol.tx_buffer[o],status->dropped_frames);o+=4U;
+    write_u32_le(&g_protocol.tx_buffer[o],status->dma_error_count);o+=4U;
+    write_f64_le(&g_protocol.tx_buffer[o],(double)status->center_frequency_hz);o+=8U;
+    send_frame_inplace(CMD_RT_FFT_STATUS_DATA,(unsigned short)o-4U); return 0;
+}
+int device_protocol_stream_realtime_if_fft_trace(const realtime_if_fft_trace_t *trace, const realtime_if_fft_engine_status_t *status)
+{
+    unsigned int o=4U,i; if(!trace || !status || RT_FFT_DATA_PAYLOAD_SIZE+7U>TX_FRAME_MAX_SIZE) return -1;
+    g_protocol.tx_buffer[o++]=trace->contract_version;g_protocol.tx_buffer[o++]=trace->window_id;g_protocol.tx_buffer[o++]=trace->amplitude_unit;g_protocol.tx_buffer[o++]=status->error_code;
+    write_u32_le(&g_protocol.tx_buffer[o],trace->trace_id);o+=4U;write_f64_le(&g_protocol.tx_buffer[o],(double)trace->center_frequency_hz);o+=8U;
+    write_u32_le(&g_protocol.tx_buffer[o],trace->adc_sample_rate_hz);o+=4U;write_u32_le(&g_protocol.tx_buffer[o],trace->fft_size);o+=4U;
+    write_u16_be(&g_protocol.tx_buffer[o],trace->first_bin);o+=2U;write_u16_be(&g_protocol.tx_buffer[o],trace->bin_count);o+=2U;
+    write_u32_le(&g_protocol.tx_buffer[o],status->dropped_frames);o+=4U;write_u32_le(&g_protocol.tx_buffer[o],status->frames_sent);o+=4U;
+    for(i=0U;i<trace->bin_count;i++){write_f32_le(&g_protocol.tx_buffer[o],trace->amplitude_dbfs[i]);o+=4U;}
+    send_frame_inplace(CMD_RT_FFT_DATA,(unsigned short)(o-4U)); return 0;
 }
 //?????????????? ??????
 static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned short length)
@@ -771,6 +811,22 @@ static void handle_frame(unsigned char cmd, const unsigned char *data, unsigned 
         } else {
             send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
         }
+        break;
+    case CMD_RT_FFT_CONFIG:
+        if (length == RT_FFT_CONFIG_PAYLOAD_SIZE) { realtime_if_fft_engine_config_t c; memset(&c,0,sizeof(c)); c.version=data[0]; c.flags=data[1]; c.center_frequency_hz=(uint64_t)read_f64_le(&data[4]); if(g_protocol.realtime_if_fft_control && g_protocol.realtime_if_fft_control(REALTIME_IF_FFT_ENGINE_ACTION_CONFIGURE,&c)==0) send_ack(cmd,ACK_OK,ERR_NONE); else send_ack(cmd,ACK_FAIL,ERR_INTERNAL); } else send_ack(cmd,ACK_FAIL,ERR_BAD_FRAME); break;
+    case CMD_RT_FFT_START:
+        if(length==0U && g_protocol.realtime_if_fft_control && g_protocol.realtime_if_fft_control(REALTIME_IF_FFT_ENGINE_ACTION_START,0)==0) send_ack(cmd,ACK_OK,ERR_NONE); else send_ack(cmd,ACK_FAIL,ERR_INTERNAL); break;
+    case CMD_RT_FFT_STOP:
+        if ((length == 0U) && (g_protocol.realtime_if_fft_control != 0)) {
+            send_ack(cmd, ACK_OK, ERR_NONE);
+            (void)g_protocol.realtime_if_fft_control(REALTIME_IF_FFT_ENGINE_ACTION_STOP, 0);
+        } else send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
+        break;
+    case CMD_RT_FFT_GET_STATUS:
+        if ((length == 0U) && (g_protocol.realtime_if_fft_control != 0)) {
+            send_ack(cmd, ACK_OK, ERR_NONE);
+            (void)g_protocol.realtime_if_fft_control(REALTIME_IF_FFT_ENGINE_ACTION_GET_STATUS, 0);
+        } else send_ack(cmd, ACK_FAIL, ERR_BAD_FRAME);
         break;
     case CMD_CAPTURE_STREAM_SMOKE:
         if ((length == 0U) || (length == 4U)) {

@@ -5,7 +5,8 @@
 
 #include "phase_noise_plan.h"
 
-#define PHASE_NOISE_VERSION 1U
+#define PHASE_NOISE_VERSION      1U
+#define PHASE_NOISE_DATA_VERSION 2U
 
 #define PHASE_NOISE_FLAG_CONTINUOUS                 0x01U
 #define PHASE_NOISE_FLAG_ALLOW_ESTIMATED_ENBW       0x02U
@@ -176,7 +177,6 @@ typedef struct {
     float current_raw_power_dbm;
     float current_power_dbm;
     float current_correction_db;
-    float average_noise_mw[PHASE_NOISE_PLAN_MAX_POINTS];
     uint64_t start_ticks;
     phase_noise_data_callback_t data_callback;
     void *data_callback_context;
