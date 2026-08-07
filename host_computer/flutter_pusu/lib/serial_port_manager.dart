@@ -10,6 +10,15 @@ enum ConnectionStatus {
   noPorts,
 }
 
+const Set<String> _blockedSerialPorts = {'COM42', 'COM43'};
+
+@visibleForTesting
+List<String> filterAvailableSerialPorts(Iterable<String> ports) {
+  return ports
+      .where((port) => !_blockedSerialPorts.contains(port.toUpperCase()))
+      .toList();
+}
+
 class SerialPortManager extends ChangeNotifier {
   List<String> availablePorts = [];
   String? selectedPort;
@@ -48,7 +57,7 @@ class SerialPortManager extends ChangeNotifier {
     try {
       final newPorts = await Isolate.run(() => SerialPort.availablePorts)
           .timeout(const Duration(seconds: 2), onTimeout: () => availablePorts);
-      _applyPorts(newPorts);
+      _applyPorts(filterAvailableSerialPorts(newPorts));
     } catch (e) {
       print('Refresh serial ports error: $e');
     } finally {

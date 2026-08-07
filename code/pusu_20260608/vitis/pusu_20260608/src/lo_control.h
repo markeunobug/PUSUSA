@@ -5,13 +5,21 @@
 
 #include "xstatus.h"
 
-/* Frequency plan:
- * LO1 translates RF(0~1.5 GHz) to IF1 = 2.180 GHz above RF.
- * LO2 is fixed at 2.220 GHz, so IF2 becomes 40 MHz for ADC sampling.
+/* Set to 0U to restore the original fixed 2180/2220 MHz frequency plan. */
+#ifndef LO_CONTROL_SPUR_AVOIDANCE_ENABLE
+#define LO_CONTROL_SPUR_AVOIDANCE_ENABLE 1U
+#endif
+
+/* Normal plan A and experimental spur-avoidance plan B. Both keep IF2 at
+ * 40 MHz. Plan B is selected only when plan A predicts the internal spur
+ * within 4 MHz of the active IF center.
  */
-#define LO_CONTROL_IF1_HZ  2180000000ULL
-#define LO_CONTROL_LO2_HZ  2220000000ULL
+#define LO_CONTROL_IF1_HZ          2180000000ULL
+#define LO_CONTROL_LO2_HZ          2220000000ULL
+#define LO_CONTROL_IF1_PLAN_B_HZ   2190000000ULL
+#define LO_CONTROL_LO2_PLAN_B_HZ   2230000000ULL
 #define LO_CONTROL_IF2_HZ  40000000ULL
+#define LO_CONTROL_SPUR_GUARD_HZ   4000000ULL
 #define LO_CONTROL_INIT_LOCK_TIMEOUT_LOOPS 500000U
 
 #define LO_CONTROL_DEVICE_ADC_CLK 0U
@@ -21,6 +29,7 @@
 int lo_control_init(void);
 uint64_t lo_control_calculate_lo1_hz(uint64_t rf_hz);
 int lo_control_set_lo1_for_rf_hz(uint64_t rf_hz);
+int lo_control_set_sweep_frequency_for_rf_hz(uint64_t rf_hz);
 int lo_control_set_lo2_fixed(void);
 int lo_control_wait_lock(uint8_t device_index, uint32_t timeout_loops);
 int lo_control_is_locked(uint8_t device_index);

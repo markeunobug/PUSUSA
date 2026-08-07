@@ -72,6 +72,8 @@ class PhaseNoiseWarning {
 }
 
 class PhaseNoiseConfig {
+  static const double minimumOffsetHz = 1000.0;
+
   final PhaseNoiseCarrierMode carrierMode;
   final double? manualCarrierHz;
   final double? nominalCarrierHz;
@@ -134,14 +136,18 @@ class PhaseNoiseConfig {
       nominalCarrierHz ?? manualCarrierHz ?? 0.0;
 
   int get estimatedPointCount {
-    if (startOffsetHz <= 0 || stopOffsetHz < startOffsetHz) return 0;
+    if (startOffsetHz < minimumOffsetHz || stopOffsetHz < startOffsetHz) {
+      return 0;
+    }
     if (pointsPerDecade <= 0) return 0;
     final decades = math.log(stopOffsetHz / startOffsetHz) / math.ln10;
     return math.max(1, (decades * pointsPerDecade).round() + 1);
   }
 
   bool get isValid {
-    if (startOffsetHz <= 0 || stopOffsetHz < startOffsetHz) return false;
+    if (startOffsetHz < minimumOffsetHz || stopOffsetHz < startOffsetHz) {
+      return false;
+    }
     if (rbwHz <= 0 || effectiveEnbwHz <= 0) return false;
     if (averageTarget <= 0) return false;
     if (pointsPerDecade <= 0) return false;

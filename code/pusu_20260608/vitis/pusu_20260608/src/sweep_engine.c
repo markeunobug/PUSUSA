@@ -148,7 +148,7 @@ int sweep_engine_poll(sweep_engine_t *engine)
         signal_processing_set_debug_point_index(engine->current_point);
         sweep_profile_begin(SWEEP_PROFILE_SECTION_POINT_TOTAL);
         sweep_profile_begin(SWEEP_PROFILE_SECTION_SET_LO1);
-        if (lo_control_set_lo1_for_rf_hz(engine->current_rf_hz) != XST_SUCCESS) {
+        if (lo_control_set_sweep_frequency_for_rf_hz(engine->current_rf_hz) != XST_SUCCESS) {
             sweep_profile_end(SWEEP_PROFILE_SECTION_SET_LO1);
             sweep_profile_end(SWEEP_PROFILE_SECTION_POINT_TOTAL);
             sweep_engine_set_error(engine, SWEEP_ENGINE_ERR_LO1_SET);

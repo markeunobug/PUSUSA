@@ -4,11 +4,13 @@ import 'dart:math' as math;
 import 'package:fluent_ui/fluent_ui.dart' as fluent;
 import 'package:flutter/material.dart';
 
+import 'agent/realtime_spectrum_analysis.dart';
 import 'device_models.dart';
 import 'realtime_spectrum_controls.dart';
 import 'realtime_spectrum_models.dart';
 import 'realtime_spectrum_processor.dart';
 import 'realtime_spectrum_settings.dart';
+import 'resizable_panel_divider.dart';
 import 'serial_protocol.dart';
 
 class RealtimeSpectrumPage extends StatefulWidget {
@@ -16,20 +18,28 @@ class RealtimeSpectrumPage extends StatefulWidget {
     super.key,
     required this.protocol,
     required this.connected,
+    this.initialRfConfig,
+    this.initialVgaLabel,
+    this.sidebarWidth = 300,
+    this.onSidebarDragDelta,
   });
 
   final SerialProtocol protocol;
   final bool connected;
+  final RfFrontendConfig? initialRfConfig;
+  final String? initialVgaLabel;
+  final double sidebarWidth;
+  final ValueChanged<double>? onSidebarDragDelta;
 
   @override
-  State<RealtimeSpectrumPage> createState() => _RealtimeSpectrumPageState();
+  State<RealtimeSpectrumPage> createState() => RealtimeSpectrumPageState();
 }
 
 class _RtTransactionCancelled implements Exception {
   const _RtTransactionCancelled();
 }
 
-class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
+class RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
   static const _vgaLabels = <String>[
     '-11 dB',
     '-10 dB',
@@ -60,6 +70,7 @@ class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
   final _processor = RealtimeSpectrumProcessor();
   final _center = TextEditingController(
       text: RealtimeSpectrumSettingsStore.cached.centerMhz);
+  final _attenuation = TextEditingController();
   late final StreamSubscription<RealtimeSpectrumFrame> _dataSub;
   late final StreamSubscription<RealtimeSpectrumStatus> _statusSub;
   Timer? _uiTimer;
@@ -76,6 +87,8 @@ class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
   bool _average = RealtimeSpectrumSettingsStore.cached.averageEnabled;
   bool _maxHold = RealtimeSpectrumSettingsStore.cached.maxHoldEnabled;
   bool _markerEnabled = RealtimeSpectrumSettingsStore.cached.markerEnabled;
+  List<double> _agentMarkerFrequenciesHz = <double>[];
+  List<double> _agentMarkerLevelsDbfs = <double>[];
   RfFrontendConfig _rf = RfFrontendConfig(
       lnaMode: RealtimeSpectrumSettingsStore.cached.lnaEnabled
           ? RfLnaMode.enable
@@ -91,10 +104,27 @@ class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
       RealtimeSpectrumSettingsStore.cached.waterfallReferenceDbfs;
   String _state = 'Idle';
 
+  double get _attenuationDb => _rf.attenDb;
+
   @override
   void initState() {
     super.initState();
+    final initialRf = widget.initialRfConfig;
+    final initialVga = widget.initialVgaLabel;
+    if (initialRf != null) {
+      _rf = initialRf.copyWith(pathMode: RfPathMode.mixerChain);
+      _settingsChanged = true;
+    }
+    if (initialVga != null && _vgaLabels.contains(initialVga)) {
+      _vga = initialVga;
+      _settingsChanged = true;
+    }
+    // Keep the session cache in sync even when tests, Agent actions, or other
+    // code update the controller directly instead of going through TextBox's
+    // onChanged callback.
+    _center.addListener(_rememberSettings);
     _restoreSettings();
+    _attenuation.text = _attenuationDb.toStringAsFixed(2);
     _dataSub = widget.protocol.realtimeSpectrumStream.listen((frame) {
       if (!_acceptFrames ||
           frame.errorCode != 0 ||
@@ -142,6 +172,7 @@ class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
     _dataSub.cancel();
     _statusSub.cancel();
     _center.dispose();
+    _attenuation.dispose();
     super.dispose();
   }
 
@@ -166,6 +197,7 @@ class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
         pathMode: RfPathMode.mixerChain,
         attenCode: settings.attenCode,
       );
+      _attenuation.text = _rf.attenDb.toStringAsFixed(2);
       _vga = vgaLabel;
       _referenceDbfs = settings.referenceDbfs;
       _waterfallFloorDbfs = waterfallFloor;
@@ -205,6 +237,351 @@ class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
   double? get _centerHz {
     final value = double.tryParse(_center.text.trim());
     return value == null ? null : value * 1e6;
+  }
+
+  bool get isRunning => _running;
+  String get agentStatus => _state;
+  double? get agentCenterHz => _centerHz;
+
+  Map<String, dynamic> get agentConfiguration => <String, dynamic>{
+        'measurement_mode': 'realtime_spectrum',
+        'connected': widget.connected,
+        'running': _running,
+        'busy': _busy,
+        'state': _state,
+        'center_hz': _centerHz,
+        'span_hz': 10e6,
+        'fft_size': 4096,
+        'bin_count': RealtimeSpectrumFrame.binCount,
+        'amplitude_unit': 'dBFS',
+        'average_enabled': _average,
+        'average_count': _processor.averageCount,
+        'max_hold_enabled': _maxHold,
+        'marker_enabled': _markerEnabled,
+        'lna_enabled': _rf.lnaMode == RfLnaMode.enable,
+        'attenuation_db': _rf.attenDb,
+        'vga_db': double.tryParse(_vga.split(' ').first),
+        'vga_status': _vgaStatus,
+        'reference_dbfs': _referenceDbfs,
+        'waterfall_floor_dbfs': _waterfallFloorDbfs,
+        'waterfall_reference_dbfs': _waterfallReferenceDbfs,
+        'waterfall_rows': _processor.waterfall.length,
+        'latest_frame': _latestFrame == null
+            ? null
+            : <String, dynamic>{
+                'sequence': _latestFrame!.sequence,
+                'center_hz': _latestFrame!.centerHz,
+                'sample_rate_hz': _latestFrame!.sampleRateHz,
+                'fft_size': _latestFrame!.fftSize,
+                'first_bin': _latestFrame!.firstBin,
+                'frames_emitted': _latestFrame!.framesEmitted,
+                'dropped_frames': _latestFrame!.droppedFrames,
+              },
+        'device_status': _status == null
+            ? null
+            : <String, dynamic>{
+                'state': _status!.state,
+                'error_code': _status!.errorCode,
+                'error_detail': _status!.errorDetail,
+                'frames_emitted': _status!.framesEmitted,
+                'dropped_frames': _status!.droppedFrames,
+                'dma_error_count': _status!.dmaErrorCount,
+              },
+      };
+
+  Future<Map<String, dynamic>> configureFromAgent({
+    double? centerHz,
+    bool? averageEnabled,
+    bool? maxHoldEnabled,
+    bool? markerEnabled,
+    bool? lnaEnabled,
+    double? attenuationDb,
+    double? vgaDb,
+    double? referenceDbfs,
+    double? waterfallFloorDbfs,
+    double? waterfallReferenceDbfs,
+    bool resetAverage = false,
+    bool resetMaxHold = false,
+  }) async {
+    if (_busy) {
+      throw StateError('实时频谱正在执行其他配置事务');
+    }
+    if (centerHz != null && (centerHz < 50e6 || centerHz > 1.5e9)) {
+      throw ArgumentError('实时频谱中心频率必须在 50 MHz–1.5 GHz 之间');
+    }
+    if (attenuationDb != null && (attenuationDb < 0 || attenuationDb > 31.75)) {
+      throw ArgumentError('实时频谱 DSA 必须在 0–31.75 dB 之间');
+    }
+    final vgaLabel = vgaDb == null ? _vga : _vgaLabel(vgaDb);
+    if (vgaLabel == null) {
+      throw ArgumentError('实时频谱 VGA 不在支持列表中');
+    }
+    if (referenceDbfs != null && (referenceDbfs < -140 || referenceDbfs > 0)) {
+      throw ArgumentError('参考电平必须在 -140–0 dBFS 之间');
+    }
+    final targetWaterfallFloor = waterfallFloorDbfs ?? _waterfallFloorDbfs;
+    final targetWaterfallReference =
+        waterfallReferenceDbfs ?? _waterfallReferenceDbfs;
+    if (targetWaterfallFloor < -160 ||
+        targetWaterfallReference > 0 ||
+        targetWaterfallFloor > targetWaterfallReference - 10) {
+      throw ArgumentError('瀑布底部必须至少比瀑布参考低 10 dB，范围为 -160–0 dBFS');
+    }
+
+    final targetRf = _rf.copyWith(
+      lnaMode: lnaEnabled == null
+          ? _rf.lnaMode
+          : lnaEnabled
+              ? RfLnaMode.enable
+              : RfLnaMode.bypass,
+      pathMode: RfPathMode.mixerChain,
+      attenCode: attenuationDb == null
+          ? _rf.attenCode
+          : (attenuationDb / 0.25).round().clamp(0, 127),
+    );
+    final rfChanged = targetRf.lnaMode != _rf.lnaMode ||
+        targetRf.attenCode != _rf.attenCode ||
+        vgaLabel != _vga;
+    if (rfChanged && !widget.connected) {
+      throw StateError('串口未连接，不能应用实时频谱射频前端配置');
+    }
+    final wasRunning = _running;
+    final centerChanged = centerHz != null && centerHz != _centerHz;
+
+    setState(() {
+      if (centerHz != null) {
+        _center.text = (centerHz / 1e6).toStringAsFixed(6);
+      }
+      if (averageEnabled != null) _average = averageEnabled;
+      if (maxHoldEnabled != null) _maxHold = maxHoldEnabled;
+      if (markerEnabled != null) {
+        _markerEnabled = markerEnabled;
+        if (!markerEnabled) _agentMarkerFrequenciesHz = <double>[];
+        if (!markerEnabled) _agentMarkerLevelsDbfs = <double>[];
+      }
+      if (referenceDbfs != null) _referenceDbfs = referenceDbfs;
+      _waterfallFloorDbfs = targetWaterfallFloor;
+      _waterfallReferenceDbfs = targetWaterfallReference;
+      if (resetAverage) _processor.resetAverage();
+      if (resetMaxHold) _processor.resetMaxHold();
+    });
+    _rememberSettings();
+
+    var hardwareApplied = false;
+    if (rfChanged) {
+      await _applyFrontend(rf: targetRf, vga: vgaLabel);
+      hardwareApplied = targetRf.lnaMode == _rf.lnaMode &&
+          targetRf.attenCode == _rf.attenCode &&
+          vgaLabel == _vga &&
+          (!wasRunning || _running);
+      if (!hardwareApplied) {
+        throw StateError('实时频谱射频前端配置失败：$_state');
+      }
+    } else if (centerChanged && wasRunning) {
+      await _start();
+      hardwareApplied = _running;
+      if (!hardwareApplied) {
+        throw StateError('实时频谱中心频率配置失败：$_state');
+      }
+    }
+    await RealtimeSpectrumSettingsStore.persist();
+    return <String, dynamic>{
+      ...agentConfiguration,
+      'hardware_applied': hardwareApplied,
+      'center_applied_to_device': !centerChanged || wasRunning,
+      'vga_has_device_readback': false,
+    };
+  }
+
+  Map<String, dynamic> snapshotForAgent({
+    required String trace,
+    required int maximumPoints,
+  }) {
+    final samples = _samplesForTrace(trace);
+    final sampled = RealtimeSpectrumAnalyzer.downsample(
+      samples,
+      maximumPoints,
+    );
+    return <String, dynamic>{
+      ...agentConfiguration,
+      'trace': trace,
+      'original_point_count': samples.length,
+      'returned_point_count': sampled.length,
+      'points': sampled.map((sample) => sample.toJson()).toList(),
+    };
+  }
+
+  List<RealtimeSpectrumSample> samplesForAgent(String trace) =>
+      List<RealtimeSpectrumSample>.unmodifiable(_samplesForTrace(trace));
+
+  Map<String, dynamic> waterfallHistoryForAgent({
+    required int maximumRows,
+    required double? lookbackSeconds,
+    required int maximumPointsPerRow,
+  }) {
+    if (maximumRows < 1 || maximumRows > 60) {
+      throw ArgumentError('maximumRows 必须在 1–60 之间');
+    }
+    if (lookbackSeconds != null &&
+        (lookbackSeconds < 0.1 || lookbackSeconds > 300)) {
+      throw ArgumentError('lookbackSeconds 必须在 0.1–300 秒之间');
+    }
+    if (maximumPointsPerRow < 16 || maximumPointsPerRow > 128) {
+      throw ArgumentError('maximumPointsPerRow 必须在 16–128 之间');
+    }
+
+    final history = _processor.waterfallHistory;
+    if (history.isEmpty) {
+      throw StateError('尚未收到可读取的实时频谱瀑布数据');
+    }
+    final now = DateTime.now().toUtc();
+    final cutoff = lookbackSeconds == null
+        ? null
+        : now.subtract(
+            Duration(microseconds: (lookbackSeconds * 1000000).round()),
+          );
+    final rowsInWindow = cutoff == null
+        ? history
+        : history
+            .where((row) => !row.capturedAtUtc.isBefore(cutoff))
+            .toList(growable: false);
+    if (rowsInWindow.isEmpty) {
+      throw StateError('指定的最近时间段内没有瀑布数据');
+    }
+
+    final selectedRows = rowsInWindow.take(maximumRows).toList(growable: false);
+    final newest = selectedRows.first;
+    final indices = _waterfallSampleIndices(
+      newest.levelsDbfs.length,
+      maximumPointsPerRow,
+    );
+    return <String, dynamic>{
+      ...agentConfiguration,
+      'amplitude_unit': 'dBFS',
+      'row_order': 'newest_first',
+      'available_rows': history.length,
+      'rows_in_time_window': rowsInWindow.length,
+      'returned_row_count': selectedRows.length,
+      'rows_truncated': rowsInWindow.length > selectedRows.length,
+      'lookback_seconds': lookbackSeconds,
+      'original_points_per_row': newest.levelsDbfs.length,
+      'returned_points_per_row': indices.length,
+      'frequencies_hz':
+          indices.map((index) => newest.frequencyHz(index)).toList(),
+      'rows': selectedRows
+          .map(
+            (row) => <String, dynamic>{
+              'captured_at_utc': row.capturedAtUtc.toIso8601String(),
+              'age_ms': math.max(
+                0,
+                now.difference(row.capturedAtUtc).inMilliseconds,
+              ),
+              'sequence': row.sequence,
+              'frames_emitted': row.framesEmitted,
+              'center_hz': row.centerHz,
+              'sample_rate_hz': row.sampleRateHz,
+              'fft_size': row.fftSize,
+              'first_bin': row.firstBin,
+              'levels_dbfs':
+                  indices.map((index) => row.levelsDbfs[index]).toList(),
+            },
+          )
+          .toList(),
+    };
+  }
+
+  List<int> _waterfallSampleIndices(int pointCount, int maximumPoints) {
+    if (pointCount <= maximumPoints) {
+      return List<int>.generate(pointCount, (index) => index, growable: false);
+    }
+    return List<int>.generate(
+      maximumPoints,
+      (index) => (index * (pointCount - 1) / (maximumPoints - 1)).round(),
+      growable: false,
+    );
+  }
+
+  RealtimeSpectrumAnalysis analyzeForAgent({
+    required String trace,
+    required int peakCount,
+    required double thresholdAboveNoiseDb,
+  }) {
+    return RealtimeSpectrumAnalyzer.analyze(
+      _samplesForTrace(trace),
+      trace: trace,
+      peakCount: peakCount,
+      thresholdAboveNoiseDb: thresholdAboveNoiseDb,
+    );
+  }
+
+  RealtimeSpectrumAnalysis placePeakMarkersFromAgent({
+    required String trace,
+    required int peakCount,
+    required double thresholdAboveNoiseDb,
+  }) {
+    final analysis = analyzeForAgent(
+      trace: trace,
+      peakCount: peakCount,
+      thresholdAboveNoiseDb: thresholdAboveNoiseDb,
+    );
+    if (analysis.peaks.isEmpty) {
+      throw StateError('实时频谱中没有满足阈值的峰值');
+    }
+    setState(() {
+      _markerEnabled = true;
+      _agentMarkerFrequenciesHz =
+          analysis.peaks.map((peak) => peak.frequencyHz).toList();
+      _agentMarkerLevelsDbfs =
+          analysis.peaks.map((peak) => peak.levelDbfs).toList();
+    });
+    _rememberSettings();
+    return analysis;
+  }
+
+  List<RealtimeSpectrumSample> _samplesForTrace(String trace) {
+    final frame = _latestFrame;
+    if (frame == null) throw StateError('尚未收到实时频谱 FFT 数据帧');
+    final values = switch (trace) {
+      'latest' => _processor.latest,
+      'average' => _processor.average,
+      'max_hold' => _processor.maxHold,
+      _ => throw ArgumentError('不支持的实时频谱 trace：$trace'),
+    };
+    if (values == null || values.isEmpty) {
+      throw StateError('实时频谱 $trace trace 尚无数据');
+    }
+    return List<RealtimeSpectrumSample>.generate(
+      values.length,
+      (index) => RealtimeSpectrumSample(
+        frequencyHz: frame.frequencyHz(index),
+        levelDbfs: values[index],
+      ),
+    );
+  }
+
+  String? _vgaLabel(double value) {
+    for (final label in _vgaLabels) {
+      if ((double.parse(label.split(' ').first) - value).abs() < 1e-9) {
+        return label;
+      }
+    }
+    return null;
+  }
+
+  Future<bool> startFromAgent(double centerHz) async {
+    if (!widget.connected || _busy || centerHz < 50e6 || centerHz > 1.5e9) {
+      return false;
+    }
+    _center.text = (centerHz / 1e6).toStringAsFixed(6);
+    _rememberSettings();
+    await _start();
+    return _running;
+  }
+
+  Future<bool> stopFromAgent() async {
+    if (!widget.connected || _busy) return false;
+    await _stop();
+    return !_running && (_status?.permitsReconfiguration ?? true);
   }
 
   void _checkOperation(int token) {
@@ -248,6 +625,8 @@ class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
     _processor.reset();
     _latestFrame = null;
     _lastSequence = null;
+    _agentMarkerFrequenciesHz = <double>[];
+    _agentMarkerLevelsDbfs = <double>[];
   }
 
   Future<void> _configureAndStart(double hz, int token) async {
@@ -428,6 +807,33 @@ class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
     }
   }
 
+  void _submitAttenuation() {
+    final value = double.tryParse(_attenuation.text.trim());
+    if (value == null || value < 0 || value > 31.75) {
+      _attenuation.text = _attenuationDb.toStringAsFixed(2);
+      return;
+    }
+    final code = (value / 0.25).round().clamp(0, 127);
+    _attenuation.text = (code * 0.25).toStringAsFixed(2);
+    unawaited(_applyFrontend(
+      rf: _rf.copyWith(
+        attenCode: code,
+        pathMode: RfPathMode.mixerChain,
+      ),
+    ));
+  }
+
+  void _stepAttenuation(int deltaCode) {
+    final code = (_rf.attenCode + deltaCode).clamp(0, 127);
+    _attenuation.text = (code * 0.25).toStringAsFixed(2);
+    unawaited(_applyFrontend(
+      rf: _rf.copyWith(
+        attenCode: code,
+        pathMode: RfPathMode.mixerChain,
+      ),
+    ));
+  }
+
   void _setReference(double value) {
     final range = realtimeDisplayRange(value);
     _setRememberedState(() {
@@ -456,9 +862,11 @@ class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
                     painter: _TracePainter(
                         frame: frame,
                         latest: latest,
-                        average: _processor.average,
-                        maxHold: _processor.maxHold,
+                        average: _average ? _processor.average : null,
+                        maxHold: _maxHold ? _processor.maxHold : null,
                         markerEnabled: _markerEnabled,
+                        agentMarkerFrequenciesHz: _agentMarkerFrequenciesHz,
+                        agentMarkerLevelsDbfs: _agentMarkerLevelsDbfs,
                         minDbfs: displayRange.minDbfs,
                         maxDbfs: displayRange.referenceDbfs),
                     child: const SizedBox.expand())),
@@ -472,13 +880,18 @@ class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
                     child: const SizedBox.expand())),
           ]),
         )),
+        if (widget.onSidebarDragDelta != null)
+          ResizablePanelDivider(
+            onDragDelta: widget.onSidebarDragDelta!,
+            tooltip: '拖动调整仪器工具栏宽度',
+          ),
         _buildSidebar(),
       ]),
     );
   }
 
   Widget _buildSidebar() => Container(
-        width: 300,
+        width: widget.sidebarWidth,
         color: const Color.fromARGB(255, 66, 66, 66),
         padding: const EdgeInsets.all(8),
         child: SingleChildScrollView(
@@ -496,7 +909,6 @@ class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
                         controller: _center,
                         enabled: !_busy && !_running,
                         placeholder: '775',
-                        onChanged: (_) => _rememberSettings(),
                       ),
                       const Text('MHz'),
                     ),
@@ -532,46 +944,50 @@ class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
                 header: const Text('射频前端'),
                 content: Column(
                   children: [
-                    _controlRow(
+                    _modeButtons<RfLnaMode>(
                       'LNA：',
-                      fluent.ToggleSwitch(
-                        checked: _rf.lnaMode == RfLnaMode.enable,
-                        onChanged: _busy
-                            ? null
-                            : (value) => _applyFrontend(
-                                  rf: _rf.copyWith(
-                                    lnaMode: value
-                                        ? RfLnaMode.enable
-                                        : RfLnaMode.bypass,
-                                    pathMode: RfPathMode.mixerChain,
-                                  ),
-                                ),
-                      ),
-                      Text(_rf.lnaMode == RfLnaMode.enable ? '启用' : '旁路'),
+                      _rf.lnaMode,
+                      const [RfLnaMode.bypass, RfLnaMode.enable],
+                      (mode) => unawaited(_applyFrontend(
+                        rf: _rf.copyWith(
+                          lnaMode: mode,
+                          pathMode: RfPathMode.mixerChain,
+                        ),
+                      )),
+                      (mode) => mode == RfLnaMode.enable ? 'LNA' : '直通',
                     ),
                     const SizedBox(height: 8),
-                    _controlRow(
-                      'DSA：',
-                      fluent.Slider(
-                        value: _rf.attenDb,
-                        min: 0,
-                        max: 31.75,
-                        divisions: 127,
-                        label: '${_rf.attenDb.toStringAsFixed(2)} dB',
-                        onChanged: _busy
-                            ? null
-                            : (value) {
-                                final code =
-                                    (value / .25).round().clamp(0, 127);
-                                _applyFrontend(
-                                  rf: _rf.copyWith(
-                                    attenCode: code,
-                                    pathMode: RfPathMode.mixerChain,
-                                  ),
-                                );
-                              },
-                      ),
-                      Text('${_rf.attenDb.toStringAsFixed(2)} dB'),
+                    Row(
+                      children: [
+                        const SizedBox(width: 100, child: Text('衰减：')),
+                        Expanded(
+                          child: fluent.TextBox(
+                            controller: _attenuation,
+                            enabled: !_busy,
+                            textAlign: TextAlign.right,
+                            onSubmitted: (_) => _submitAttenuation(),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        const Text('dB'),
+                        const SizedBox(width: 8),
+                        SizedBox(
+                          width: 32,
+                          child: fluent.Button(
+                            onPressed:
+                                _busy ? null : () => _stepAttenuation(-1),
+                            child: const Text('-'),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        SizedBox(
+                          width: 32,
+                          child: fluent.Button(
+                            onPressed: _busy ? null : () => _stepAttenuation(1),
+                            child: const Text('+'),
+                          ),
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 8),
                     _controlRow(
@@ -712,6 +1128,35 @@ class _RealtimeSpectrumPageState extends State<RealtimeSpectrumPage> {
         ],
       );
 
+  Widget _modeButtons<T>(
+    String label,
+    T selected,
+    List<T> values,
+    ValueChanged<T> onChanged,
+    String Function(T) text,
+  ) =>
+      Row(
+        children: [
+          SizedBox(width: 100, child: Text(label)),
+          Expanded(
+            child: Row(
+              children: values
+                  .map((value) => Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: fluent.ToggleButton(
+                            checked: value == selected,
+                            onChanged: _busy ? null : (_) => onChanged(value),
+                            child: Center(child: Text(text(value))),
+                          ),
+                        ),
+                      ))
+                  .toList(),
+            ),
+          ),
+        ],
+      );
+
   Widget _traceToggle(String label, bool enabled, ValueChanged<bool> onChanged,
           VoidCallback onReset) =>
       Row(children: [
@@ -773,6 +1218,8 @@ class _TracePainter extends CustomPainter {
     required this.average,
     required this.maxHold,
     required this.markerEnabled,
+    required this.agentMarkerFrequenciesHz,
+    required this.agentMarkerLevelsDbfs,
     required this.minDbfs,
     required this.maxDbfs,
   });
@@ -781,6 +1228,8 @@ class _TracePainter extends CustomPainter {
   final List<double>? average;
   final List<double>? maxHold;
   final bool markerEnabled;
+  final List<double> agentMarkerFrequenciesHz;
+  final List<double> agentMarkerLevelsDbfs;
   final double minDbfs;
   final double maxDbfs;
 
@@ -868,18 +1317,55 @@ class _TracePainter extends CustomPainter {
     _drawLine(canvas, plot, average, Colors.amber);
     _drawLine(canvas, plot, latest, Colors.cyanAccent);
     if (markerEnabled && latest != null && latest!.isNotEmpty) {
-      var peak = 0;
-      for (var i = 1; i < latest!.length; i++) {
-        if (latest![i] > latest![peak]) peak = i;
+      final markerBins = <int>[];
+      if (agentMarkerFrequenciesHz.isNotEmpty && activeFrame != null) {
+        for (final frequency in agentMarkerFrequenciesHz) {
+          var closest = 0;
+          var distance = (activeFrame.frequencyHz(0) - frequency).abs();
+          for (var index = 1; index < latest!.length; index++) {
+            final candidate =
+                (activeFrame.frequencyHz(index) - frequency).abs();
+            if (candidate < distance) {
+              closest = index;
+              distance = candidate;
+            }
+          }
+          markerBins.add(closest);
+        }
+      } else {
+        var peak = 0;
+        for (var i = 1; i < latest!.length; i++) {
+          if (latest![i] > latest![peak]) peak = i;
+        }
+        markerBins.add(peak);
       }
-      final x = plot.left + plot.width * peak / (latest!.length - 1);
-      final y = _yFor(latest![peak], plot);
       final markerPaint = Paint()
         ..color = Colors.white
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1;
-      canvas.drawLine(Offset(x, plot.top), Offset(x, plot.bottom), markerPaint);
-      canvas.drawCircle(Offset(x, y), 4, markerPaint);
+      for (var markerIndex = 0;
+          markerIndex < markerBins.length;
+          markerIndex++) {
+        final bin = markerBins[markerIndex];
+        final x = plot.left + plot.width * bin / (latest!.length - 1);
+        final markerLevel = markerIndex < agentMarkerLevelsDbfs.length
+            ? agentMarkerLevelsDbfs[markerIndex]
+            : latest![bin];
+        final y = _yFor(markerLevel, plot);
+        canvas.drawLine(
+          Offset(x, plot.top),
+          Offset(x, plot.bottom),
+          markerPaint,
+        );
+        canvas.drawCircle(Offset(x, y), 4, markerPaint);
+        _drawText(
+          canvas,
+          'M${markerIndex + 1}',
+          Offset(x, math.max(plot.top + 8, y - 10)),
+          center: true,
+          bold: true,
+        );
+      }
     }
     canvas.restore();
   }
@@ -952,6 +1438,7 @@ class _TracePainter extends CustomPainter {
       oldDelegate.average != average ||
       oldDelegate.maxHold != maxHold ||
       oldDelegate.markerEnabled != markerEnabled ||
+      oldDelegate.agentMarkerFrequenciesHz != agentMarkerFrequenciesHz ||
       oldDelegate.minDbfs != minDbfs ||
       oldDelegate.maxDbfs != maxDbfs;
 }

@@ -26,11 +26,15 @@ class RealtimeSpectrumProcessor {
   final int waterfallRows;
   List<double>? latest, average, maxHold;
   final List<List<double>> _waterfall = [];
+  final List<RealtimeSpectrumWaterfallRow> _waterfallHistory = [];
   int averageCount = 0;
   List<List<double>> get waterfall => List.unmodifiable(_waterfall);
+  List<RealtimeSpectrumWaterfallRow> get waterfallHistory =>
+      List.unmodifiable(_waterfallHistory);
   void reset() {
     latest = average = maxHold = null;
     _waterfall.clear();
+    _waterfallHistory.clear();
     averageCount = 0;
   }
 
@@ -41,7 +45,9 @@ class RealtimeSpectrumProcessor {
 
   void resetMaxHold() => maxHold = null;
   void add(RealtimeSpectrumFrame frame,
-      {bool averageEnabled = true, bool maxHoldEnabled = true}) {
+      {bool averageEnabled = true,
+      bool maxHoldEnabled = true,
+      DateTime? capturedAtUtc}) {
     latest = List.unmodifiable(frame.rawDbfs);
     if (averageEnabled) {
       final old = average;
@@ -65,9 +71,50 @@ class RealtimeSpectrumProcessor {
               : math.max(maxHold![i], frame.rawDbfs[i])));
     }
     // Row zero is always the newest frame; history advances downward.
-    _waterfall.insert(0, List.unmodifiable(frame.rawDbfs));
+    final levels = List<double>.unmodifiable(frame.rawDbfs);
+    _waterfall.insert(0, levels);
+    _waterfallHistory.insert(
+      0,
+      RealtimeSpectrumWaterfallRow(
+        capturedAtUtc: (capturedAtUtc ?? DateTime.now().toUtc()).toUtc(),
+        sequence: frame.sequence,
+        framesEmitted: frame.framesEmitted,
+        centerHz: frame.centerHz,
+        sampleRateHz: frame.sampleRateHz,
+        fftSize: frame.fftSize,
+        firstBin: frame.firstBin,
+        levelsDbfs: levels,
+      ),
+    );
     if (_waterfall.length > waterfallRows) {
       _waterfall.removeLast();
+      _waterfallHistory.removeLast();
     }
   }
+}
+
+/// One retained waterfall row, newest first in [RealtimeSpectrumProcessor].
+class RealtimeSpectrumWaterfallRow {
+  const RealtimeSpectrumWaterfallRow({
+    required this.capturedAtUtc,
+    required this.sequence,
+    required this.framesEmitted,
+    required this.centerHz,
+    required this.sampleRateHz,
+    required this.fftSize,
+    required this.firstBin,
+    required this.levelsDbfs,
+  });
+
+  final DateTime capturedAtUtc;
+  final int sequence;
+  final int framesEmitted;
+  final double centerHz;
+  final int sampleRateHz;
+  final int fftSize;
+  final int firstBin;
+  final List<double> levelsDbfs;
+
+  double frequencyHz(int index) =>
+      centerHz + (firstBin + index) * sampleRateHz / fftSize - 40e6;
 }

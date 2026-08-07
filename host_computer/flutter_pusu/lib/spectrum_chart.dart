@@ -11,6 +11,18 @@ class Marker {
   Marker(this.id, this.freqHz, {this.enabled = false});
 }
 
+class SpectrumLimitLine {
+  const SpectrumLimitLine({
+    required this.label,
+    required this.powerDbm,
+    required this.color,
+  });
+
+  final String label;
+  final double powerDbm;
+  final material.Color color;
+}
+
 typedef MarkerDragUpdate = void Function(Marker marker, double freqHz);
 
 class SpectrumChart extends material.StatelessWidget {
@@ -32,6 +44,9 @@ class SpectrumChart extends material.StatelessWidget {
   final bool traceSmoothingEnabled;
   final String zeroSpanFreqStr;
   final String zeroSpanElapsedStr;
+  final List<FlSpot> referenceData;
+  final String referenceLabel;
+  final List<SpectrumLimitLine> limitLines;
 
   const SpectrumChart({
     super.key,
@@ -53,6 +68,9 @@ class SpectrumChart extends material.StatelessWidget {
     this.traceSmoothingEnabled = false,
     this.zeroSpanFreqStr = '',
     this.zeroSpanElapsedStr = '',
+    this.referenceData = const <FlSpot>[],
+    this.referenceLabel = '',
+    this.limitLines = const <SpectrumLimitLine>[],
   });
 
   static const double _leftAxisReservedSize = 60;
@@ -77,6 +95,39 @@ class SpectrumChart extends material.StatelessWidget {
   material.Widget _buildMarkerInfoRow() {
     if (isZeroSpan) return const material.SizedBox.shrink();
     final enabledMarkers = markers.where((m) => m.enabled).toList();
+    final items = <material.Widget>[
+      ...enabledMarkers.map((m) {
+        final freqStr = formatMarkerFreqAutoUnit(m.freqHz);
+        final y = _getYAt(m.freqHz);
+        return material.Text(
+          'M${m.id}  $freqStr  ${y.toStringAsFixed(2)} dBm',
+          style: const material.TextStyle(
+            color: material.Colors.white,
+            fontSize: 13,
+            fontWeight: material.FontWeight.w600,
+          ),
+        );
+      }),
+      if (referenceData.isNotEmpty)
+        material.Text(
+          '参考：${referenceLabel.isEmpty ? '历史测量' : referenceLabel}',
+          style: const material.TextStyle(
+            color: material.Colors.cyanAccent,
+            fontSize: 12,
+            fontWeight: material.FontWeight.w600,
+          ),
+        ),
+      ...limitLines.map(
+        (line) => material.Text(
+          '${line.label}  ${line.powerDbm.toStringAsFixed(2)} dBm',
+          style: material.TextStyle(
+            color: line.color,
+            fontSize: 12,
+            fontWeight: material.FontWeight.w600,
+          ),
+        ),
+      ),
+    ];
 
     return material.Container(
       width: double.infinity,
@@ -86,18 +137,7 @@ class SpectrumChart extends material.StatelessWidget {
         crossAxisAlignment: material.WrapCrossAlignment.start,
         spacing: 32,
         runSpacing: 8,
-        children: enabledMarkers.map((m) {
-          final freqStr = formatMarkerFreqAutoUnit(m.freqHz);
-          final y = _getYAt(m.freqHz);
-          return material.Text(
-            'M${m.id}  $freqStr  ${y.toStringAsFixed(2)} dBm',
-            style: const material.TextStyle(
-              color: material.Colors.white,
-              fontSize: 13,
-              fontWeight: material.FontWeight.w600,
-            ),
-          );
-        }).toList(),
+        children: items,
       ),
     );
   }
@@ -218,10 +258,22 @@ class SpectrumChart extends material.StatelessWidget {
                     barWidth: 2,
                     dotData: const FlDotData(show: false),
                   ),
+                  if (referenceData.isNotEmpty && !isZeroSpan)
+                    LineChartBarData(
+                      spots: referenceData,
+                      isCurved: false,
+                      color: material.Colors.cyanAccent.withValues(alpha: 0.8),
+                      barWidth: 1.5,
+                      dashArray: const <int>[7, 5],
+                      dotData: const FlDotData(show: false),
+                    ),
                 ],
                 extraLinesData: ExtraLinesData(
                   verticalLines: _buildMarkerVerticalLines(),
-                  horizontalLines: _buildMarkerHorizontalLines(),
+                  horizontalLines: <HorizontalLine>[
+                    ..._buildMarkerHorizontalLines(),
+                    ..._buildLimitHorizontalLines(),
+                  ],
                 ),
               ),
               duration: Duration.zero,
@@ -380,6 +432,32 @@ class SpectrumChart extends material.StatelessWidget {
         ),
       );
     }).toList();
+  }
+
+  List<HorizontalLine> _buildLimitHorizontalLines() {
+    if (isZeroSpan) return const <HorizontalLine>[];
+    return limitLines
+        .where((line) => line.powerDbm >= minDbm && line.powerDbm <= maxDbm)
+        .map(
+          (line) => HorizontalLine(
+            y: line.powerDbm,
+            color: line.color.withValues(alpha: 0.9),
+            strokeWidth: 1.5,
+            dashArray: const <int>[6, 4],
+            label: HorizontalLineLabel(
+              show: true,
+              alignment: material.Alignment.topRight,
+              padding: const material.EdgeInsets.only(right: 6, bottom: 2),
+              labelResolver: (_) => line.label,
+              style: material.TextStyle(
+                color: line.color,
+                fontSize: 10,
+                fontWeight: material.FontWeight.w600,
+              ),
+            ),
+          ),
+        )
+        .toList();
   }
 
   @override

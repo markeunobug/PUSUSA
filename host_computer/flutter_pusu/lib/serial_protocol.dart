@@ -803,6 +803,11 @@ class SerialProtocol {
     bool continuous = false,
     bool emitIntermediateAverages = true,
   }) {
+    if (!config.isValid) {
+      throw ArgumentError(
+        '相位噪声配置无效：起始频偏不得低于 1 kHz，终止频偏不得小于起始频偏',
+      );
+    }
     final data = Uint8List(36);
     final byteData = data.buffer.asByteData();
     var flags = _phaseNoiseFlagAllowEstimatedEnbw;

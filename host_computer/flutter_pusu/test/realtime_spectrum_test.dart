@@ -72,6 +72,31 @@ void main() {
     p.add(f(-10));
     expect(p.waterfall.map((row) => row.first), [-10, -20]);
   });
+  test('waterfall history keeps timestamps and frame metadata newest first',
+      () {
+    final p = RealtimeSpectrumProcessor(waterfallRows: 2);
+    RealtimeSpectrumFrame f(int sequence, double db) => RealtimeSpectrumFrame(
+        windowId: 1,
+        amplitudeUnit: 1,
+        errorCode: 0,
+        sequence: sequence,
+        centerHz: 100e6,
+        sampleRateHz: 130000000,
+        fftSize: 4096,
+        firstBin: 0,
+        droppedFrames: 0,
+        framesEmitted: sequence,
+        rawDbfs: List.filled(315, db));
+    final first = DateTime.utc(2026, 8, 7, 1, 2, 3);
+    p.add(f(1, -30), capturedAtUtc: first);
+    p.add(f(2, -20), capturedAtUtc: first.add(const Duration(seconds: 1)));
+
+    expect(p.waterfallHistory.map((row) => row.sequence), [2, 1]);
+    expect(p.waterfallHistory.first.capturedAtUtc,
+        first.add(const Duration(seconds: 1)));
+    expect(p.waterfallHistory.first.framesEmitted, 2);
+    expect(p.waterfallHistory.first.frequencyHz(0), closeTo(60e6, .01));
+  });
   test('waterfall display normalization clamps at floor and reference', () {
     expect(
         normalizeWaterfallLevel(-180, floorDbfs: -140, referenceDbfs: -30), 0);

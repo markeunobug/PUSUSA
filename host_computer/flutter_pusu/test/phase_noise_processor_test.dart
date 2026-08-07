@@ -13,6 +13,16 @@ double _expectedDbcPerHz(double noisePowerDbm, double carrierLevelDbm) {
 }
 
 void main() {
+  test('phase-noise configuration rejects offsets below 1 kHz', () {
+    const config = PhaseNoiseConfig(
+      startOffsetHz: 999.0,
+      stopOffsetHz: 1000000.0,
+    );
+
+    expect(config.isValid, isFalse);
+    expect(config.estimatedPointCount, 0);
+  });
+
   test('default density estimates 181 points from 1 kHz to 1 MHz', () {
     const config = PhaseNoiseConfig(
       startOffsetHz: 1000.0,

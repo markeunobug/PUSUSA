@@ -4,6 +4,53 @@
 #include "lock_indicator.h"
 #include "lmx2572.h"
 
+#define LO_CONTROL_PLAN_A 0U
+#define LO_CONTROL_PLAN_B 1U
+
+static uint8_t g_current_plan = LO_CONTROL_PLAN_A;
+
+static uint64_t lo_control_abs_diff_u64(uint64_t a, uint64_t b)
+{
+    return (a >= b) ? (a - b) : (b - a);
+}
+
+static uint8_t lo_control_select_sweep_plan(uint64_t rf_hz)
+{
+#if LO_CONTROL_SPUR_AVOIDANCE_ENABLE
+    uint64_t spur_a_hz = lo_control_abs_diff_u64(2ULL * rf_hz,
+                                                 2300000000ULL);
+    uint64_t distance_a_hz = lo_control_abs_diff_u64(spur_a_hz,
+                                                      LO_CONTROL_IF2_HZ);
+
+    if (distance_a_hz < LO_CONTROL_SPUR_GUARD_HZ) {
+        return LO_CONTROL_PLAN_B;
+    }
+#else
+    (void)rf_hz;
+#endif
+
+    return LO_CONTROL_PLAN_A;
+}
+
+static int lo_control_apply_plan_for_rf_hz(uint64_t rf_hz, uint8_t plan)
+{
+    uint64_t if1_hz = (plan == LO_CONTROL_PLAN_B)
+        ? LO_CONTROL_IF1_PLAN_B_HZ
+        : LO_CONTROL_IF1_HZ;
+    uint64_t lo2_hz = (plan == LO_CONTROL_PLAN_B)
+        ? LO_CONTROL_LO2_PLAN_B_HZ
+        : LO_CONTROL_LO2_HZ;
+
+    if (plan != g_current_plan) {
+        if (lmx2572_board_set_frequency(LO_CONTROL_DEVICE_LO2, lo2_hz) != XST_SUCCESS) {
+            return XST_FAILURE;
+        }
+        g_current_plan = plan;
+    }
+
+    return lmx2572_board_set_frequency(LO_CONTROL_DEVICE_LO1, rf_hz + if1_hz);
+}
+
 static void lo_control_update_lock_indicator(uint8_t device_index, int locked)
 {
     lock_indicator_set_lmx(device_index, locked);
@@ -56,13 +103,25 @@ uint64_t lo_control_calculate_lo1_hz(uint64_t rf_hz)
 
 int lo_control_set_lo1_for_rf_hz(uint64_t rf_hz)
 {
-    return lmx2572_board_set_frequency(LO_CONTROL_DEVICE_LO1,
-                                       lo_control_calculate_lo1_hz(rf_hz));
+    return lo_control_apply_plan_for_rf_hz(rf_hz, LO_CONTROL_PLAN_A);
+}
+
+int lo_control_set_sweep_frequency_for_rf_hz(uint64_t rf_hz)
+{
+    return lo_control_apply_plan_for_rf_hz(
+        rf_hz,
+        lo_control_select_sweep_plan(rf_hz));
 }
 
 int lo_control_set_lo2_fixed(void)
 {
-    return lmx2572_board_set_frequency(LO_CONTROL_DEVICE_LO2, LO_CONTROL_LO2_HZ);
+    int status = lmx2572_board_set_frequency(LO_CONTROL_DEVICE_LO2,
+                                             LO_CONTROL_LO2_HZ);
+
+    if (status == XST_SUCCESS) {
+        g_current_plan = LO_CONTROL_PLAN_A;
+    }
+    return status;
 }
 
 int lo_control_wait_lock(uint8_t device_index, uint32_t timeout_loops)
@@ -86,6 +145,16 @@ int lo_control_wait_lock(uint8_t device_index, uint32_t timeout_loops)
 
 int lo_control_is_locked(uint8_t device_index)
 {
+#if LO_CONTROL_SPUR_AVOIDANCE_ENABLE
+    if (device_index == LO_CONTROL_DEVICE_LO1) {
+        int lo1_locked = lmx2572_board_is_locked(LO_CONTROL_DEVICE_LO1) ? 1 : 0;
+        int lo2_locked = lmx2572_board_is_locked(LO_CONTROL_DEVICE_LO2) ? 1 : 0;
+
+        lo_control_update_lock_indicator(LO_CONTROL_DEVICE_LO1, lo1_locked);
+        lo_control_update_lock_indicator(LO_CONTROL_DEVICE_LO2, lo2_locked);
+        return (lo1_locked && lo2_locked) ? XST_SUCCESS : XST_FAILURE;
+    }
+#endif
 
 //	if (device_index == LO_CONTROL_DEVICE_LO1) {
 //	        return XST_SUCCESS;

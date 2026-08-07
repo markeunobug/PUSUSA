@@ -2,12 +2,14 @@
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/material.dart' as material;
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui' as ui;
+import 'package:file_selector/file_selector.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/rendering.dart';
+import 'package:window_manager/window_manager.dart';
 
 // 瀵煎叆涓插彛鐩稿叧
 import 'serial_port_manager.dart';
@@ -15,11 +17,20 @@ import 'serial_port_selector.dart';
 import 'serial_protocol.dart';
 import 'device_models.dart';
 import 'amplitude_calibration.dart';
+import 'calibration_sweep_policy.dart';
 import 'frequency_format.dart';
 import 'phase_noise_chart.dart';
 import 'phase_noise_models.dart';
 import 'phase_noise_processor.dart';
+import 'fixed_frequency_compensation.dart';
 import 'realtime_spectrum_page.dart';
+import 'ai/ai_assistant_panel.dart';
+import 'agent/instrument_agent.dart';
+import 'agent/spectrum_analysis.dart';
+import 'agent/spectrum_comparison.dart';
+import 'agent/test_session_store.dart';
+import 'resizable_panel_divider.dart';
+import 'windows_title_bar.dart';
 
 // 瀵煎叆鑷畾涔夐璋卞浘缁勪欢
 import 'spectrum_chart.dart';
@@ -39,12 +50,18 @@ class CalibrationSamplingSettings {
     required this.restoreRbwMode,
     required this.restoreVbwMode,
     required this.restoreWasContinuous,
+    required this.restoreStartHz,
+    required this.restoreStopHz,
+    required this.restoreFrequencyEditMode,
   });
 
   final List<String> rbwModes;
   final String restoreRbwMode;
   final String restoreVbwMode;
   final bool restoreWasContinuous;
+  final double restoreStartHz;
+  final double restoreStopHz;
+  final FrequencyEditMode restoreFrequencyEditMode;
 }
 
 class CalibrationCancelledException implements Exception {
@@ -84,7 +101,22 @@ class MeasurementPreset {
   final SweepMode sweepMode;
 }
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  if (Platform.isWindows) {
+    await windowManager.ensureInitialized();
+    const windowOptions = WindowOptions(
+      minimumSize: ui.Size(960, 600),
+      titleBarStyle: TitleBarStyle.hidden,
+      windowButtonVisibility: false,
+    );
+    unawaited(
+      windowManager.waitUntilReadyToShow(windowOptions, () async {
+        await windowManager.show();
+        await windowManager.focus();
+      }),
+    );
+  }
   runApp(const MyApp());
 }
 
@@ -134,7 +166,6 @@ class _MyHomePageState extends State<MyHomePage> {
     '30 kHz',
     '10 kHz',
   ];
-
   static const List<MeasurementPreset> _measurementPresets = [
     MeasurementPreset(
       name: '默认全频段',
@@ -194,7 +225,18 @@ class _MyHomePageState extends State<MyHomePage> {
     ),
   ];
 
-  final GlobalKey _screenshotBoundaryKey = GlobalKey();
+  final GlobalKey _spectrumScreenshotBoundaryKey = GlobalKey();
+  final GlobalKey _phaseNoiseScreenshotBoundaryKey = GlobalKey();
+  final GlobalKey _realtimeScreenshotBoundaryKey = GlobalKey();
+  final GlobalKey<AiAssistantPanelState> _aiAssistantKey =
+      GlobalKey<AiAssistantPanelState>();
+  final GlobalKey<RealtimeSpectrumPageState> _realtimeSpectrumPageKey =
+      GlobalKey<RealtimeSpectrumPageState>();
+  bool _aiAssistantVisible = false;
+  bool _aiAssistantListening = false;
+  bool _modeSwitchInFlight = false;
+  double _settingsPanelWidth = 300;
+  double _aiPanelWidth = 420;
   final FocusNode startFreqFocus = FocusNode();
   final FocusNode stopFreqFocus = FocusNode();
   final FocusNode centerFreqFocus = FocusNode();
@@ -253,12 +295,9 @@ class _MyHomePageState extends State<MyHomePage> {
   final TextEditingController pointCountController =
       TextEditingController(text: '128');
   final TextEditingController _phaseNoiseDisplayOffsetController =
-      TextEditingController(text: '0');
-  final TextEditingController _phaseNoiseDisplayThresholdController =
       TextEditingController(text: '-20');
-  final TextEditingController _eightyMHzDisplayOffsetController =
-      TextEditingController(text: '0');
-  static const double _eightyMHzDisplayTargetHz = 80e6;
+  final TextEditingController _phaseNoiseDisplayThresholdController =
+      TextEditingController(text: '-40');
   final TextEditingController _screenshotDirController =
       TextEditingController(text: _defaultScreenshotDirectory);
   bool _screenshotInProgress = false;
@@ -352,12 +391,22 @@ class _MyHomePageState extends State<MyHomePage> {
   // 涓插彛绠＄悊
   late SerialPortManager _serialManager;
   late SerialProtocol _protocol;
+  late InstrumentAgentGateway _instrumentAgentGateway;
+  late AgentTestSessionStore _agentTestSessionStore;
+  late Future<AgentTestSession?> _agentSessionRestoreFuture;
 
   final FlyoutController _serialFlyoutController = FlyoutController();
 
   // 棰戣氨鏁版嵁
   List<FlSpot> _spectrumData = [];
   List<FlSpot> _rawSpectrumData = [];
+  List<FlSpot> _agentReferenceSpectrumData = <FlSpot>[];
+  String _agentReferenceSpectrumLabel = '';
+  List<SpectrumLimitLine> _agentSpectrumLimitLines = <SpectrumLimitLine>[];
+  Map<String, dynamic>? _lastAgentLimitEvaluation;
+  double? _agentMaximumNoiseFloorDbm;
+  double? _agentMinimumMainPeakDbm;
+  double? _agentMinimumSpurSuppressionDb;
 
   // 连续鎵弿瀹氭椂鍣?
   Timer? _continuousSweepTimer;
@@ -371,7 +420,8 @@ class _MyHomePageState extends State<MyHomePage> {
   bool _acceptSpectrumData = true;
   bool _traceSmoothingEnabled = false;
   bool _phaseNoiseDisplayEnabled = false;
-  bool _eightyMHzDisplayEnabled = false;
+  bool _fixedFrequencyCompensationEnabled = true;
+  Map<double, double> _fixedFrequencyCompensationValues = <double, double>{};
   bool _deviceResponsive = false;
   bool _startupHandshakeInFlight = false;
   int _startupSyncAttempts = 0;
@@ -422,6 +472,48 @@ class _MyHomePageState extends State<MyHomePage> {
     super.initState();
     _serialManager = SerialPortManager();
     _protocol = SerialProtocol(_serialManager);
+    _agentTestSessionStore = AgentTestSessionStore(_agentSessionsDirectory());
+    _agentSessionRestoreFuture = _agentTestSessionStore.restoreActiveSession();
+    _instrumentAgentGateway = InstrumentAgentGateway(
+      snapshotProvider: _buildInstrumentAgentSnapshot,
+      setFrequency: _agentSetFrequency,
+      setBandwidth: _agentSetBandwidth,
+      setDetector: _agentSetDetector,
+      setMeasurementMode: _agentSetMeasurementMode,
+      startSingleSweep: _agentStartSingleSweep,
+      startContinuousSweep: _agentStartContinuousSweep,
+      stopMeasurement: _agentStopMeasurement,
+      startPhaseNoiseMeasurement: _agentStartPhaseNoiseMeasurement,
+      stopPhaseNoiseMeasurement: _agentStopPhaseNoiseMeasurement,
+      getPhaseNoiseState: _agentGetPhaseNoiseState,
+      configurePhaseNoise: _agentConfigurePhaseNoise,
+      analyzePhaseNoise: _agentAnalyzePhaseNoise,
+      startRealtimeSpectrum: _agentStartRealtimeSpectrum,
+      stopRealtimeSpectrum: _agentStopRealtimeSpectrum,
+      getSpectrumSnapshot: _agentGetSpectrumSnapshot,
+      analyzeSpectrum: _agentAnalyzeSpectrum,
+      placePeakMarkers: _agentPlacePeakMarkers,
+      getRealtimeSpectrumState: _agentGetRealtimeSpectrumState,
+      configureRealtimeSpectrum: _agentConfigureRealtimeSpectrum,
+      getRealtimeSpectrumSnapshot: _agentGetRealtimeSpectrumSnapshot,
+      getRealtimeWaterfallHistory: _agentGetRealtimeWaterfallHistory,
+      analyzeRealtimeSpectrum: _agentAnalyzeRealtimeSpectrum,
+      placeRealtimePeakMarkers: _agentPlaceRealtimePeakMarkers,
+      saveMeasurement: _agentSaveMeasurement,
+      saveRealtimeMeasurement: _agentSaveRealtimeMeasurement,
+      captureScreenshot: _agentCaptureScreenshot,
+      getTestSession: _agentGetTestSession,
+      startTestSession: _agentStartTestSession,
+      addTestNote: _agentAddTestNote,
+      endTestSession: _agentEndTestSession,
+      listTestSessions: _agentListTestSessions,
+      listMeasurements: _agentListMeasurements,
+      loadMeasurement: _agentLoadMeasurement,
+      compareMeasurements: _agentCompareMeasurements,
+      evaluateSpectrumLimits: _agentEvaluateSpectrumLimits,
+      clearAnalysisOverlays: _agentClearAnalysisOverlays,
+      exportTestReport: _agentExportTestReport,
+    );
     _lastConnectionStatus = _serialManager.connectionStatus.value;
 
     _protocol.spectrumStream.listen(_handleSpectrumData);
@@ -510,7 +602,6 @@ class _MyHomePageState extends State<MyHomePage> {
     pointCountController.dispose();
     _phaseNoiseDisplayOffsetController.dispose();
     _phaseNoiseDisplayThresholdController.dispose();
-    _eightyMHzDisplayOffsetController.dispose();
     _screenshotDirController.dispose();
     _calibrationPowerController.dispose();
     _calibrationSearchWindowController.dispose();
@@ -713,56 +804,52 @@ class _MyHomePageState extends State<MyHomePage> {
     }
     final thresholdDbm =
         double.tryParse(_phaseNoiseDisplayThresholdController.text.trim()) ??
-            -20.0;
+            -40.0;
     return data
         .map((spot) =>
-            spot.y > thresholdDbm ? FlSpot(spot.x, spot.y + offsetDb) : spot)
+            spot.y < thresholdDbm ? FlSpot(spot.x, spot.y + offsetDb) : spot)
         .toList();
   }
 
-  List<FlSpot> _buildEightyMHzDisplayData(List<FlSpot> data) {
-    if (!_eightyMHzDisplayEnabled || data.isEmpty) {
-      return data;
-    }
-    final offsetDb =
-        double.tryParse(_eightyMHzDisplayOffsetController.text.trim()) ?? 0.0;
-    if (offsetDb == 0.0) {
-      return data;
-    }
-
-    var minFreq = double.infinity;
-    var maxFreq = double.negativeInfinity;
-    var closestIndex = 0;
-    var closestDiff = double.infinity;
-    for (var i = 0; i < data.length; i++) {
-      final freq = data[i].x;
-      minFreq = math.min(minFreq, freq);
-      maxFreq = math.max(maxFreq, freq);
-      final diff = (freq - _eightyMHzDisplayTargetHz).abs();
-      if (diff < closestDiff) {
-        closestDiff = diff;
-        closestIndex = i;
-      }
-    }
-    if (_eightyMHzDisplayTargetHz < minFreq ||
-        _eightyMHzDisplayTargetHz > maxFreq) {
-      return data;
-    }
-
-    return [
-      for (var i = 0; i < data.length; i++)
-        (i - closestIndex).abs() <= 1
-            ? FlSpot(data[i].x, data[i].y + offsetDb)
-            : data[i],
-    ];
+  List<FlSpot> _buildChartDisplayData(List<FlSpot> data) {
+    return _buildPhaseNoiseDisplayData(data);
   }
 
-  List<FlSpot> _buildChartDisplayData(List<FlSpot> data) {
-    final phaseNoiseData = _buildPhaseNoiseDisplayData(data);
-    if (_isZeroSpan) {
-      return phaseNoiseData;
+  List<FlSpot> _buildActualSpectrumData(
+    List<FlSpot> data, {
+    bool sweepComplete = false,
+  }) {
+    if (!_fixedFrequencyCompensationEnabled) return data;
+    final replacements = buildFixedFrequencyCompensationValues(
+      data,
+      allowFollowingFallback: sweepComplete,
+    );
+    if (sweepComplete) {
+      _fixedFrequencyCompensationValues = replacements;
+    } else {
+      for (final entry in _fixedFrequencyCompensationValues.entries) {
+        replacements.putIfAbsent(entry.key, () => entry.value);
+      }
     }
-    return _buildEightyMHzDisplayData(phaseNoiseData);
+    return applyFixedFrequencyCompensation(
+      data,
+      replacements,
+    );
+  }
+
+  void _setFixedFrequencyCompensationEnabled(bool enabled) {
+    if (_fixedFrequencyCompensationEnabled == enabled) return;
+    final rawData = _displaySweepPoints.entries
+        .map((e) => FlSpot(e.key, e.value))
+        .toList()
+      ..sort((a, b) => a.x.compareTo(b.x));
+    setState(() {
+      _fixedFrequencyCompensationEnabled = enabled;
+      if (!_isZeroSpan) {
+        _spectrumData = _buildActualSpectrumData(rawData);
+        _updateAutoMarkersFromSpectrum();
+      }
+    });
   }
 
   List<FlSpot> _buildDisplaySpectrumFromRaw() {
@@ -789,9 +876,11 @@ class _MyHomePageState extends State<MyHomePage> {
   void _refreshDisplayedSpectrumWithCalibration() {
     _refreshCalibrationStatus();
     final display = _buildDisplaySpectrumFromRaw();
+    _fixedFrequencyCompensationValues = <double, double>{};
     setState(() {
-      _spectrumData = display;
+      _spectrumData = _buildActualSpectrumData(display);
       _updateAutoMarkersFromSpectrum();
+      _refreshAgentLimitEvaluation();
     });
   }
 
@@ -884,10 +973,14 @@ class _MyHomePageState extends State<MyHomePage> {
     _stopContinuousSweep();
   }
 
-  FlSpot? _findCalibrationPeak(List<FlSpot> rawTrace) {
+  FlSpot? _findCalibrationPeak(
+    List<FlSpot> rawTrace, {
+    bool applyConfiguredSearchWindow = true,
+  }) {
     if (rawTrace.isEmpty) return null;
     Iterable<FlSpot> candidates = rawTrace;
-    if (_calibrationPeakSearchMode == CalibrationPeakSearchMode.markerWindow &&
+    if (applyConfiguredSearchWindow &&
+        _calibrationPeakSearchMode == CalibrationPeakSearchMode.markerWindow &&
         _currentMarker != null &&
         _currentMarker!.enabled) {
       final windowHz = _parseFreq(
@@ -902,6 +995,20 @@ class _MyHomePageState extends State<MyHomePage> {
     }
     if (candidates.isEmpty) return null;
     return candidates.reduce((best, spot) => spot.y > best.y ? spot : best);
+  }
+
+  void _setCalibrationSweepRange(double startHz, double stopHz) {
+    _lastFrequencyEditMode = FrequencyEditMode.startStop;
+    _confirmedStartHz = startHz;
+    _confirmedStopHz = stopHz;
+    _syncFrequencyFieldsFromConfirmed();
+  }
+
+  void _setCalibrationCenterSpan(double centerHz, double spanHz) {
+    _lastFrequencyEditMode = FrequencyEditMode.centerSpan;
+    _confirmedStartHz = centerHz - spanHz / 2.0;
+    _confirmedStopHz = centerHz + spanHz / 2.0;
+    _syncFrequencyFieldsFromConfirmed();
   }
 
   double? _currentCalibrationReferencePower() {
@@ -955,6 +1062,9 @@ class _MyHomePageState extends State<MyHomePage> {
       restoreRbwMode: rbwMode.value,
       restoreVbwMode: vbwMode.value,
       restoreWasContinuous: _isContinuousSweepRunning,
+      restoreStartHz: _confirmedStartHz,
+      restoreStopHz: _confirmedStopHz,
+      restoreFrequencyEditMode: _lastFrequencyEditMode,
     );
 
     setState(() {
@@ -967,13 +1077,32 @@ class _MyHomePageState extends State<MyHomePage> {
     _calibrationEnabled = false;
     final samples = <AmplitudeCalibrationSample>[];
     double? calibrationFrequencyHz;
+    FlSpot? previousPeak;
 
     try {
       _stopContinuousSweep();
-      for (final mode in settings.rbwModes) {
+      for (var index = 0; index < settings.rbwModes.length; index++) {
+        final mode = settings.rbwModes[index];
         if (_calibrationCancelRequested) {
           throw const CalibrationCancelledException();
         }
+
+        double? sweepSpanHz;
+        if (multiRbw) {
+          if (index == 0) {
+            _setCalibrationSweepRange(
+              settings.restoreStartHz,
+              settings.restoreStopHz,
+            );
+          } else {
+            sweepSpanHz = CalibrationSweepPolicy.spanHzForMode(mode);
+            if (previousPeak == null || sweepSpanHz == null) {
+              throw StateError('RBW $mode 缺少逐级校准扫宽配置');
+            }
+            _setCalibrationCenterSpan(previousPeak.x, sweepSpanHz);
+          }
+        }
+
         _suppressBandwidthListener = true;
         try {
           rbwMode.value = mode;
@@ -984,15 +1113,47 @@ class _MyHomePageState extends State<MyHomePage> {
           _suppressBandwidthListener = false;
         }
 
-        final rawTrace = await _runSingleSweepForCalibration();
+        var rawTrace = await _runSingleSweepForCalibration();
         if (_calibrationCancelRequested) {
           throw const CalibrationCancelledException();
         }
-        final peak = _findCalibrationPeak(rawTrace);
+        var peak = _findCalibrationPeak(
+          rawTrace,
+          applyConfiguredSearchWindow: !multiRbw || index == 0,
+        );
         if (peak == null) {
           throw StateError('RBW $mode 未找到有效峰值');
         }
-        calibrationFrequencyHz ??= peak.x;
+
+        if (multiRbw &&
+            index > 0 &&
+            sweepSpanHz != null &&
+            previousPeak != null &&
+            CalibrationSweepPolicy.shouldRetryForPowerDrop(
+              previousPeakDbm: previousPeak.y,
+              currentPeakDbm: peak.y,
+            )) {
+          final firstPeak = peak;
+          final retrySpanHz = CalibrationSweepPolicy.retrySpanHz(sweepSpanHz);
+          setState(() {
+            _calibrationStatusText =
+                '$mode 峰值下降超过 ${CalibrationSweepPolicy.powerDropRetryDb.toStringAsFixed(0)} dB，扩大扫宽重试...';
+          });
+          _setCalibrationCenterSpan(previousPeak.x, retrySpanHz);
+          rawTrace = await _runSingleSweepForCalibration();
+          if (_calibrationCancelRequested) {
+            throw const CalibrationCancelledException();
+          }
+          final retryPeak = _findCalibrationPeak(
+            rawTrace,
+            applyConfiguredSearchWindow: false,
+          );
+          if (retryPeak != null && retryPeak.y > firstPeak.y) {
+            peak = retryPeak;
+          }
+        }
+
+        calibrationFrequencyHz = peak.x;
         samples.add(
           AmplitudeCalibrationSample(
             rbwHz: _getSelectedRbwHz(),
@@ -1002,6 +1163,7 @@ class _MyHomePageState extends State<MyHomePage> {
             timestamp: DateTime.now(),
           ),
         );
+        previousPeak = peak;
       }
 
       if (samples.isEmpty || calibrationFrequencyHz == null) {
@@ -1049,6 +1211,10 @@ class _MyHomePageState extends State<MyHomePage> {
     } finally {
       _suppressBandwidthListener = true;
       try {
+        _lastFrequencyEditMode = settings.restoreFrequencyEditMode;
+        _confirmedStartHz = settings.restoreStartHz;
+        _confirmedStopHz = settings.restoreStopHz;
+        _syncFrequencyFieldsFromConfirmed();
         rbwMode.value = settings.restoreRbwMode;
         vbwMode.value = settings.restoreVbwMode;
         _updateRbwField();
@@ -1091,16 +1257,22 @@ class _MyHomePageState extends State<MyHomePage> {
       return;
     }
     try {
-      final directoryPath = _screenshotDirController.text.trim().isEmpty
+      final savedAt = DateTime.now();
+      final initialDirectory = _screenshotDirController.text.trim().isEmpty
           ? _defaultScreenshotDirectory
           : _screenshotDirController.text.trim();
-      final directory = Directory(directoryPath);
-      await directory.create(recursive: true);
-      final savedAt = DateTime.now();
-      final file = File(
-        '${directory.path}${Platform.pathSeparator}'
-        'amplitude_calibration_${_formatFileTimestamp(savedAt)}.json',
+      final location = await getSaveLocation(
+        acceptedTypeGroups: const [
+          XTypeGroup(label: 'JSON 校准文件', extensions: ['json']),
+        ],
+        initialDirectory: initialDirectory,
+        suggestedName:
+            'amplitude_calibration_${_formatFileTimestamp(savedAt)}.json',
+        confirmButtonText: '导出',
+        canCreateDirectories: true,
       );
+      if (location == null) return;
+      final file = File(location.path);
       final exportFile = _calibrationFile.copyWith(
         createdAt: _calibrationFile.createdAt ?? savedAt,
       );
@@ -1125,41 +1297,30 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
-  void _showImportAmplitudeCalibrationDialog() {
-    final controller = TextEditingController(
-      text: _calibrationFilePath ??
-          '${_screenshotDirController.text.trim().isEmpty ? _defaultScreenshotDirectory : _screenshotDirController.text.trim()}${Platform.pathSeparator}amplitude_calibration.json',
-    );
-    showDialog(
-      context: context,
-      builder: (dialogContext) => ContentDialog(
-        title: const Text('导入幅度校准'),
-        constraints: const BoxConstraints(maxWidth: 560, maxHeight: 420),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text('JSON文件路径'),
-            const SizedBox(height: 8),
-            TextBox(controller: controller),
-          ],
-        ),
-        actions: [
-          Button(
-            child: const Text('取消'),
-            onPressed: () => Navigator.pop(dialogContext),
-          ),
-          FilledButton(
-            child: const Text('导入'),
-            onPressed: () async {
-              final path = controller.text.trim();
-              Navigator.pop(dialogContext);
-              await _importAmplitudeCalibration(path);
-            },
-          ),
+  Future<void> _showImportAmplitudeCalibrationDialog() async {
+    final currentPath = _calibrationFilePath;
+    final initialDirectory = currentPath == null
+        ? (_screenshotDirController.text.trim().isEmpty
+            ? _defaultScreenshotDirectory
+            : _screenshotDirController.text.trim())
+        : File(currentPath).parent.path;
+    try {
+      final selected = await openFile(
+        acceptedTypeGroups: const [
+          XTypeGroup(label: 'JSON 校准文件', extensions: ['json']),
         ],
-      ),
-    ).whenComplete(controller.dispose);
+        initialDirectory: initialDirectory,
+        confirmButtonText: '导入',
+      );
+      if (selected == null) return;
+      await _importAmplitudeCalibration(selected.path);
+    } catch (error) {
+      _showInfoBar(
+        title: '无法打开文件选择窗口',
+        content: error.toString(),
+        severity: InfoBarSeverity.error,
+      );
+    }
   }
 
   Future<void> _importAmplitudeCalibration(String path) async {
@@ -1309,6 +1470,7 @@ class _MyHomePageState extends State<MyHomePage> {
           .map((e) => FlSpot(e.key, e.value))
           .toList()
         ..sort((a, b) => a.x.compareTo(b.x));
+      _spectrumData = _buildActualSpectrumData(_spectrumData);
     });
   }
 
@@ -1335,6 +1497,13 @@ class _MyHomePageState extends State<MyHomePage> {
     }
     _lastSpectrumArrivalTime = now;
 
+    final completedData = _displaySweepPoints.entries
+        .map((e) => FlSpot(e.key, e.value))
+        .toList()
+      ..sort((a, b) => a.x.compareTo(b.x));
+    final actualCompletedData =
+        _buildActualSpectrumData(completedData, sweepComplete: true);
+
     setState(() {
       _rawDisplaySweepPoints.addAll(_rawPendingSweepPoints);
       _displaySweepPoints.addAll(_pendingSweepPoints);
@@ -1342,12 +1511,10 @@ class _MyHomePageState extends State<MyHomePage> {
           .map((e) => FlSpot(e.key, e.value))
           .toList()
         ..sort((a, b) => a.x.compareTo(b.x));
-      _spectrumData = _displaySweepPoints.entries
-          .map((e) => FlSpot(e.key, e.value))
-          .toList()
-        ..sort((a, b) => a.x.compareTo(b.x));
+      _spectrumData = actualCompletedData;
 
       _updateAutoMarkersFromSpectrum();
+      _refreshAgentLimitEvaluation();
     });
     _completeSingleSweepWaiter();
   }
@@ -1775,6 +1942,7 @@ class _MyHomePageState extends State<MyHomePage> {
     _displaySweepPoints.clear();
     _rawPendingSweepPoints.clear();
     _rawDisplaySweepPoints.clear();
+    _fixedFrequencyCompensationValues.clear();
     _zeroSpanData.clear();
     _zeroSpanStartTime = null;
     setState(() {
@@ -1943,100 +2111,31 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  void _showScreenshotSettings() {
-    final TextEditingController dialogController =
-        TextEditingController(text: _screenshotDirController.text);
-
-    showDialog(
-      context: context,
-      builder: (dialogContext) => ContentDialog(
-        title: const Text('截图保存'),
-        constraints: const BoxConstraints(maxWidth: 560, maxHeight: 420),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text('保存目录'),
-            const SizedBox(height: 8),
-            TextBox(
-              controller: dialogController,
-              placeholder: _defaultScreenshotDirectory,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '图片会自动添加保存日期时间，并以 PNG 格式保存。',
-              style: TextStyle(color: material.Colors.grey[300], fontSize: 12),
-            ),
-          ],
-        ),
-        actions: [
-          Button(
-            child: const Text('恢复默认'),
-            onPressed: () {
-              dialogController.text = _defaultScreenshotDirectory;
-            },
-          ),
-          Button(
-            child: const Text('取消'),
-            onPressed: () {
-              Navigator.pop(dialogContext);
-            },
-          ),
-          FilledButton(
-            onPressed: _screenshotInProgress
-                ? null
-                : () async {
-                    final String directoryPath = dialogController.text.trim();
-                    _screenshotDirController.text = directoryPath;
-                    Navigator.pop(dialogContext);
-                    await _saveScreenshot(directoryPath);
-                  },
-            child: Text(_screenshotInProgress ? '保存中...' : '保存截图'),
-          ),
-        ],
-      ),
-    ).whenComplete(dialogController.dispose);
+  Future<void> _showScreenshotSettings() async {
+    try {
+      final currentDirectory = _screenshotDirController.text.trim().isEmpty
+          ? _defaultScreenshotDirectory
+          : _screenshotDirController.text.trim();
+      final selectedDirectory = await getDirectoryPath(
+        initialDirectory: currentDirectory,
+        confirmButtonText: '选择截图保存文件夹',
+        canCreateDirectories: true,
+      );
+      if (selectedDirectory == null) return;
+      _screenshotDirController.text = selectedDirectory;
+      await _saveScreenshot(selectedDirectory);
+    } catch (error) {
+      _showInfoBar(
+        title: '无法打开文件夹选择窗口',
+        content: error.toString(),
+        severity: InfoBarSeverity.error,
+      );
+    }
   }
 
   Future<void> _saveScreenshot(String rawDirectoryPath) async {
-    if (_screenshotInProgress) return;
-
-    final String directoryPath = rawDirectoryPath.trim().isEmpty
-        ? _defaultScreenshotDirectory
-        : rawDirectoryPath.trim();
-    _screenshotDirController.text = directoryPath;
-
-    setState(() => _screenshotInProgress = true);
     try {
-      await WidgetsBinding.instance.endOfFrame;
-
-      final boundaryContext = _screenshotBoundaryKey.currentContext;
-      final renderObject = boundaryContext?.findRenderObject();
-      if (renderObject is! RenderRepaintBoundary) {
-        throw StateError('未找到可截图区域');
-      }
-
-      final DateTime savedAt = DateTime.now();
-      final ui.Image screenshot = await renderObject.toImage(pixelRatio: 2.0);
-      final ui.Image annotatedScreenshot =
-          await _addScreenshotTimestamp(screenshot, savedAt);
-      final ByteData? pngBytes =
-          await annotatedScreenshot.toByteData(format: ui.ImageByteFormat.png);
-      screenshot.dispose();
-      annotatedScreenshot.dispose();
-
-      if (pngBytes == null) {
-        throw StateError('截图编码失败');
-      }
-
-      final Directory directory = Directory(directoryPath);
-      await directory.create(recursive: true);
-
-      final String fileName = 'spectrum_${_formatFileTimestamp(savedAt)}.png';
-      final File file =
-          File('${directory.path}${Platform.pathSeparator}$fileName');
-      await file.writeAsBytes(pngBytes.buffer.asUint8List(), flush: true);
-
+      final file = await _captureCurrentMeasurementScreenshot(rawDirectoryPath);
       _showInfoBar(
         title: '截图保存成功',
         content: file.path,
@@ -2048,10 +2147,59 @@ class _MyHomePageState extends State<MyHomePage> {
         content: error.toString(),
         severity: InfoBarSeverity.error,
       );
-    } finally {
-      if (mounted) {
-        setState(() => _screenshotInProgress = false);
+    }
+  }
+
+  GlobalKey get _activeScreenshotBoundaryKey => switch (_measurementMode) {
+        MeasurementMode.spectrum => _spectrumScreenshotBoundaryKey,
+        MeasurementMode.phaseNoise => _phaseNoiseScreenshotBoundaryKey,
+        MeasurementMode.realtimeSpectrum => _realtimeScreenshotBoundaryKey,
+      };
+
+  String get _activeScreenshotPrefix => switch (_measurementMode) {
+        MeasurementMode.spectrum => 'spectrum',
+        MeasurementMode.phaseNoise => 'phase_noise',
+        MeasurementMode.realtimeSpectrum => 'realtime_spectrum',
+      };
+
+  Future<File> _captureCurrentMeasurementScreenshot(
+    String rawDirectoryPath,
+  ) async {
+    if (_screenshotInProgress) {
+      throw StateError('已有截图任务正在进行');
+    }
+    final directoryPath = rawDirectoryPath.trim().isEmpty
+        ? _defaultScreenshotDirectory
+        : rawDirectoryPath.trim();
+    _screenshotDirController.text = directoryPath;
+    setState(() => _screenshotInProgress = true);
+    try {
+      await WidgetsBinding.instance.endOfFrame;
+      final boundaryContext = _activeScreenshotBoundaryKey.currentContext;
+      final renderObject = boundaryContext?.findRenderObject();
+      if (renderObject is! RenderRepaintBoundary) {
+        throw StateError('未找到当前测量模式的可截图区域');
       }
+
+      final savedAt = DateTime.now();
+      final screenshot = await renderObject.toImage(pixelRatio: 2.0);
+      final annotatedScreenshot =
+          await _addScreenshotTimestamp(screenshot, savedAt);
+      final pngBytes =
+          await annotatedScreenshot.toByteData(format: ui.ImageByteFormat.png);
+      screenshot.dispose();
+      annotatedScreenshot.dispose();
+      if (pngBytes == null) throw StateError('截图编码失败');
+
+      final directory = Directory(directoryPath);
+      await directory.create(recursive: true);
+      final fileName =
+          '${_activeScreenshotPrefix}_${_formatFileTimestamp(savedAt)}.png';
+      final file = File('${directory.path}${Platform.pathSeparator}$fileName');
+      await file.writeAsBytes(pngBytes.buffer.asUint8List(), flush: true);
+      return file;
+    } finally {
+      if (mounted) setState(() => _screenshotInProgress = false);
     }
   }
 
@@ -2912,7 +3060,8 @@ class _MyHomePageState extends State<MyHomePage> {
             .map((e) => FlSpot(e.key, e.value))
             .toList()
           ..sort((a, b) => a.x.compareTo(b.x));
-        _spectrumData = _buildDisplaySpectrumFromRaw();
+        _spectrumData =
+            _buildActualSpectrumData(_buildDisplaySpectrumFromRaw());
       });
       _singleSweepCompleter?.completeError(TimeoutException(
         'Spectrum sweep timed out',
@@ -3100,10 +3249,14 @@ class _MyHomePageState extends State<MyHomePage> {
                 trailing: _measurementMode == MeasurementMode.spectrum
                     ? const Icon(FluentIcons.check_mark)
                     : const SizedBox.shrink(),
-                onPressed: () {
-                  _switchMeasurementMode(MeasurementMode.spectrum);
-                  Navigator.pop(context);
-                },
+                onPressed: _modeSwitchInFlight
+                    ? null
+                    : () {
+                        Navigator.pop(context);
+                        unawaited(
+                          _switchMeasurementMode(MeasurementMode.spectrum),
+                        );
+                      },
               ),
               ListTile(
                 title: const Text('相位噪声'),
@@ -3111,10 +3264,14 @@ class _MyHomePageState extends State<MyHomePage> {
                 trailing: _measurementMode == MeasurementMode.phaseNoise
                     ? const Icon(FluentIcons.check_mark)
                     : const SizedBox.shrink(),
-                onPressed: () {
-                  _switchMeasurementMode(MeasurementMode.phaseNoise);
-                  Navigator.pop(context);
-                },
+                onPressed: _modeSwitchInFlight
+                    ? null
+                    : () {
+                        Navigator.pop(context);
+                        unawaited(
+                          _switchMeasurementMode(MeasurementMode.phaseNoise),
+                        );
+                      },
               ),
               ListTile(
                 title: const Text('实时频谱'),
@@ -3123,10 +3280,16 @@ class _MyHomePageState extends State<MyHomePage> {
                 trailing: _measurementMode == MeasurementMode.realtimeSpectrum
                     ? const Icon(FluentIcons.check_mark)
                     : const SizedBox.shrink(),
-                onPressed: () {
-                  _switchMeasurementMode(MeasurementMode.realtimeSpectrum);
-                  Navigator.pop(context);
-                },
+                onPressed: _modeSwitchInFlight
+                    ? null
+                    : () {
+                        Navigator.pop(context);
+                        unawaited(
+                          _switchMeasurementMode(
+                            MeasurementMode.realtimeSpectrum,
+                          ),
+                        );
+                      },
               ),
             ],
           ),
@@ -3188,28 +3351,147 @@ class _MyHomePageState extends State<MyHomePage> {
         _formatFreqInput(clampedFreq, _markerFreqUnit.value);
   }
 
-  void _switchMeasurementMode(MeasurementMode mode) {
-    if (_measurementMode == mode) return;
-    if (_measurementMode == MeasurementMode.realtimeSpectrum &&
-        _serialManager.isConnected) {
-      _protocol.stopRealtimeSpectrum();
+  Future<void> _switchMeasurementMode(MeasurementMode mode) async {
+    if (_measurementMode == mode || _modeSwitchInFlight) return;
+    final previousMode = _measurementMode;
+    final realtimeFrontend = previousMode == MeasurementMode.realtimeSpectrum
+        ? _realtimeSpectrumPageKey.currentState?.agentConfiguration
+        : null;
+    setState(() {
+      _modeSwitchInFlight = true;
+    });
+
+    try {
+      final stopped = await _stopActiveMeasurementForModeSwitch();
+      if (!stopped) {
+        _showInfoBar(
+          title: '模式切换已取消',
+          content: '${_measurementModeLabel(previousMode)}任务未确认停止，请重试。',
+          severity: InfoBarSeverity.warning,
+        );
+        return;
+      }
+      if (!mounted) return;
+      _updateMeasurementModeUi(mode);
+      if (mode == MeasurementMode.spectrum && realtimeFrontend != null) {
+        _syncSweepFrontendFromRealtime(realtimeFrontend);
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _modeSwitchInFlight = false;
+        });
+      }
     }
+  }
+
+  void _syncSweepFrontendFromRealtime(Map<String, dynamic> state) {
+    final attenuation = (state['attenuation_db'] as num?)?.toDouble();
+    final lnaEnabled = state['lna_enabled'];
+    final vgaDb = (state['vga_db'] as num?)?.toDouble();
+    var config = _rfFrontendConfig;
+    if (attenuation != null && attenuation.isFinite) {
+      config = config.copyWith(
+        attenCode: (attenuation / 0.25).round().clamp(0, 127),
+        pathMode: RfPathMode.mixerChain,
+      );
+    }
+    if (lnaEnabled is bool) {
+      config = config.copyWith(
+        lnaMode: lnaEnabled ? RfLnaMode.enable : RfLnaMode.bypass,
+        pathMode: RfPathMode.mixerChain,
+      );
+    }
+    final vgaLabel = vgaDb == null ? null : _vgaLabelForDb(vgaDb);
+    _suppressPresetDeviceUpdates = true;
+    try {
+      setState(() {
+        _rfFrontendConfig = config;
+        _syncRfAttenText(config);
+        if (vgaLabel != null) vgaGainValue.value = vgaLabel;
+      });
+    } finally {
+      _suppressPresetDeviceUpdates = false;
+    }
+  }
+
+  String? _vgaLabelForDb(double value) {
+    const labels = <String>[
+      '-11 dB',
+      '-10 dB',
+      '-6 dB',
+      '-3 dB',
+      '0 dB',
+      '3 dB',
+      '6 dB',
+      '10 dB',
+      '20 dB',
+      '30 dB',
+      '34 dB',
+    ];
+    for (final label in labels) {
+      if ((double.parse(label.split(' ').first) - value).abs() < 1e-9) {
+        return label;
+      }
+    }
+    return null;
+  }
+
+  Future<bool> _stopActiveMeasurementForModeSwitch() async {
+    switch (_measurementMode) {
+      case MeasurementMode.spectrum:
+        return _stopContinuousSweep();
+      case MeasurementMode.phaseNoise:
+        _stopPhaseNoiseDemoContinuous();
+        if (!_serialManager.isConnected) {
+          if (mounted) {
+            setState(() {
+              _phaseNoiseRunning = false;
+              _phaseNoiseCommandInFlight = false;
+              _phaseNoiseStateText = '已停止';
+            });
+          }
+          return true;
+        }
+        if (mounted) {
+          setState(() {
+            _phaseNoiseCommandInFlight = true;
+            _phaseNoiseStateText = '停止中';
+          });
+        }
+        final stopped = await _protocol.stopPhaseNoiseConfirmed();
+        if (mounted) {
+          setState(() {
+            _phaseNoiseCommandInFlight = false;
+            if (stopped) {
+              _phaseNoiseRunning = false;
+              _phaseNoiseStateText = '已停止';
+            } else {
+              _phaseNoiseStateText = '设备未确认停止';
+            }
+          });
+        }
+        return stopped;
+      case MeasurementMode.realtimeSpectrum:
+        if (!_serialManager.isConnected) return true;
+        return _realtimeSpectrumPageKey.currentState?.stopFromAgent() ??
+            _protocol.stopRealtimeSpectrumConfirmed();
+    }
+  }
+
+  String _measurementModeLabel(MeasurementMode mode) => switch (mode) {
+        MeasurementMode.spectrum => '扫频',
+        MeasurementMode.phaseNoise => '相位噪声',
+        MeasurementMode.realtimeSpectrum => '实时频谱',
+      };
+
+  void _updateMeasurementModeUi(MeasurementMode mode) {
     if (mode == MeasurementMode.phaseNoise ||
         mode == MeasurementMode.realtimeSpectrum) {
-      _stopContinuousSweep();
       _acceptSpectrumData = false;
       _clearSpectrumDisplay();
       _clearPhaseNoiseShellData();
-      if (mode == MeasurementMode.realtimeSpectrum &&
-          _serialManager.isConnected) {
-        _protocol.stopPhaseNoise();
-      }
     } else {
-      if (_serialManager.isConnected) {
-        _protocol.stopPhaseNoise();
-        _protocol.stopRealtimeSpectrum();
-      }
-      _stopContinuousSweep();
       _clearPhaseNoiseShellData();
       _acceptSpectrumData = true;
       _sweepMode = SweepMode.standard;
@@ -3252,11 +3534,15 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   PhaseNoiseConfig _buildCurrentPhaseNoiseConfig() {
-    final startOffsetHz = _parseFreq(
+    final parsedStartOffsetHz = _parseFreq(
           _phaseNoiseStartOffsetController.text,
           _phaseNoiseStartOffsetUnit.value,
         ) ??
         _phaseNoiseConfig.startOffsetHz;
+    final startOffsetHz = math.max(
+      parsedStartOffsetHz,
+      PhaseNoiseConfig.minimumOffsetHz,
+    );
     final stopOffsetHz = _parseFreq(
           _phaseNoiseStopOffsetController.text,
           _phaseNoiseStopOffsetUnit.value,
@@ -3287,8 +3573,7 @@ class _MyHomePageState extends State<MyHomePage> {
       nominalCarrierHz: _resolvePhaseNoiseNominalCarrierHz(
         manualCarrierHz: manualCarrierHz,
       ),
-      startOffsetHz:
-          startOffsetHz > 0 ? startOffsetHz : _phaseNoiseConfig.startOffsetHz,
+      startOffsetHz: startOffsetHz,
       stopOffsetHz: stopOffsetHz >= startOffsetHz
           ? stopOffsetHz
           : _phaseNoiseConfig.stopOffsetHz,
@@ -3304,6 +3589,21 @@ class _MyHomePageState extends State<MyHomePage> {
       manualCarrierSearchWindowHz:
           _phaseNoiseConfig.manualCarrierSearchWindowHz,
     );
+  }
+
+  void _enforcePhaseNoiseStartOffsetMinimum() {
+    final offsetHz = _parseFreq(
+      _phaseNoiseStartOffsetController.text,
+      _phaseNoiseStartOffsetUnit.value,
+    );
+    if (offsetHz != null && offsetHz < PhaseNoiseConfig.minimumOffsetHz) {
+      _setFreqField(
+        _phaseNoiseStartOffsetController,
+        _phaseNoiseStartOffsetUnit,
+        PhaseNoiseConfig.minimumOffsetHz,
+      );
+    }
+    if (mounted) setState(() {});
   }
 
   double _resolvePhaseNoiseNominalCarrierHz({double? manualCarrierHz}) {
@@ -3565,7 +3865,7 @@ class _MyHomePageState extends State<MyHomePage> {
     if (!config.isValid || config.protocolNominalCarrierHz <= 0) {
       _showInfoBar(
         title: '相位噪声配置无效',
-        content: '载波和频偏设置必须为正值。',
+        content: '载波必须为正值，起始频偏不得低于 1 kHz，终止频偏不得小于起始频偏。',
         severity: InfoBarSeverity.warning,
       );
       return;
@@ -3759,6 +4059,10 @@ class _MyHomePageState extends State<MyHomePage> {
             ],
           ),
         ),
+        ResizablePanelDivider(
+          onDragDelta: _resizeSettingsPanel,
+          tooltip: '拖动调整仪器工具栏宽度',
+        ),
         _buildPhaseNoiseControlPanel(),
       ],
     );
@@ -3878,7 +4182,7 @@ class _MyHomePageState extends State<MyHomePage> {
     final markerDbcHz = markerPoint?.dbcHz ?? _phaseNoiseMarker?.dbcHz;
     final markerRbwHz = markerPoint?.rbwHz ?? _phaseNoiseMarker?.rbwHz;
     return Container(
-      width: 320,
+      width: _settingsPanelWidth,
       color: const Color.fromARGB(255, 66, 66, 66),
       padding: const EdgeInsets.all(8),
       child: SingleChildScrollView(
@@ -3964,6 +4268,20 @@ class _MyHomePageState extends State<MyHomePage> {
                     controller: _phaseNoiseStartOffsetController,
                     unitNotifier: _phaseNoiseStartOffsetUnit,
                     units: freqUnits,
+                    onChanged: _enforcePhaseNoiseStartOffsetMinimum,
+                  ),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Padding(
+                      padding: EdgeInsets.only(left: 100, top: 4),
+                      child: Text(
+                        '最小 1 kHz',
+                        style: TextStyle(
+                          color: material.Colors.white70,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 8),
                   _buildInputRow(
@@ -4130,6 +4448,1717 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
+  InstrumentAgentSnapshot _buildInstrumentAgentSnapshot() {
+    final mode = switch (_measurementMode) {
+      MeasurementMode.spectrum =>
+        _isDirectIfFftMode ? 'spectrum_direct_if' : 'spectrum',
+      MeasurementMode.phaseNoise => 'phase_noise',
+      MeasurementMode.realtimeSpectrum => 'realtime_spectrum',
+    };
+    final realtimeState = _realtimeSpectrumPageKey.currentState;
+    final sweepRunning = switch (_measurementMode) {
+      MeasurementMode.spectrum =>
+        _spectrumRequestInFlight || _isContinuousSweepRunning,
+      MeasurementMode.phaseNoise => _phaseNoiseRunning,
+      MeasurementMode.realtimeSpectrum => realtimeState?.isRunning ?? false,
+    };
+    final modeDetails = switch (_measurementMode) {
+      MeasurementMode.spectrum => <String, dynamic>{
+          'definition': '传统可配置起止频率、RBW/VBW 和检波方式的扫频频谱',
+          'amplitude_unit': 'dBm',
+          'supports_single_sweep': true,
+          'supports_continuous_sweep': true,
+        },
+      MeasurementMode.phaseNoise => <String, dynamic>{
+          'definition': '围绕载波按频偏显示相位噪声密度，不是普通频谱',
+          ..._phaseNoiseAgentState(),
+        },
+      MeasurementMode.realtimeSpectrum => <String, dynamic>{
+          'definition': '固定 10 MHz Span 的实时 IF FFT，包含最新/平均/最大保持/瀑布图',
+          ...(realtimeState?.agentConfiguration ??
+              <String, dynamic>{
+                'amplitude_unit': 'dBFS',
+                'span_hz': 10e6,
+                'fft_size': 4096,
+                'state': '页面初始化中',
+              }),
+        },
+    };
+    return InstrumentAgentSnapshot(
+      connected: _serialManager.isConnected,
+      deviceResponsive: _deviceResponsive,
+      measurementMode: mode,
+      startHz: _confirmedStartHz,
+      stopHz: _confirmedStopHz,
+      rbwHz: _getSelectedRbwHz(),
+      vbwMode: vbwMode.value,
+      vbwHz: _parseFreq(vbwController.text, vbwUnit.value) ?? 0,
+      detector: detectMode.value,
+      referenceDbm: double.tryParse(refLevelController.text) ?? 0,
+      pointCount: _getCurrentPointCount(),
+      sweepRunning: sweepRunning,
+      continuousSweep: _measurementMode == MeasurementMode.spectrum &&
+          _isContinuousSweepRunning,
+      minimumFrequencyHz: _fullSpanStartHz,
+      maximumFrequencyHz: _fullSpanStopHz,
+      modeDetails: modeDetails,
+    );
+  }
+
+  Map<String, dynamic> _phaseNoiseAgentState() {
+    final config = _buildCurrentPhaseNoiseConfig();
+    return <String, dynamic>{
+      'measurement_mode': 'phase_noise',
+      'amplitude_unit': 'dBc/Hz',
+      'carrier_mode': _phaseNoiseCarrierMode.name,
+      'carrier_hz': config.protocolNominalCarrierHz,
+      'carrier_search_span_hz': config.carrierSearchSpanHz,
+      'minimum_carrier_level_dbm': config.minimumCarrierLevelDbm,
+      'start_offset_hz': config.startOffsetHz,
+      'stop_offset_hz': config.stopOffsetHz,
+      'density': _phaseNoiseDensityPreset.name,
+      'points_per_decade': config.pointsPerDecade,
+      'estimated_point_count': config.estimatedPointCount,
+      'average_count': config.averageTarget,
+      'completed_averages': _phaseNoiseCompletedAverages,
+      'trace_display': _phaseNoiseTraceDisplay.name,
+      'raw_point_count': _phaseNoiseTrace.rawPoints.length,
+      'average_point_count': _phaseNoiseTrace.averagePoints.length,
+      'running': _phaseNoiseRunning,
+      'complete': _phaseNoiseComplete,
+      'state': _phaseNoiseStateText,
+      'error_code': _phaseNoiseErrorCode,
+      'warning_code': _phaseNoiseWarningCode,
+      'carrier_detected': _phaseNoiseErrorCode == 2
+          ? false
+          : (_phaseNoiseMeasuredCarrierHz != null ? true : null),
+      'measured_carrier_hz': _phaseNoiseMeasuredCarrierHz,
+      'carrier_level_dbm': _phaseNoiseCarrierLevelDbm,
+      'current_offset_hz': _phaseNoiseCurrentOffsetHz,
+      'received_points': _phaseNoiseReceivedPoints,
+      'planned_total_points': _phaseNoisePlannedTotalPoints,
+      if (_phaseNoiseErrorCode == 2) 'terminal_reason': 'no_signal_input',
+    };
+  }
+
+  Future<InstrumentActionOutcome> _agentSetMeasurementMode(String mode) async {
+    final target = switch (mode) {
+      'spectrum' => MeasurementMode.spectrum,
+      'phase_noise' => MeasurementMode.phaseNoise,
+      'realtime_spectrum' => MeasurementMode.realtimeSpectrum,
+      _ => null,
+    };
+    if (target == null) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '不支持的测量模式',
+      );
+    }
+    if (target == _measurementMode) {
+      return InstrumentActionOutcome(
+        success: true,
+        message: '当前已经处于 $mode 模式',
+        data: <String, dynamic>{'measurement_mode': mode, 'changed': false},
+      );
+    }
+
+    var stopped = true;
+    if (_serialManager.isConnected) {
+      if (!_deviceResponsive) {
+        return const InstrumentActionOutcome(
+          success: false,
+          message: '仪器当前无响应，未切换测量模式',
+        );
+      }
+      stopped = await _stopActiveMeasurementForModeSwitch();
+    }
+    if (!stopped) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '当前测量未收到停止 ACK，出于安全考虑未切换模式',
+      );
+    }
+    if (!mounted) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '页面已经关闭，无法切换测量模式',
+      );
+    }
+    _updateMeasurementModeUi(target);
+    await WidgetsBinding.instance.endOfFrame;
+    return InstrumentActionOutcome(
+      success: true,
+      message: '顶部工具栏测量模式已切换为 $mode',
+      data: <String, dynamic>{
+        'measurement_mode': mode,
+        'changed': true,
+        'previous_measurement_stopped': stopped,
+        'device_ack': _serialManager.isConnected ? stopped : null,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentStartPhaseNoiseMeasurement(
+    bool continuous,
+    bool waitForCarrier,
+  ) async {
+    await _startPhaseNoiseMeasurement(continuous: continuous);
+    var carrierWaitTimedOut = false;
+    if (waitForCarrier &&
+        _phaseNoiseRunning &&
+        _phaseNoiseErrorCode == 0 &&
+        _phaseNoiseMeasuredCarrierHz == null) {
+      _protocol.getPhaseNoiseStatus();
+      final deadline = DateTime.now().add(const Duration(seconds: 8));
+      while (mounted &&
+          _phaseNoiseRunning &&
+          _phaseNoiseErrorCode == 0 &&
+          _phaseNoiseMeasuredCarrierHz == null &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      carrierWaitTimedOut = _phaseNoiseRunning &&
+          _phaseNoiseErrorCode == 0 &&
+          _phaseNoiseMeasuredCarrierHz == null;
+    }
+    final noSignalInput = _phaseNoiseErrorCode == 2;
+    return InstrumentActionOutcome(
+      success: _phaseNoiseRunning && !noSignalInput && !carrierWaitTimedOut,
+      message: noSignalInput
+          ? '未检测到信号输入'
+          : (carrierWaitTimedOut
+              ? '载波检测尚未完成，暂时无法分析'
+              : (_phaseNoiseRunning
+                  ? '相位噪声${continuous ? '连续' : '单次'}测量已启动'
+                  : '相位噪声测量启动失败：$_phaseNoiseStateText')),
+      data: <String, dynamic>{
+        'measurement_mode': 'phase_noise',
+        'continuous': continuous,
+        'running': _phaseNoiseRunning,
+        'state': _phaseNoiseStateText,
+        'amplitude_unit': 'dBc/Hz',
+        'error_code': _phaseNoiseErrorCode,
+        'carrier_detected': noSignalInput
+            ? false
+            : (_phaseNoiseMeasuredCarrierHz != null ? true : null),
+        'background_measurement': _phaseNoiseRunning,
+        'measurement_complete': _phaseNoiseComplete,
+        if (noSignalInput) 'terminal_reason': 'no_signal_input',
+        if (carrierWaitTimedOut) 'terminal_reason': 'carrier_detection_timeout',
+        if (_phaseNoiseRunning) 'retry_on_next_user_request': true,
+        if (_phaseNoiseRunning || waitForCarrier) 'polling_allowed': false,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentGetPhaseNoiseState() async {
+    return InstrumentActionOutcome(
+      success: true,
+      message: '已读取相位噪声配置和测量状态',
+      data: _phaseNoiseAgentState(),
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentConfigurePhaseNoise(
+    Map<String, dynamic> arguments,
+  ) async {
+    var stoppedRunningMeasurement = false;
+    if (_phaseNoiseCommandInFlight) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '相位噪声命令正在执行，请稍后重试',
+      );
+    }
+    if (_phaseNoiseRunning) {
+      final stopped = await _protocol.stopPhaseNoiseConfirmed();
+      if (!stopped) {
+        return const InstrumentActionOutcome(
+          success: false,
+          message: '当前相位噪声测量未收到停止 ACK，未修改配置',
+        );
+      }
+      stoppedRunningMeasurement = true;
+    }
+    if (!mounted) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '页面已经关闭，无法配置相位噪声',
+      );
+    }
+
+    double? number(String key) => (arguments[key] as num?)?.toDouble();
+    final current = _buildCurrentPhaseNoiseConfig();
+    final targetStart = number('start_offset_hz') ?? current.startOffsetHz;
+    final targetStop = number('stop_offset_hz') ?? current.stopOffsetHz;
+    if (targetStart < PhaseNoiseConfig.minimumOffsetHz) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '相位噪声起始频偏不得低于 1 kHz，未修改配置',
+      );
+    }
+    if (targetStop < targetStart) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '终止频偏不能小于起始频偏，未修改配置',
+      );
+    }
+
+    final carrierHz = number('carrier_hz');
+    final carrierMode = carrierHz != null
+        ? PhaseNoiseCarrierMode.manual
+        : switch (arguments['carrier_mode']?.toString()) {
+            'manual' => PhaseNoiseCarrierMode.manual,
+            'auto' => PhaseNoiseCarrierMode.auto,
+            _ => _phaseNoiseCarrierMode,
+          };
+    final density = switch (arguments['density']?.toString()) {
+      'fast' => PhaseNoiseDensityPreset.fast,
+      'normal' => PhaseNoiseDensityPreset.normal,
+      'fine' => PhaseNoiseDensityPreset.fine,
+      _ => _phaseNoiseDensityPreset,
+    };
+    final traceDisplay = switch (arguments['trace_display']?.toString()) {
+      'raw' => PhaseNoiseTraceDisplay.raw,
+      'average' => PhaseNoiseTraceDisplay.average,
+      'both' => PhaseNoiseTraceDisplay.both,
+      _ => _phaseNoiseTraceDisplay,
+    };
+
+    setState(() {
+      _clearPhaseNoiseShellData();
+      _phaseNoiseCarrierMode = carrierMode;
+      if (carrierHz != null) {
+        _setFreqField(
+          _phaseNoiseCarrierController,
+          _phaseNoiseCarrierUnit,
+          carrierHz,
+        );
+      }
+      final searchSpan = number('carrier_search_span_hz');
+      if (searchSpan != null) {
+        _setFreqField(
+          _phaseNoiseCarrierSearchSpanController,
+          _phaseNoiseCarrierSearchSpanUnit,
+          searchSpan,
+        );
+      }
+      final minimumLevel = number('minimum_carrier_level_dbm');
+      if (minimumLevel != null) {
+        _phaseNoiseMinimumCarrierLevelController.text = minimumLevel.toString();
+      }
+      _setFreqField(
+        _phaseNoiseStartOffsetController,
+        _phaseNoiseStartOffsetUnit,
+        targetStart,
+      );
+      _setFreqField(
+        _phaseNoiseStopOffsetController,
+        _phaseNoiseStopOffsetUnit,
+        targetStop,
+      );
+      final averageCount = arguments['average_count'];
+      if (averageCount is int) {
+        _phaseNoiseAverageCountController.text = averageCount.toString();
+      }
+      _phaseNoiseDensityPreset = density;
+      _phaseNoiseTraceDisplay = traceDisplay;
+      _phaseNoiseStateText = '配置已更新，等待启动';
+    });
+
+    return InstrumentActionOutcome(
+      success: true,
+      message: '相位噪声页面配置已更新',
+      data: <String, dynamic>{
+        ..._phaseNoiseAgentState(),
+        'stopped_previous_measurement': stoppedRunningMeasurement,
+        'device_ack': stoppedRunningMeasurement ? true : null,
+        'configuration_staged': true,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentAnalyzePhaseNoise(
+    String trace,
+    double offsetHz,
+    int waitTimeoutMs,
+  ) async {
+    final config = _buildCurrentPhaseNoiseConfig();
+    if (offsetHz < config.startOffsetHz || offsetHz > config.stopOffsetHz) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: '请求频偏不在当前测量范围内',
+        data: <String, dynamic>{
+          ..._phaseNoiseAgentState(),
+          'requested_offset_hz': offsetHz,
+          'terminal_reason': 'offset_out_of_configured_range',
+          'polling_allowed': false,
+        },
+      );
+    }
+
+    ({String name, PhaseNoisePoint point})? result() {
+      final candidates = switch (trace) {
+        'raw' => <({String name, List<PhaseNoisePoint> points})>[
+            (name: 'raw', points: _phaseNoiseTrace.rawPoints),
+          ],
+        'average' => <({String name, List<PhaseNoisePoint> points})>[
+            (name: 'average', points: _phaseNoiseTrace.averagePoints),
+          ],
+        _ => <({String name, List<PhaseNoisePoint> points})>[
+            (name: 'average', points: _phaseNoiseTrace.averagePoints),
+            (name: 'raw', points: _phaseNoiseTrace.rawPoints),
+          ],
+      };
+      for (final candidate in candidates) {
+        final valid = candidate.points
+            .where((point) => point.valid && point.dbcHz.isFinite)
+            .toList(growable: false);
+        if (valid.isEmpty) continue;
+        final nearest = valid.reduce(
+          (best, point) => (point.offsetHz - offsetHz).abs() <
+                  (best.offsetHz - offsetHz).abs()
+              ? point
+              : best,
+        );
+        final relativeError = (nearest.offsetHz - offsetHz).abs() / offsetHz;
+        if (relativeError <= 0.15) {
+          return (name: candidate.name, point: nearest);
+        }
+      }
+      return null;
+    }
+
+    var selected = result();
+    final deadline = DateTime.now().add(Duration(milliseconds: waitTimeoutMs));
+    while (selected == null &&
+        _phaseNoiseErrorCode == 0 &&
+        waitTimeoutMs > 0 &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      selected = result();
+    }
+
+    if (_phaseNoiseErrorCode == 2) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: '未检测到信号输入',
+        data: <String, dynamic>{
+          ..._phaseNoiseAgentState(),
+          'requested_offset_hz': offsetHz,
+          'terminal_reason': 'no_signal_input',
+          'polling_allowed': false,
+        },
+      );
+    }
+    if (_phaseNoiseErrorCode != 0) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: '相位噪声测量失败：$_phaseNoiseStateText',
+        data: <String, dynamic>{
+          ..._phaseNoiseAgentState(),
+          'requested_offset_hz': offsetHz,
+          'terminal_reason': 'phase_noise_measurement_error',
+          'polling_allowed': false,
+        },
+      );
+    }
+    if (selected == null) {
+      final measurementPending = _phaseNoiseRunning && !_phaseNoiseComplete;
+      return InstrumentActionOutcome(
+        success: false,
+        message:
+            measurementPending ? '相位噪声测量仍在后台进行，指定频偏暂时没有数据' : '指定频偏暂时没有测量数据',
+        data: <String, dynamic>{
+          ..._phaseNoiseAgentState(),
+          'requested_offset_hz': offsetHz,
+          'terminal_reason': 'phase_noise_data_not_ready',
+          'measurement_pending': measurementPending,
+          'retry_on_next_user_request': measurementPending,
+          'polling_allowed': false,
+        },
+      );
+    }
+
+    final point = selected.point;
+    return InstrumentActionOutcome(
+      success: true,
+      message: '${_formatFreqAutoUnit(offsetHz)} 频偏处相位噪声为 '
+          '${point.dbcHz.toStringAsFixed(2)} dBc/Hz',
+      data: <String, dynamic>{
+        ..._phaseNoiseAgentState(),
+        'trace': selected.name,
+        'requested_offset_hz': offsetHz,
+        'measured_offset_hz': point.offsetHz,
+        'phase_noise_dbc_per_hz': point.dbcHz,
+        'noise_power_dbm': point.noisePowerDbm,
+        'rbw_hz': point.rbwHz,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentStopPhaseNoiseMeasurement() async {
+    final acknowledged = await _protocol.stopPhaseNoiseConfirmed();
+    if (mounted) {
+      setState(() {
+        _phaseNoiseRunning = false;
+        _phaseNoiseCommandInFlight = false;
+        _phaseNoiseStateText = acknowledged ? '已停止' : '设备未确认停止';
+      });
+    }
+    return InstrumentActionOutcome(
+      success: acknowledged,
+      message: acknowledged ? '设备已确认停止相位噪声测量' : '相位噪声停止命令未收到 ACK',
+      data: <String, dynamic>{
+        'measurement_mode': 'phase_noise',
+        'device_ack': acknowledged,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentStartRealtimeSpectrum(
+    double centerHz,
+  ) async {
+    final page = _realtimeSpectrumPageKey.currentState;
+    if (page == null) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '实时频谱页面尚未初始化，请先切换到 realtime_spectrum 模式',
+      );
+    }
+    final started = await page.startFromAgent(centerHz);
+    return InstrumentActionOutcome(
+      success: started,
+      message: started ? '实时频谱已启动' : '实时频谱启动失败：${page.agentStatus}',
+      data: <String, dynamic>{
+        'measurement_mode': 'realtime_spectrum',
+        'center_hz': centerHz,
+        'span_hz': 10e6,
+        'fft_size': 4096,
+        'amplitude_unit': 'dBFS',
+        'running': page.isRunning,
+        'state': page.agentStatus,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentStopRealtimeSpectrum() async {
+    final page = _realtimeSpectrumPageKey.currentState;
+    final stopped = await (page?.stopFromAgent() ??
+        _protocol.stopRealtimeSpectrumConfirmed());
+    return InstrumentActionOutcome(
+      success: stopped,
+      message: stopped ? '设备已确认停止实时频谱' : '实时频谱停止失败或未进入空闲状态',
+      data: <String, dynamic>{
+        'measurement_mode': 'realtime_spectrum',
+        'device_ack': stopped,
+        'state': page?.agentStatus,
+      },
+    );
+  }
+
+  InstrumentActionOutcome _realtimePageUnavailableOutcome() =>
+      const InstrumentActionOutcome(
+        success: false,
+        message: '实时频谱页面尚未初始化，请先切换到 realtime_spectrum 模式',
+      );
+
+  Future<InstrumentActionOutcome> _agentGetRealtimeSpectrumState() async {
+    final page = _realtimeSpectrumPageKey.currentState;
+    if (page == null) return _realtimePageUnavailableOutcome();
+    return InstrumentActionOutcome(
+      success: true,
+      message: '已读取实时频谱页面状态（幅度单位 dBFS）',
+      data: page.agentConfiguration,
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentConfigureRealtimeSpectrum(
+    Map<String, dynamic> arguments,
+  ) async {
+    final page = _realtimeSpectrumPageKey.currentState;
+    if (page == null) return _realtimePageUnavailableOutcome();
+    double? number(String key) => (arguments[key] as num?)?.toDouble();
+    final configuration = await page.configureFromAgent(
+      centerHz: number('center_hz'),
+      averageEnabled: arguments['average_enabled'] as bool?,
+      maxHoldEnabled: arguments['max_hold_enabled'] as bool?,
+      markerEnabled: arguments['marker_enabled'] as bool?,
+      lnaEnabled: arguments['lna_enabled'] as bool?,
+      attenuationDb: number('attenuation_db'),
+      vgaDb: number('vga_db'),
+      referenceDbfs: number('reference_dbfs'),
+      waterfallFloorDbfs: number('waterfall_floor_dbfs'),
+      waterfallReferenceDbfs: number('waterfall_reference_dbfs'),
+      resetAverage: arguments['reset_average'] == true,
+      resetMaxHold: arguments['reset_max_hold'] == true,
+    );
+    return InstrumentActionOutcome(
+      success: true,
+      message: '实时频谱页面配置已更新',
+      data: configuration,
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentGetRealtimeSpectrumSnapshot(
+    String trace,
+    int maximumPoints,
+  ) async {
+    final page = _realtimeSpectrumPageKey.currentState;
+    if (page == null) return _realtimePageUnavailableOutcome();
+    return InstrumentActionOutcome(
+      success: true,
+      message: '已读取实时频谱 $trace 曲线（幅度单位 dBFS）',
+      data: page.snapshotForAgent(
+        trace: trace,
+        maximumPoints: maximumPoints,
+      ),
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentGetRealtimeWaterfallHistory(
+    int maximumRows,
+    double? lookbackSeconds,
+    int maximumPointsPerRow,
+  ) async {
+    final page = _realtimeSpectrumPageKey.currentState;
+    if (page == null) return _realtimePageUnavailableOutcome();
+    return InstrumentActionOutcome(
+      success: true,
+      message: '已读取实时频谱瀑布历史数据',
+      data: page.waterfallHistoryForAgent(
+        maximumRows: maximumRows,
+        lookbackSeconds: lookbackSeconds,
+        maximumPointsPerRow: maximumPointsPerRow,
+      ),
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentAnalyzeRealtimeSpectrum(
+    String trace,
+    int peakCount,
+    double thresholdAboveNoiseDb,
+  ) async {
+    final page = _realtimeSpectrumPageKey.currentState;
+    if (page == null) return _realtimePageUnavailableOutcome();
+    final analysis = page.analyzeForAgent(
+      trace: trace,
+      peakCount: peakCount,
+      thresholdAboveNoiseDb: thresholdAboveNoiseDb,
+    );
+    return InstrumentActionOutcome(
+      success: true,
+      message: '已完成实时频谱 $trace 曲线分析（幅度单位 dBFS）',
+      data: analysis.toJson(),
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentPlaceRealtimePeakMarkers(
+    String trace,
+    int peakCount,
+    double thresholdAboveNoiseDb,
+  ) async {
+    final page = _realtimeSpectrumPageKey.currentState;
+    if (page == null) return _realtimePageUnavailableOutcome();
+    final analysis = page.placePeakMarkersFromAgent(
+      trace: trace,
+      peakCount: peakCount,
+      thresholdAboveNoiseDb: thresholdAboveNoiseDb,
+    );
+    return InstrumentActionOutcome(
+      success: true,
+      message: '已在实时频谱图上放置 ${analysis.peaks.length} 个峰值 Marker',
+      data: analysis.toJson(),
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentSetFrequency(
+    double centerHz,
+    double spanHz,
+  ) async {
+    if (_isContinuousSweepRunning && !await _stopContinuousSweep()) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '停止当前连续扫描失败，未修改频率',
+      );
+    }
+    final startHz = centerHz - spanHz / 2;
+    final stopHz = centerHz + spanHz / 2;
+    final config = FrequencyConfig(
+      startHz: startHz,
+      stopHz: stopHz,
+      centerHz: centerHz,
+      spanHz: spanHz,
+    );
+    final acknowledged = await _protocol.setFreqConfigConfirmed(config);
+    if (!acknowledged) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '频率配置未收到设备 ACK，界面参数未修改',
+      );
+    }
+    if (!mounted) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '页面已经关闭，无法同步界面状态',
+      );
+    }
+    setState(() {
+      _confirmedStartHz = startHz;
+      _confirmedStopHz = stopHz;
+      _lastFrequencyEditMode = FrequencyEditMode.centerSpan;
+      _syncFrequencyFieldsFromConfirmed();
+    });
+    _clearSpectrumDisplay();
+    return InstrumentActionOutcome(
+      success: true,
+      message: '设备已确认频率配置',
+      data: <String, dynamic>{
+        'center_hz': centerHz,
+        'span_hz': spanHz,
+        'start_hz': startHz,
+        'stop_hz': stopHz,
+        'device_ack': true,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentSetBandwidth(
+    double rbwHz,
+    String requestedVbwMode,
+    double? requestedVbwHz,
+  ) async {
+    final rbwLabel = _agentRbwLabel(rbwHz);
+    final vbwLabel = _agentVbwLabel(requestedVbwMode);
+    if (rbwLabel == null || vbwLabel == null) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: 'RBW 或 VBW 模式不受当前上位机支持',
+      );
+    }
+    final effectiveVbwHz = switch (requestedVbwMode) {
+      'manual' => requestedVbwHz!,
+      'rbw_x_0_1' => rbwHz * 0.1,
+      'rbw_x_0_01' => rbwHz * 0.01,
+      'rbw_x_10' => rbwHz * 10,
+      _ => rbwHz,
+    };
+    final config = BandwidthConfig(
+      rbwMode: _mapRbwModeStringToInt(rbwLabel),
+      rbwHz: rbwHz,
+      vbwMode: _mapVbwModeStringToInt(vbwLabel),
+      vbwHz: effectiveVbwHz,
+    );
+    final acknowledged = await _protocol.setBandwidthConfigConfirmed(config);
+    if (!acknowledged) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '带宽配置未收到设备 ACK，界面参数未修改',
+      );
+    }
+    if (!mounted) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '页面已经关闭，无法同步界面状态',
+      );
+    }
+    _suppressBandwidthListener = true;
+    try {
+      rbwMode.value = rbwLabel;
+      vbwMode.value = vbwLabel;
+      _updateRbwField();
+      _updateVbwField();
+      if (requestedVbwMode == 'manual') {
+        vbwController.text = effectiveVbwHz.toStringAsFixed(0);
+        vbwUnit.value = 'Hz';
+      }
+    } finally {
+      _suppressBandwidthListener = false;
+    }
+    if (mounted) setState(() {});
+    return InstrumentActionOutcome(
+      success: true,
+      message: '设备已确认带宽配置',
+      data: <String, dynamic>{
+        'rbw_hz': rbwHz,
+        'vbw_mode': requestedVbwMode,
+        'vbw_hz': effectiveVbwHz,
+        'device_ack': true,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentSetDetector(String detector) async {
+    final label = switch (detector) {
+      'average' => '平均',
+      'sample' => '取样',
+      'positive_peak' => '正峰值',
+      'negative_peak' => '负峰值',
+      'maximum_power' => '最大功率',
+      'rms' => '均方根值',
+      _ => null,
+    };
+    if (label == null) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '不支持的检波方式',
+      );
+    }
+    final acknowledged = await _protocol.setDetectConfigConfirmed(
+      DetectConfig(mode: _mapDetectStringToInt(label)),
+    );
+    if (!acknowledged) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '检波配置未收到设备 ACK，界面参数未修改',
+      );
+    }
+    detectMode.removeListener(_sendDetectConfig);
+    try {
+      detectMode.value = label;
+    } finally {
+      detectMode.addListener(_sendDetectConfig);
+    }
+    if (mounted) setState(() {});
+    return InstrumentActionOutcome(
+      success: true,
+      message: '设备已确认检波配置',
+      data: <String, dynamic>{
+        'detector': detector,
+        'display_label': label,
+        'device_ack': true,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentStartSingleSweep() async {
+    if (_singleSweepCompleter != null) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '已有单次扫描正在等待数据，请稍后重试',
+      );
+    }
+
+    final completer = Completer<List<FlSpot>>();
+    _singleSweepCompleter = completer;
+    try {
+      await _applyMeasurementConfigChange(
+        forceContinuous: false,
+        clearDisplay: true,
+      );
+      if (!_lastMeasurementConfigApplied) {
+        return const InstrumentActionOutcome(
+          success: false,
+          message: '配置未确认，单次扫描未启动',
+          data: <String, dynamic>{
+            'continuous': false,
+            'config_acknowledged': false,
+            'sweep_completed': false,
+          },
+        );
+      }
+      if (!completer.isCompleted && !_spectrumRequestInFlight) {
+        return const InstrumentActionOutcome(
+          success: false,
+          message: '配置已确认，但扫描请求未能启动',
+          data: <String, dynamic>{
+            'continuous': false,
+            'config_acknowledged': true,
+            'sweep_completed': false,
+          },
+        );
+      }
+
+      final points = await completer.future.timeout(
+        _getSpectrumRequestTimeout() + const Duration(seconds: 5),
+      );
+      return InstrumentActionOutcome(
+        success: true,
+        message: '单次扫描已完成，共收到 ${points.length} 个频谱点',
+        data: <String, dynamic>{
+          'continuous': false,
+          'config_acknowledged': true,
+          'sweep_completed': true,
+          'point_count': points.length,
+          if (points.isNotEmpty) 'start_hz': points.first.x,
+          if (points.isNotEmpty) 'stop_hz': points.last.x,
+          'completed_at': DateTime.now().toIso8601String(),
+        },
+      );
+    } on TimeoutException {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '单次扫描等待数据超时',
+        data: <String, dynamic>{
+          'continuous': false,
+          'config_acknowledged': true,
+          'sweep_completed': false,
+        },
+      );
+    } on StateError catch (error) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: error.message.toString(),
+        data: const <String, dynamic>{
+          'continuous': false,
+          'sweep_completed': false,
+        },
+      );
+    } finally {
+      if (identical(_singleSweepCompleter, completer)) {
+        _singleSweepCompleter = null;
+      }
+    }
+  }
+
+  Future<InstrumentActionOutcome> _agentStartContinuousSweep() async {
+    await _startContinuousSweep();
+    final success = _lastMeasurementConfigApplied && _isContinuousSweepRunning;
+    return InstrumentActionOutcome(
+      success: success,
+      message: success ? '配置已获 ACK，连续扫描已启动' : '连续扫描启动失败',
+      data: <String, dynamic>{
+        'continuous': true,
+        'config_acknowledged': _lastMeasurementConfigApplied,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentStopMeasurement() async {
+    final acknowledged = await _stopContinuousSweep();
+    return InstrumentActionOutcome(
+      success: acknowledged,
+      message: acknowledged ? '设备已确认停止测量' : '停止命令未收到设备 ACK',
+      data: <String, dynamic>{'device_ack': acknowledged},
+    );
+  }
+
+  List<AgentSpectrumPoint> _currentAgentSpectrumPoints() {
+    final points = _spectrumData
+        .map(
+          (spot) => AgentSpectrumPoint(
+            frequencyHz: spot.x,
+            powerDbm: spot.y,
+          ),
+        )
+        .toList();
+    points.sort((a, b) => a.frequencyHz.compareTo(b.frequencyHz));
+    return points;
+  }
+
+  Future<InstrumentActionOutcome> _agentGetSpectrumSnapshot(
+    int maximumPoints,
+  ) async {
+    final points = _currentAgentSpectrumPoints();
+    if (points.isEmpty) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '当前没有可读取的频谱数据，请先完成一次扫描',
+      );
+    }
+
+    final sampled = AgentSpectrumAnalyzer.downsample(points, maximumPoints);
+    final now = DateTime.now();
+    final lastArrival = _lastSpectrumArrivalTime;
+    return InstrumentActionOutcome(
+      success: true,
+      message: '已读取当前频谱快照（${points.length} 点，返回 ${sampled.length} 点）',
+      data: <String, dynamic>{
+        'captured_at': now.toIso8601String(),
+        'last_data_at': lastArrival?.toIso8601String(),
+        'data_age_ms': lastArrival == null
+            ? null
+            : now.difference(lastArrival).inMilliseconds,
+        'original_point_count': points.length,
+        'returned_point_count': sampled.length,
+        'start_hz': points.first.frequencyHz,
+        'stop_hz': points.last.frequencyHz,
+        'instrument_state': _buildInstrumentAgentSnapshot().toJson(),
+        'points': sampled.map((point) => point.toJson()).toList(),
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentAnalyzeSpectrum(
+    int peakCount,
+    double thresholdAboveNoiseDb,
+  ) async {
+    final points = _currentAgentSpectrumPoints();
+    if (points.isEmpty) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '当前没有可分析的频谱数据，请先完成一次扫描',
+      );
+    }
+
+    final analysis = AgentSpectrumAnalyzer.analyze(
+      points,
+      peakCount: peakCount,
+      thresholdAboveNoiseDb: thresholdAboveNoiseDb,
+    );
+    return InstrumentActionOutcome(
+      success: true,
+      message: '频谱分析完成：噪声底 '
+          '${analysis.noiseFloorDbm.toStringAsFixed(2)} dBm，'
+          '找到 ${analysis.peaks.length} 个峰值',
+      data: <String, dynamic>{
+        ...analysis.toJson(),
+        'threshold_above_noise_db': thresholdAboveNoiseDb,
+        'analyzed_at': DateTime.now().toIso8601String(),
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentPlacePeakMarkers(
+    int peakCount,
+    double thresholdAboveNoiseDb,
+  ) async {
+    final points = _currentAgentSpectrumPoints();
+    if (points.isEmpty) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '当前没有可标记的频谱数据，请先完成一次扫描',
+      );
+    }
+    final analysis = AgentSpectrumAnalyzer.analyze(
+      points,
+      peakCount: peakCount,
+      thresholdAboveNoiseDb: thresholdAboveNoiseDb,
+    );
+    if (analysis.peaks.isEmpty) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: '没有找到高于噪声底 ${thresholdAboveNoiseDb.toStringAsFixed(1)} dB 的峰值',
+        data: analysis.toJson(),
+      );
+    }
+    if (!mounted) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '页面已经关闭，无法放置 Marker',
+      );
+    }
+
+    autoPeakEnabled.value = false;
+    setState(() {
+      for (var index = 0; index < _markers.length; index++) {
+        final marker = _markers[index];
+        if (index < analysis.peaks.length) {
+          marker
+            ..enabled = true
+            ..freqHz = analysis.peaks[index].frequencyHz;
+        } else {
+          marker.enabled = false;
+        }
+      }
+      _currentMarker = _markers.first;
+    });
+    _markerFreqController.text = _formatFreqInput(
+      _currentMarker!.freqHz,
+      _markerFreqUnit.value,
+    );
+
+    final markers = <Map<String, dynamic>>[];
+    for (var index = 0; index < analysis.peaks.length; index++) {
+      markers.add(<String, dynamic>{
+        'marker_id': _markers[index].id,
+        ...analysis.peaks[index].toJson(),
+      });
+    }
+    return InstrumentActionOutcome(
+      success: true,
+      message: '已在频谱图上放置 ${markers.length} 个峰值 Marker',
+      data: <String, dynamic>{
+        'noise_floor_dbm': analysis.noiseFloorDbm,
+        'markers': markers,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentSaveMeasurement(
+    String label,
+    String note,
+  ) async {
+    final points = _currentAgentSpectrumPoints();
+    if (points.isEmpty) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '当前没有可保存的频谱数据，请先完成一次扫描',
+      );
+    }
+
+    final now = DateTime.now();
+    final analysis = AgentSpectrumAnalyzer.analyze(points);
+    await _agentSessionRestoreFuture;
+    final directory = _agentTestSessionStore.activeSessionDirectory ??
+        _agentSessionsDirectory();
+    await directory.create(recursive: true);
+
+    final safeLabel = _sanitizeAgentFileLabel(label);
+    final baseName = '${_formatFileTimestamp(now)}_'
+        '${now.millisecond.toString().padLeft(3, '0')}_$safeLabel';
+    final jsonFile =
+        File('${directory.path}${Platform.pathSeparator}$baseName.json');
+    final csvFile =
+        File('${directory.path}${Platform.pathSeparator}$baseName.csv');
+    final record = <String, dynamic>{
+      'file_version': 1,
+      'saved_at': now.toIso8601String(),
+      'label': label,
+      'note': note,
+      'last_data_at': _lastSpectrumArrivalTime?.toIso8601String(),
+      'instrument_state': _buildInstrumentAgentSnapshot().toJson(),
+      'analysis': analysis.toJson(),
+      if (_lastAgentLimitEvaluation != null)
+        'limit_evaluation': _lastAgentLimitEvaluation,
+      'spectrum_points': points.map((point) => point.toJson()).toList(),
+    };
+    const encoder = JsonEncoder.withIndent('  ');
+    await jsonFile.writeAsString(encoder.convert(record), flush: true);
+
+    final csv = StringBuffer('\ufefffrequency_hz,power_dbm\r\n');
+    for (final point in points) {
+      csv
+        ..write(point.frequencyHz.toStringAsFixed(6))
+        ..write(',')
+        ..write(point.powerDbm.toStringAsFixed(6))
+        ..write('\r\n');
+    }
+    await csvFile.writeAsString(csv.toString(), flush: true);
+
+    final activeSession = _agentTestSessionStore.activeSession;
+    if (activeSession != null) {
+      await _agentTestSessionStore.registerMeasurement(
+        label: label,
+        savedAt: now,
+        jsonPath: jsonFile.path,
+        csvPath: csvFile.path,
+        analysis: analysis.toJson(),
+        limitEvaluation: _lastAgentLimitEvaluation,
+      );
+    }
+
+    return InstrumentActionOutcome(
+      success: true,
+      message: '测试记录已保存为 JSON 和 CSV',
+      data: <String, dynamic>{
+        'label': label,
+        'saved_at': now.toIso8601String(),
+        'point_count': points.length,
+        'json_path': jsonFile.path,
+        'csv_path': csvFile.path,
+        'analysis': analysis.toJson(),
+        'session_id': activeSession?.id,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentSaveRealtimeMeasurement(
+    String label,
+    String note,
+    String trace,
+    bool includeWaterfall,
+    int waterfallRows,
+  ) async {
+    final page = _realtimeSpectrumPageKey.currentState;
+    if (page == null) return _realtimePageUnavailableOutcome();
+    final samples = page.samplesForAgent(trace);
+    if (samples.isEmpty) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: '实时频谱 $trace 曲线暂无可保存数据',
+      );
+    }
+
+    final now = DateTime.now();
+    final analysis = page.analyzeForAgent(
+      trace: trace,
+      peakCount: 5,
+      thresholdAboveNoiseDb: 6,
+    );
+    final waterfall = includeWaterfall
+        ? page.waterfallHistoryForAgent(
+            maximumRows: waterfallRows,
+            lookbackSeconds: null,
+            maximumPointsPerRow: 128,
+          )
+        : null;
+    await _agentSessionRestoreFuture;
+    final directory = _agentTestSessionStore.activeSessionDirectory ??
+        _agentSessionsDirectory();
+    await directory.create(recursive: true);
+
+    final safeLabel = _sanitizeAgentFileLabel(label);
+    final baseName = '${_formatFileTimestamp(now)}_'
+        '${now.millisecond.toString().padLeft(3, '0')}_rt_$safeLabel';
+    final jsonFile =
+        File('${directory.path}${Platform.pathSeparator}$baseName.json');
+    final csvFile =
+        File('${directory.path}${Platform.pathSeparator}$baseName.csv');
+    final record = <String, dynamic>{
+      'file_version': 1,
+      'saved_at': now.toIso8601String(),
+      'label': label,
+      'note': note,
+      'measurement_mode': 'realtime_spectrum',
+      'amplitude_unit': 'dBFS',
+      'trace': trace,
+      'instrument_state': _buildInstrumentAgentSnapshot().toJson(),
+      'realtime_configuration': page.agentConfiguration,
+      'analysis': analysis.toJson(),
+      'realtime_spectrum_points':
+          samples.map((sample) => sample.toJson()).toList(),
+      if (waterfall != null) 'waterfall_history': waterfall,
+    };
+    const encoder = JsonEncoder.withIndent('  ');
+    await jsonFile.writeAsString(encoder.convert(record), flush: true);
+
+    final csv = StringBuffer('\ufefffrequency_hz,level_dbfs\r\n');
+    for (final sample in samples) {
+      csv
+        ..write(sample.frequencyHz.toStringAsFixed(6))
+        ..write(',')
+        ..write(sample.levelDbfs.toStringAsFixed(6))
+        ..write('\r\n');
+    }
+    await csvFile.writeAsString(csv.toString(), flush: true);
+
+    final activeSession = _agentTestSessionStore.activeSession;
+    if (activeSession != null) {
+      await _agentTestSessionStore.registerMeasurement(
+        label: label,
+        savedAt: now,
+        jsonPath: jsonFile.path,
+        csvPath: csvFile.path,
+        analysis: analysis.toJson(),
+        measurementMode: 'realtime_spectrum',
+        amplitudeUnit: 'dBFS',
+      );
+    }
+    return InstrumentActionOutcome(
+      success: true,
+      message: '实时频谱测试记录已保存为 JSON 和 CSV',
+      data: <String, dynamic>{
+        'measurement_mode': 'realtime_spectrum',
+        'amplitude_unit': 'dBFS',
+        'trace': trace,
+        'point_count': samples.length,
+        'waterfall_included': waterfall != null,
+        'json_path': jsonFile.path,
+        'csv_path': csvFile.path,
+        'analysis': analysis.toJson(),
+        'session_id': activeSession?.id,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentCaptureScreenshot() async {
+    try {
+      final directoryPath = _screenshotDirController.text.trim().isEmpty
+          ? _defaultScreenshotDirectory
+          : _screenshotDirController.text.trim();
+      final file = await _captureCurrentMeasurementScreenshot(directoryPath);
+      return InstrumentActionOutcome(
+        success: true,
+        message: '当前测量页面截图已保存',
+        data: <String, dynamic>{
+          'measurement_mode': _buildInstrumentAgentSnapshot().measurementMode,
+          'file_path': file.path,
+        },
+      );
+    } catch (error) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: '截图保存失败：$error',
+      );
+    }
+  }
+
+  Directory _agentSessionsDirectory() {
+    final userHome = Platform.environment['USERPROFILE'] ??
+        Platform.environment['HOME'] ??
+        Directory.current.path;
+    return Directory(
+      '$userHome${Platform.pathSeparator}Documents${Platform.pathSeparator}'
+      'PuSuSA${Platform.pathSeparator}AI Sessions',
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentGetTestSession() async {
+    await _agentSessionRestoreFuture;
+    final session = _agentTestSessionStore.activeSession;
+    if (session == null) {
+      return const InstrumentActionOutcome(
+        success: true,
+        message: '当前没有进行中的测试会话',
+        data: <String, dynamic>{'active_session': null},
+      );
+    }
+    return InstrumentActionOutcome(
+      success: true,
+      message: '已读取当前测试会话“${session.name}”',
+      data: <String, dynamic>{'active_session': session.toJson()},
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentStartTestSession(
+    String name,
+    String objective,
+  ) async {
+    await _agentSessionRestoreFuture;
+    try {
+      final session = await _agentTestSessionStore.start(
+        name: name,
+        objective: objective,
+      );
+      return InstrumentActionOutcome(
+        success: true,
+        message: '测试会话“${session.name}”已开始',
+        data: <String, dynamic>{
+          'session': session.toJson(),
+          'directory': _agentTestSessionStore.activeSessionDirectory?.path,
+        },
+      );
+    } on StateError catch (error) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: error.message.toString(),
+      );
+    }
+  }
+
+  Future<InstrumentActionOutcome> _agentAddTestNote(String note) async {
+    await _agentSessionRestoreFuture;
+    try {
+      final session = await _agentTestSessionStore.addNote(note);
+      return InstrumentActionOutcome(
+        success: true,
+        message: '测试备注已追加到“${session.name}”',
+        data: <String, dynamic>{
+          'session_id': session.id,
+          'note_count': session.notes.length,
+        },
+      );
+    } on StateError catch (error) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: error.message.toString(),
+      );
+    }
+  }
+
+  Future<InstrumentActionOutcome> _agentEndTestSession(String summary) async {
+    await _agentSessionRestoreFuture;
+    try {
+      final session = await _agentTestSessionStore.end(summary: summary);
+      return InstrumentActionOutcome(
+        success: true,
+        message: '测试会话“${session.name}”已结束并保存',
+        data: <String, dynamic>{'session': session.toJson()},
+      );
+    } on StateError catch (error) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: error.message.toString(),
+      );
+    }
+  }
+
+  Future<InstrumentActionOutcome> _agentListTestSessions(int limit) async {
+    await _agentSessionRestoreFuture;
+    final sessions = await _agentTestSessionStore.list(limit: limit);
+    return InstrumentActionOutcome(
+      success: true,
+      message:
+          sessions.isEmpty ? '还没有历史测试会话' : '已读取最近 ${sessions.length} 个测试会话',
+      data: <String, dynamic>{
+        'sessions': sessions
+            .map(
+              (session) => <String, dynamic>{
+                'id': session.id,
+                'name': session.name,
+                'objective': session.objective,
+                'status': session.status,
+                'started_at': session.startedAt.toIso8601String(),
+                'ended_at': session.endedAt?.toIso8601String(),
+                'note_count': session.notes.length,
+                'measurement_count': session.measurements.length,
+              },
+            )
+            .toList(),
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentListMeasurements(int limit) async {
+    await _agentSessionRestoreFuture;
+    final measurements =
+        await _agentTestSessionStore.listMeasurements(limit: limit);
+    return InstrumentActionOutcome(
+      success: true,
+      message: measurements.isEmpty
+          ? '还没有保存过频谱测量'
+          : '已读取最近 ${measurements.length} 条测量记录',
+      data: <String, dynamic>{'measurements': measurements},
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentLoadMeasurement(
+    String measurementId,
+  ) async {
+    await _agentSessionRestoreFuture;
+    try {
+      final record =
+          await _agentTestSessionStore.loadMeasurement(measurementId);
+      final points = _agentPointsFromMeasurementRecord(record);
+      if (points.isEmpty) {
+        return const InstrumentActionOutcome(
+          success: false,
+          message: '历史测量中没有有效的频谱点',
+        );
+      }
+      final displayPoints = AgentSpectrumAnalyzer.downsample(points, 2048);
+      if (!mounted) {
+        return const InstrumentActionOutcome(
+          success: false,
+          message: '页面已经关闭，无法显示历史参考曲线',
+        );
+      }
+      setState(() {
+        _agentReferenceSpectrumData = displayPoints
+            .map((point) => FlSpot(point.frequencyHz, point.powerDbm))
+            .toList();
+        _agentReferenceSpectrumLabel =
+            record['label']?.toString() ?? measurementId;
+      });
+      return InstrumentActionOutcome(
+        success: true,
+        message: '历史测量“$_agentReferenceSpectrumLabel”已作为参考曲线显示',
+        data: <String, dynamic>{
+          'measurement_id': measurementId,
+          'label': record['label'],
+          'saved_at': record['saved_at'],
+          'point_count': points.length,
+          'display_point_count': displayPoints.length,
+          'analysis': record['analysis'],
+        },
+      );
+    } on StateError catch (error) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: error.message.toString(),
+      );
+    }
+  }
+
+  Future<InstrumentActionOutcome> _agentCompareMeasurements(
+    String firstMeasurementId,
+    String secondMeasurementId,
+  ) async {
+    await _agentSessionRestoreFuture;
+    try {
+      final first = await _agentMeasurementPoints(firstMeasurementId);
+      final second = await _agentMeasurementPoints(secondMeasurementId);
+      final comparison = AgentSpectrumComparator.compare(first, second);
+      return InstrumentActionOutcome(
+        success: true,
+        message: '频谱对比完成：平均变化 '
+            '${comparison.meanDeltaDb.toStringAsFixed(2)} dB，最大绝对差值 '
+            '${comparison.maximumAbsoluteDeltaDb.toStringAsFixed(2)} dB',
+        data: <String, dynamic>{
+          'first_measurement_id': firstMeasurementId,
+          'second_measurement_id': secondMeasurementId,
+          ...comparison.toJson(),
+        },
+      );
+    } on ArgumentError catch (error) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: error.message?.toString() ?? error.toString(),
+      );
+    } on StateError catch (error) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: error.message.toString(),
+      );
+    }
+  }
+
+  Future<List<AgentSpectrumPoint>> _agentMeasurementPoints(String id) async {
+    if (id.trim().toLowerCase() == 'current') {
+      final current = _currentAgentSpectrumPoints();
+      if (current.isEmpty) {
+        throw StateError('当前没有可用于对比的频谱数据');
+      }
+      return current;
+    }
+    final record = await _agentTestSessionStore.loadMeasurement(id);
+    final points = _agentPointsFromMeasurementRecord(record);
+    if (points.isEmpty) throw StateError('测量记录 $id 没有有效频谱点');
+    return points;
+  }
+
+  List<AgentSpectrumPoint> _agentPointsFromMeasurementRecord(
+    Map<String, dynamic> record,
+  ) {
+    final rawPoints = record['spectrum_points'];
+    if (rawPoints is! List) return <AgentSpectrumPoint>[];
+    final points = <AgentSpectrumPoint>[];
+    for (final rawPoint in rawPoints.whereType<Map>()) {
+      final frequency =
+          double.tryParse(rawPoint['frequency_hz']?.toString() ?? '');
+      final power = double.tryParse(rawPoint['power_dbm']?.toString() ?? '');
+      if (frequency != null &&
+          power != null &&
+          frequency.isFinite &&
+          power.isFinite) {
+        points.add(
+          AgentSpectrumPoint(frequencyHz: frequency, powerDbm: power),
+        );
+      }
+    }
+    points.sort((a, b) => a.frequencyHz.compareTo(b.frequencyHz));
+    return points;
+  }
+
+  Future<InstrumentActionOutcome> _agentEvaluateSpectrumLimits(
+    double? maximumNoiseFloorDbm,
+    double? minimumMainPeakDbm,
+    double? minimumSpurSuppressionDb,
+  ) async {
+    if (_measurementMode != MeasurementMode.spectrum || _isZeroSpan) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '频谱限值判定仅支持标准非零扫宽频谱模式',
+      );
+    }
+    final points = _currentAgentSpectrumPoints();
+    if (points.isEmpty) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '当前没有可执行限值判定的频谱数据',
+      );
+    }
+    final evaluation = AgentSpectrumLimitEvaluator.evaluate(
+      points,
+      maximumNoiseFloorDbm: maximumNoiseFloorDbm,
+      minimumMainPeakDbm: minimumMainPeakDbm,
+      minimumSpurSuppressionDb: minimumSpurSuppressionDb,
+    );
+    if (mounted) {
+      setState(() {
+        _agentMaximumNoiseFloorDbm = maximumNoiseFloorDbm;
+        _agentMinimumMainPeakDbm = minimumMainPeakDbm;
+        _agentMinimumSpurSuppressionDb = minimumSpurSuppressionDb;
+        _applyAgentLimitEvaluation(evaluation);
+      });
+    }
+    return InstrumentActionOutcome(
+      success: true,
+      message: evaluation.passed ? '频谱限值判定：PASS' : '频谱限值判定：FAIL',
+      data: evaluation.toJson(),
+    );
+  }
+
+  void _refreshAgentLimitEvaluation() {
+    if (_agentMaximumNoiseFloorDbm == null &&
+        _agentMinimumMainPeakDbm == null &&
+        _agentMinimumSpurSuppressionDb == null) {
+      return;
+    }
+    final points = _currentAgentSpectrumPoints();
+    if (points.isEmpty) return;
+    final evaluation = AgentSpectrumLimitEvaluator.evaluate(
+      points,
+      maximumNoiseFloorDbm: _agentMaximumNoiseFloorDbm,
+      minimumMainPeakDbm: _agentMinimumMainPeakDbm,
+      minimumSpurSuppressionDb: _agentMinimumSpurSuppressionDb,
+    );
+    _applyAgentLimitEvaluation(evaluation);
+  }
+
+  void _applyAgentLimitEvaluation(AgentSpectrumLimitEvaluation evaluation) {
+    final checkByName = <String, Map<String, dynamic>>{
+      for (final check in evaluation.checks) check['name'].toString(): check,
+    };
+    final lines = <SpectrumLimitLine>[];
+    SpectrumLimitLine limitLine(String name, String label, double powerDbm) {
+      final passed = checkByName[name]?['passed'] == true;
+      return SpectrumLimitLine(
+        label: '$label ${passed ? 'PASS' : 'FAIL'}',
+        powerDbm: powerDbm,
+        color: passed ? material.Colors.greenAccent : material.Colors.redAccent,
+      );
+    }
+
+    if (_agentMaximumNoiseFloorDbm != null) {
+      lines.add(limitLine(
+        'maximum_noise_floor_dbm',
+        '噪声底上限',
+        _agentMaximumNoiseFloorDbm!,
+      ));
+    }
+    if (_agentMinimumMainPeakDbm != null) {
+      lines.add(limitLine(
+        'minimum_main_peak_dbm',
+        '主峰下限',
+        _agentMinimumMainPeakDbm!,
+      ));
+    }
+    if (_agentMinimumSpurSuppressionDb != null) {
+      final mainPeakPower = evaluation.analysis.peaks.isEmpty
+          ? evaluation.analysis.maximumDbm
+          : evaluation.analysis.peaks.first.powerDbm;
+      lines.add(limitLine(
+        'minimum_spur_suppression_db',
+        '杂散上限',
+        mainPeakPower - _agentMinimumSpurSuppressionDb!,
+      ));
+    }
+    _agentSpectrumLimitLines = lines;
+    _lastAgentLimitEvaluation = evaluation.toJson();
+  }
+
+  Future<InstrumentActionOutcome> _agentClearAnalysisOverlays() async {
+    if (!mounted) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '页面已经关闭，无法清除分析叠加层',
+      );
+    }
+    setState(() {
+      _agentReferenceSpectrumData = <FlSpot>[];
+      _agentReferenceSpectrumLabel = '';
+      _agentSpectrumLimitLines = <SpectrumLimitLine>[];
+      _lastAgentLimitEvaluation = null;
+      _agentMaximumNoiseFloorDbm = null;
+      _agentMinimumMainPeakDbm = null;
+      _agentMinimumSpurSuppressionDb = null;
+    });
+    return const InstrumentActionOutcome(
+      success: true,
+      message: '历史参考曲线和限值线已清除',
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentExportTestReport(
+    String sessionId,
+  ) async {
+    await _agentSessionRestoreFuture;
+    final effectiveId = sessionId.isNotEmpty
+        ? sessionId
+        : _agentTestSessionStore.activeSession?.id ?? '';
+    if (effectiveId.isEmpty) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '当前没有测试会话，请提供 list_test_sessions 返回的 session_id',
+      );
+    }
+    try {
+      final path = await _agentTestSessionStore.exportHtmlReport(effectiveId);
+      return InstrumentActionOutcome(
+        success: true,
+        message: 'HTML 测试报告已导出',
+        data: <String, dynamic>{
+          'session_id': effectiveId,
+          'report_path': path,
+        },
+      );
+    } on StateError catch (error) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: error.message.toString(),
+      );
+    }
+  }
+
+  String _sanitizeAgentFileLabel(String label) {
+    final sanitized = label
+        .trim()
+        .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1F]'), '_')
+        .replaceAll(RegExp(r'[. ]+$'), '')
+        .replaceAll(RegExp(r'\s+'), '_');
+    if (sanitized.isEmpty) return 'measurement';
+    return sanitized.length <= 48 ? sanitized : sanitized.substring(0, 48);
+  }
+
+  String? _agentRbwLabel(double rbwHz) {
+    return switch (rbwHz.round()) {
+      1000 => '1 kHz',
+      10000 => '10 kHz',
+      30000 => '30 kHz',
+      100000 => '100 kHz',
+      300000 => '300 kHz',
+      1000000 => '1 MHz',
+      _ => null,
+    };
+  }
+
+  String? _agentVbwLabel(String mode) {
+    return switch (mode) {
+      'follow_rbw' => 'VBW=RBW',
+      'manual' => '手动',
+      'rbw_x_0_1' => 'VBW=0.1*RBW',
+      'rbw_x_0_01' => 'VBW=0.01*RBW',
+      'rbw_x_10' => 'VBW=10*RBW',
+      _ => null,
+    };
+  }
+
+  void _resizeSettingsPanel(double dragDelta) {
+    final availableWidth = MediaQuery.sizeOf(context).width;
+    final aiReserved = _aiAssistantVisible ? _aiPanelWidth + 7 : 0.0;
+    final maximum = math.max(
+      240.0,
+      math.min(520.0, availableWidth - aiReserved - 360.0),
+    );
+    setState(() {
+      _settingsPanelWidth =
+          (_settingsPanelWidth - dragDelta).clamp(240.0, maximum).toDouble();
+    });
+  }
+
+  void _resizeAiPanel(double dragDelta) {
+    final availableWidth = MediaQuery.sizeOf(context).width;
+    final maximum = math.max(
+      320.0,
+      math.min(720.0, availableWidth - _settingsPanelWidth - 360.0),
+    );
+    setState(() {
+      _aiPanelWidth =
+          (_aiPanelWidth - dragDelta).clamp(320.0, maximum).toDouble();
+    });
+  }
+
+  void _handleAiToolbarPressed() {
+    if (!_aiAssistantVisible) {
+      setState(() => _aiAssistantVisible = true);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _aiAssistantKey.currentState?.showPanel();
+      });
+      return;
+    }
+    _aiAssistantKey.currentState?.focusTextInput();
+  }
+
+  void _closeAiAssistant() {
+    unawaited(_hideAiAssistant());
+  }
+
+  Future<void> _hideAiAssistant() async {
+    await _aiAssistantKey.currentState?.prepareToHide();
+    if (!mounted) return;
+    setState(() {
+      _aiAssistantVisible = false;
+      _aiAssistantListening = false;
+    });
+  }
+
+  void _handleAiListeningChanged(bool listening) {
+    if (!mounted || _aiAssistantListening == listening) return;
+    setState(() => _aiAssistantListening = listening);
+  }
+
   @override
   Widget build(BuildContext context) {
     final bool isDirectIfFft = _isDirectIfFftMode;
@@ -4146,768 +6175,918 @@ class _MyHomePageState extends State<MyHomePage> {
     final double maxDbmDisplay = refLevel;
     final double minDbmDisplay = refLevel - 10 * scalePerGrid;
 
-    return ScaffoldPage(
-      padding: const EdgeInsets.only(top: 0),
-      header: CommandBar(
-        overflowBehavior: CommandBarOverflowBehavior.wrap,
-        primaryItems: [
-          CommandBarButton(
-            icon: Image.asset('assets/imgs/logo6.png', width: 127, height: 35),
-            onPressed: null,
-          ),
-          CommandBarButton(
-              icon: const Icon(FluentIcons.document),
-              label: const Text('文件'),
-              onPressed: () {}),
-
-          // 模式鎸夐挳锛堝彧鏄剧ず鈥滄ā寮忊€濓級
-          CommandBarButton(
-            icon: FlyoutTarget(
-              controller: _modeFlyoutController,
-              child: const Icon(FluentIcons.settings),
-            ),
-            label: const Text('模式'),
-            onPressed: _showModeFlyout,
-          ),
-
-          CommandBarButton(
-              icon: const Icon(FluentIcons.toolbox),
-              label: const Text('系统'),
-              onPressed: () {}),
-          CommandBarButton(
-              icon: FlyoutTarget(
-                controller: _presetFlyoutController,
-                child: const Icon(FluentIcons.refresh),
-              ),
-              label: const Text('预设'),
-              onPressed: _measurementMode == MeasurementMode.realtimeSpectrum
-                  ? null
-                  : _showPresetFlyout),
-          CommandBarButton(
-            icon: const Icon(FluentIcons.play),
-            label: const Text('单次'),
-            onPressed: _measurementMode == MeasurementMode.realtimeSpectrum
-                ? null
-                : () async {
-                    if (_isContinuousSweepRunning) {
-                      _stopContinuousSweep();
-                    }
-                    await _applyMeasurementConfigChange(forceContinuous: false);
-                  },
-          ),
-          CommandBarButton(
-              icon: const Icon(FluentIcons.play_resume),
-              label: const Text('连续'),
-              onPressed: _measurementMode == MeasurementMode.realtimeSpectrum
-                  ? null
-                  : _startContinuousSweep),
-          CommandBarButton(
-            icon: Icon(_isContinuousSweepRunning
-                ? FluentIcons.stop
-                : FluentIcons.record2),
-            label: const Text('停止'),
-            onPressed: _measurementMode == MeasurementMode.realtimeSpectrum
-                ? null
-                : _stopContinuousSweep,
-          ),
-          CommandBarButton(
-              icon: const Icon(FluentIcons.repeat_all),
-              label: const Text('回放'),
-              onPressed: () {}),
-          CommandBarButton(
-            icon: const Icon(FluentIcons.camera),
-            label: const Text('截图'),
-            onPressed: _screenshotInProgress ? null : _showScreenshotSettings,
-          ),
-          const CommandBarSeparator(),
-          CommandBarButton(
-            icon: FlyoutTarget(
-              controller: _serialFlyoutController,
-              child: ValueListenableBuilder<ConnectionStatus>(
-                valueListenable: _serialManager.connectionStatus,
-                builder: (context, status, child) {
-                  Color color;
-                  switch (status) {
-                    // 浼犵粺 switch
-                    case ConnectionStatus.connected:
-                      color = material.Colors.green;
-                      break;
-                    case ConnectionStatus.disconnected:
-                      color = material.Colors.red;
-                      break;
-                    case ConnectionStatus.noPorts:
-                      color = material.Colors.grey;
-                      break;
-                  }
-                  return Container(
-                    width: 12,
-                    height: 12,
-                    decoration:
-                        BoxDecoration(shape: BoxShape.circle, color: color),
-                  );
-                },
-              ),
-            ),
-            label: const Text('串口'),
-            onPressed: () => _serialFlyoutController.showFlyout(
-              builder: (context) => SerialPortSelector(manager: _serialManager),
-            ),
-          ),
-        ],
-      ),
-      content: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (_measurementMode == MeasurementMode.phaseNoise)
-            Expanded(child: _buildPhaseNoiseView())
-          else if (_measurementMode == MeasurementMode.realtimeSpectrum)
-            Expanded(
-              child: RealtimeSpectrumPage(
-                protocol: _protocol,
-                connected: _serialManager.isConnected,
-              ),
-            )
-          else ...[
-            Expanded(
-              child: RepaintBoundary(
-                key: _screenshotBoundaryKey,
-                child: Acrylic(
-                  tint: material.Colors.black.withValues(alpha: 0.8),
-                  child: SpectrumChart(
-                    data: _buildChartDisplayData(
-                        _isZeroSpan ? _zeroSpanData : _spectrumData),
-                    minFreq: _isZeroSpan ? 0.0 : startFreq,
-                    maxFreq: _isZeroSpan
-                        ? (_zeroSpanData.isNotEmpty
-                            ? _zeroSpanData.last.x + 1.0
-                            : 10.0)
-                        : stopFreq,
-                    minDbm: minDbmDisplay,
-                    maxDbm: maxDbmDisplay,
-                    scalePerGrid: scalePerGrid,
-                    startFreqStr: _formatFreqAutoUnit(startFreq),
-                    stopFreqStr: _formatFreqAutoUnit(stopFreq),
-                    centerFreqStr: _formatFreqAutoUnit(centerFreq),
-                    spanStr: _formatFreqAutoUnit(span),
-                    sweepSpeedStr:
-                        '${_currentSweepSpeed.toStringAsFixed(1)} packets/s',
-                    markers: _markers,
-                    markersDraggable: !autoPeakEnabled.value,
-                    onMarkerDragUpdate: _updateMarkerFreq,
-                    isZeroSpan: _isZeroSpan,
-                    traceSmoothingEnabled: _traceSmoothingEnabled,
-                    zeroSpanFreqStr: _isZeroSpan
-                        ? _formatFreqAutoUnit(_confirmedStartHz)
-                        : '',
-                    zeroSpanElapsedStr: _isZeroSpan &&
-                            _zeroSpanStartTime != null
-                        ? '${DateTime.now().difference(_zeroSpanStartTime!).inSeconds} s'
-                        : '',
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: ScaffoldPage(
+            padding: const EdgeInsets.only(top: 0),
+            header: WindowsTitleBar(
+              child: CommandBar(
+                overflowBehavior: CommandBarOverflowBehavior.noWrap,
+                primaryItems: [
+                  CommandBarButton(
+                    icon: Image.asset('assets/imgs/logo6.png',
+                        width: 127, height: 35),
+                    onPressed: null,
                   ),
-                ),
+                  // 模式鎸夐挳锛堝彧鏄剧ず鈥滄ā寮忊€濓級
+                  CommandBarButton(
+                    icon: FlyoutTarget(
+                      controller: _modeFlyoutController,
+                      child: const Icon(FluentIcons.settings),
+                    ),
+                    label: const Text('模式'),
+                    onPressed: _showModeFlyout,
+                  ),
+
+                  CommandBarButton(
+                      icon: FlyoutTarget(
+                        controller: _presetFlyoutController,
+                        child: const Icon(FluentIcons.refresh),
+                      ),
+                      label: const Text('预设'),
+                      onPressed:
+                          _measurementMode == MeasurementMode.realtimeSpectrum
+                              ? null
+                              : _showPresetFlyout),
+                  CommandBarButton(
+                    icon: const Icon(FluentIcons.play),
+                    label: const Text('单次'),
+                    onPressed:
+                        _measurementMode == MeasurementMode.realtimeSpectrum
+                            ? null
+                            : () async {
+                                if (_isContinuousSweepRunning) {
+                                  _stopContinuousSweep();
+                                }
+                                await _applyMeasurementConfigChange(
+                                    forceContinuous: false);
+                              },
+                  ),
+                  CommandBarButton(
+                      icon: const Icon(FluentIcons.play_resume),
+                      label: const Text('连续'),
+                      onPressed:
+                          _measurementMode == MeasurementMode.realtimeSpectrum
+                              ? null
+                              : _startContinuousSweep),
+                  CommandBarButton(
+                    icon: Icon(_isContinuousSweepRunning
+                        ? FluentIcons.stop
+                        : FluentIcons.record2),
+                    label: const Text('停止'),
+                    onPressed:
+                        _measurementMode == MeasurementMode.realtimeSpectrum
+                            ? null
+                            : _stopContinuousSweep,
+                  ),
+                  CommandBarButton(
+                    icon: const Icon(FluentIcons.camera),
+                    label: const Text('截图'),
+                    onPressed:
+                        _screenshotInProgress ? null : _showScreenshotSettings,
+                  ),
+                  CommandBarButton(
+                    icon: Icon(
+                      _aiAssistantListening
+                          ? material.Icons.stop_circle_rounded
+                          : material.Icons.auto_awesome_rounded,
+                      color: _aiAssistantListening
+                          ? const Color(0xFFE5484D)
+                          : (_aiAssistantVisible
+                              ? const Color(0xFF65A9FF)
+                              : null),
+                    ),
+                    label: Text(_aiAssistantListening ? 'AI 录音' : 'AI 助手'),
+                    onPressed: _handleAiToolbarPressed,
+                  ),
+                  const CommandBarSeparator(),
+                  CommandBarButton(
+                    icon: FlyoutTarget(
+                      controller: _serialFlyoutController,
+                      child: ValueListenableBuilder<ConnectionStatus>(
+                        valueListenable: _serialManager.connectionStatus,
+                        builder: (context, status, child) {
+                          Color color;
+                          switch (status) {
+                            // 浼犵粺 switch
+                            case ConnectionStatus.connected:
+                              color = material.Colors.green;
+                              break;
+                            case ConnectionStatus.disconnected:
+                              color = material.Colors.red;
+                              break;
+                            case ConnectionStatus.noPorts:
+                              color = material.Colors.grey;
+                              break;
+                          }
+                          return Container(
+                            width: 12,
+                            height: 12,
+                            decoration: BoxDecoration(
+                                shape: BoxShape.circle, color: color),
+                          );
+                        },
+                      ),
+                    ),
+                    label: const Text('串口'),
+                    onPressed: () => _serialFlyoutController.showFlyout(
+                      builder: (context) =>
+                          SerialPortSelector(manager: _serialManager),
+                    ),
+                  ),
+                ],
               ),
             ),
-            Container(
-              width: 300,
-              color: const Color.fromARGB(255, 66, 66, 66),
-              padding: const EdgeInsets.all(8),
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Expander(
-                      header: const Text('频率'),
-                      content: Column(
-                        children: [
-                          _buildInputRow(
-                              label: '起始频率：',
-                              controller: startFreqController,
-                              unitNotifier: startFreqUnit,
-                              units: freqUnits,
-                              enabled: _isFrequencySweepConfigActive,
-                              onChanged: () => _lastFrequencyEditMode =
-                                  FrequencyEditMode.startStop,
-                              onUnitChanged: () => _handleFrequencyUnitChanged(
-                                  _updateFreqFromStartStop),
-                              onSubmitted: _updateFreqFromStartStop),
-                          const SizedBox(height: 8),
-                          _buildInputRow(
-                              label: '终止频率：',
-                              controller: stopFreqController,
-                              unitNotifier: stopFreqUnit,
-                              units: freqUnits,
-                              enabled: _isFrequencySweepConfigActive,
-                              onChanged: () => _lastFrequencyEditMode =
-                                  FrequencyEditMode.startStop,
-                              onUnitChanged: () => _handleFrequencyUnitChanged(
-                                  _updateFreqFromStartStop),
-                              onSubmitted: _updateFreqFromStartStop),
-                          const SizedBox(height: 8),
-                          _buildInputRow(
-                              label: '中心频率：',
-                              controller: centerFreqController,
-                              unitNotifier: centerFreqUnit,
-                              units: freqUnits,
-                              enabled: _isFrequencySweepConfigActive,
-                              onChanged: () => _lastFrequencyEditMode =
-                                  FrequencyEditMode.centerSpan,
-                              onUnitChanged: () => _handleFrequencyUnitChanged(
-                                  _updateFreqFromCenterSpan),
-                              onSubmitted: _updateFreqFromCenterSpan),
-                          const SizedBox(height: 8),
-                          _buildInputRow(
-                              label: '扫描宽度：',
-                              controller: spanController,
-                              unitNotifier: spanUnit,
-                              units: freqUnits,
-                              enabled: _isFrequencySweepConfigActive,
-                              onChanged: () => _lastFrequencyEditMode =
-                                  FrequencyEditMode.centerSpan,
-                              onUnitChanged: () => _handleFrequencyUnitChanged(
-                                  _updateFreqFromCenterSpan),
-                              onSubmitted: _updateFreqFromCenterSpan),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: Button(
-                                  onPressed: _isFrequencySweepConfigActive
-                                      ? _setFullSpan
-                                      : null,
-                                  child: const Text('FULL SPAN'),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Button(
-                                  onPressed: _isFrequencySweepConfigActive
-                                      ? _setZeroSpan
-                                      : null,
-                                  child: const Text('ZERO SPAN'),
-                                ),
-                              ),
-                            ],
+            content: Row(
+              children: [
+                Expanded(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (_measurementMode == MeasurementMode.phaseNoise)
+                        Expanded(
+                          child: RepaintBoundary(
+                            key: _phaseNoiseScreenshotBoundaryKey,
+                            child: _buildPhaseNoiseView(),
                           ),
-                        ],
-                      ),
-                    ),
-                    Expander(
-                      header: const Text('幅度'),
-                      content: Column(
-                        children: [
-                          Row(
-                            children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('参考电平：',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              Expanded(
-                                  child: TextBox(
-                                      controller: refLevelController,
-                                      onSubmitted: (v) =>
-                                          _sendAmplitudeConfig())),
-                              const SizedBox(width: 8),
-                              SizedBox(
-                                width: 44,
-                                child: Button(
-                                  onPressed: () => _stepRefLevel(-10.0),
-                                  child: const Text('-'),
-                                ),
+                        )
+                      else if (_measurementMode ==
+                          MeasurementMode.realtimeSpectrum)
+                        Expanded(
+                          child: RepaintBoundary(
+                            key: _realtimeScreenshotBoundaryKey,
+                            child: RealtimeSpectrumPage(
+                              key: _realtimeSpectrumPageKey,
+                              protocol: _protocol,
+                              connected: _serialManager.isConnected,
+                              initialRfConfig: _rfFrontendConfig,
+                              initialVgaLabel: vgaGainValue.value,
+                              sidebarWidth: _settingsPanelWidth,
+                              onSidebarDragDelta: _resizeSettingsPanel,
+                            ),
+                          ),
+                        )
+                      else ...[
+                        Expanded(
+                          child: RepaintBoundary(
+                            key: _spectrumScreenshotBoundaryKey,
+                            child: Acrylic(
+                              tint:
+                                  material.Colors.black.withValues(alpha: 0.8),
+                              child: SpectrumChart(
+                                data: _buildChartDisplayData(_isZeroSpan
+                                    ? _zeroSpanData
+                                    : _spectrumData),
+                                minFreq: _isZeroSpan ? 0.0 : startFreq,
+                                maxFreq: _isZeroSpan
+                                    ? (_zeroSpanData.isNotEmpty
+                                        ? _zeroSpanData.last.x + 1.0
+                                        : 10.0)
+                                    : stopFreq,
+                                minDbm: minDbmDisplay,
+                                maxDbm: maxDbmDisplay,
+                                scalePerGrid: scalePerGrid,
+                                startFreqStr: _formatFreqAutoUnit(startFreq),
+                                stopFreqStr: _formatFreqAutoUnit(stopFreq),
+                                centerFreqStr: _formatFreqAutoUnit(centerFreq),
+                                spanStr: _formatFreqAutoUnit(span),
+                                sweepSpeedStr:
+                                    '${_currentSweepSpeed.toStringAsFixed(1)} packets/s',
+                                markers: _markers,
+                                markersDraggable: !autoPeakEnabled.value,
+                                onMarkerDragUpdate: _updateMarkerFreq,
+                                isZeroSpan: _isZeroSpan,
+                                traceSmoothingEnabled: _traceSmoothingEnabled,
+                                referenceData: _agentReferenceSpectrumData,
+                                referenceLabel: _agentReferenceSpectrumLabel,
+                                limitLines: _agentSpectrumLimitLines,
+                                zeroSpanFreqStr: _isZeroSpan
+                                    ? _formatFreqAutoUnit(_confirmedStartHz)
+                                    : '',
+                                zeroSpanElapsedStr: _isZeroSpan &&
+                                        _zeroSpanStartTime != null
+                                    ? '${DateTime.now().difference(_zeroSpanStartTime!).inSeconds} s'
+                                    : '',
                               ),
-                              const SizedBox(width: 4),
-                              SizedBox(
-                                width: 44,
-                                child: Button(
-                                  onPressed: () => _stepRefLevel(10.0),
-                                  child: const Text('+'),
-                                ),
-                              ),
-                            ],
+                            ),
                           ),
-                          const SizedBox(height: 12),
-                          _buildRfFrontendPanel(),
-                        ],
-                      ),
-                    ),
-                    Expander(
-                      header: const Text('BW'),
-                      content: Column(
-                        children: [
-                          Row(
-                            children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('RBW模式：',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              Expanded(
-                                child: ValueListenableBuilder<String>(
-                                  valueListenable: rbwMode,
-                                  builder: (context, value, child) =>
-                                      ComboBox<String>(
-                                    value: value,
-                                    isExpanded: true,
-                                    items: [
-                                      '1 kHz',
-                                      '10 kHz',
-                                      '30 kHz',
-                                      '100 kHz',
-                                      '300 kHz',
-                                      '1 MHz'
-                                    ]
-                                        .map((o) => ComboBoxItem<String>(
-                                            value: o, child: Text(o)))
-                                        .toList(),
-                                    onChanged: isDirectIfFft
-                                        ? null
-                                        : (nv) => nv != null
-                                            ? rbwMode.value = nv
-                                            : null,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          ValueListenableBuilder<String>(
-                            valueListenable: rbwMode,
-                            builder: (context, mode, child) {
-                              const bool isEnabled = false;
-                              return _buildInputRow(
-                                label: 'RBW：',
-                                controller: rbwController,
-                                unitNotifier: rbwUnit,
-                                units: freqUnits,
-                                enabled: isEnabled,
-                                onSubmitted: null,
-                              );
-                            },
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('VBW模式：',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              Expanded(
-                                child: ValueListenableBuilder<String>(
-                                  valueListenable: vbwMode,
-                                  builder: (context, value, child) =>
-                                      ComboBox<String>(
-                                    value: value,
-                                    isExpanded: true,
-                                    items: [
-                                      '手动',
-                                      'VBW=RBW',
-                                      'VBW=0.1*RBW',
-                                      'VBW=0.01*RBW',
-                                      'VBW=10*RBW'
-                                    ]
-                                        .map((o) => ComboBoxItem<String>(
-                                            value: o, child: Text(o)))
-                                        .toList(),
-                                    onChanged: isDirectIfFft
-                                        ? null
-                                        : (nv) => nv != null
-                                            ? vbwMode.value = nv
-                                            : null,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          ValueListenableBuilder<String>(
-                            valueListenable: vbwMode,
-                            builder: (context, mode, child) {
-                              final bool isEnabled =
-                                  !isDirectIfFft && mode == '手动';
-                              return _buildInputRow(
-                                label: 'VBW：',
-                                controller: vbwController,
-                                unitNotifier: vbwUnit,
-                                units: freqUnits,
-                                enabled: isEnabled,
-                                onSubmitted:
-                                    isEnabled ? _submitBandwidthConfig : null,
-                              );
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                    Expander(
-                      header: const Text('检波'),
-                      content: Column(
-                        children: [
-                          Row(
-                            children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('检波方式：',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              Expanded(
-                                child: ValueListenableBuilder<String>(
-                                  valueListenable: detectMode,
-                                  builder: (context, value, child) =>
-                                      ComboBox<String>(
-                                    value: value,
-                                    isExpanded: true,
-                                    items: [
-                                      '取样',
-                                      '平均',
-                                      '正峰值',
-                                      '负峰值',
-                                      '最大功率',
-                                      '均方根值'
-                                    ]
-                                        .map((o) => ComboBoxItem<String>(
-                                            value: o, child: Text(o)))
-                                        .toList(),
-                                    onChanged: (nv) => nv != null
-                                        ? detectMode.value = nv
-                                        : null,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    Expander(
-                      header: const Text('游标'),
-                      content: Column(
-                        children: [
-                          ValueListenableBuilder<bool>(
-                            valueListenable: autoPeakEnabled,
-                            builder: (context, value, child) => Row(
+                        ),
+                        ResizablePanelDivider(
+                          onDragDelta: _resizeSettingsPanel,
+                          tooltip: '拖动调整仪器工具栏宽度',
+                        ),
+                        Container(
+                          width: _settingsPanelWidth,
+                          color: const Color.fromARGB(255, 66, 66, 66),
+                          padding: const EdgeInsets.all(8),
+                          child: SingleChildScrollView(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
-                                const SizedBox(
-                                    width: 100,
-                                    child: Text('峰值搜索：',
+                                Expander(
+                                  initiallyExpanded: true,
+                                  header: const Text('频率'),
+                                  content: Column(
+                                    children: [
+                                      _buildInputRow(
+                                          label: '起始频率：',
+                                          controller: startFreqController,
+                                          unitNotifier: startFreqUnit,
+                                          units: freqUnits,
+                                          enabled:
+                                              _isFrequencySweepConfigActive,
+                                          onChanged: () =>
+                                              _lastFrequencyEditMode =
+                                                  FrequencyEditMode.startStop,
+                                          onUnitChanged: () =>
+                                              _handleFrequencyUnitChanged(
+                                                  _updateFreqFromStartStop),
+                                          onSubmitted:
+                                              _updateFreqFromStartStop),
+                                      const SizedBox(height: 8),
+                                      _buildInputRow(
+                                          label: '终止频率：',
+                                          controller: stopFreqController,
+                                          unitNotifier: stopFreqUnit,
+                                          units: freqUnits,
+                                          enabled:
+                                              _isFrequencySweepConfigActive,
+                                          onChanged: () =>
+                                              _lastFrequencyEditMode =
+                                                  FrequencyEditMode.startStop,
+                                          onUnitChanged: () =>
+                                              _handleFrequencyUnitChanged(
+                                                  _updateFreqFromStartStop),
+                                          onSubmitted:
+                                              _updateFreqFromStartStop),
+                                      const SizedBox(height: 8),
+                                      _buildInputRow(
+                                          label: '中心频率：',
+                                          controller: centerFreqController,
+                                          unitNotifier: centerFreqUnit,
+                                          units: freqUnits,
+                                          enabled:
+                                              _isFrequencySweepConfigActive,
+                                          onChanged: () =>
+                                              _lastFrequencyEditMode =
+                                                  FrequencyEditMode.centerSpan,
+                                          onUnitChanged: () =>
+                                              _handleFrequencyUnitChanged(
+                                                  _updateFreqFromCenterSpan),
+                                          onSubmitted:
+                                              _updateFreqFromCenterSpan),
+                                      const SizedBox(height: 8),
+                                      _buildInputRow(
+                                          label: '扫描宽度：',
+                                          controller: spanController,
+                                          unitNotifier: spanUnit,
+                                          units: freqUnits,
+                                          enabled:
+                                              _isFrequencySweepConfigActive,
+                                          onChanged: () =>
+                                              _lastFrequencyEditMode =
+                                                  FrequencyEditMode.centerSpan,
+                                          onUnitChanged: () =>
+                                              _handleFrequencyUnitChanged(
+                                                  _updateFreqFromCenterSpan),
+                                          onSubmitted:
+                                              _updateFreqFromCenterSpan),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child: Button(
+                                              onPressed:
+                                                  _isFrequencySweepConfigActive
+                                                      ? _setFullSpan
+                                                      : null,
+                                              child: const Text('FULL SPAN'),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Button(
+                                              onPressed:
+                                                  _isFrequencySweepConfigActive
+                                                      ? _setZeroSpan
+                                                      : null,
+                                              child: const Text('ZERO SPAN'),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Expander(
+                                  initiallyExpanded: true,
+                                  header: const Text('幅度'),
+                                  content: Column(
+                                    children: [
+                                      Row(
+                                        children: [
+                                          const SizedBox(
+                                              width: 100,
+                                              child: Text('参考电平：',
+                                                  style: TextStyle(
+                                                      color: material
+                                                          .Colors.white))),
+                                          Expanded(
+                                              child: TextBox(
+                                                  controller:
+                                                      refLevelController,
+                                                  onSubmitted: (v) =>
+                                                      _sendAmplitudeConfig())),
+                                          const SizedBox(width: 8),
+                                          SizedBox(
+                                            width: 44,
+                                            child: Button(
+                                              onPressed: () =>
+                                                  _stepRefLevel(-10.0),
+                                              child: const Text('-'),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 4),
+                                          SizedBox(
+                                            width: 44,
+                                            child: Button(
+                                              onPressed: () =>
+                                                  _stepRefLevel(10.0),
+                                              child: const Text('+'),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 12),
+                                      _buildRfFrontendPanel(),
+                                    ],
+                                  ),
+                                ),
+                                Expander(
+                                  initiallyExpanded: true,
+                                  header: const Text('BW'),
+                                  content: Column(
+                                    children: [
+                                      Row(
+                                        children: [
+                                          const SizedBox(
+                                              width: 100,
+                                              child: Text('RBW模式：',
+                                                  style: TextStyle(
+                                                      color: material
+                                                          .Colors.white))),
+                                          Expanded(
+                                            child:
+                                                ValueListenableBuilder<String>(
+                                              valueListenable: rbwMode,
+                                              builder:
+                                                  (context, value, child) =>
+                                                      ComboBox<String>(
+                                                value: value,
+                                                isExpanded: true,
+                                                items: [
+                                                  '1 kHz',
+                                                  '10 kHz',
+                                                  '30 kHz',
+                                                  '100 kHz',
+                                                  '300 kHz',
+                                                  '1 MHz'
+                                                ]
+                                                    .map((o) =>
+                                                        ComboBoxItem<String>(
+                                                            value: o,
+                                                            child: Text(o)))
+                                                    .toList(),
+                                                onChanged: isDirectIfFft
+                                                    ? null
+                                                    : (nv) => nv != null
+                                                        ? rbwMode.value = nv
+                                                        : null,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      ValueListenableBuilder<String>(
+                                        valueListenable: rbwMode,
+                                        builder: (context, mode, child) {
+                                          const bool isEnabled = false;
+                                          return _buildInputRow(
+                                            label: 'RBW：',
+                                            controller: rbwController,
+                                            unitNotifier: rbwUnit,
+                                            units: freqUnits,
+                                            enabled: isEnabled,
+                                            onSubmitted: null,
+                                          );
+                                        },
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          const SizedBox(
+                                              width: 100,
+                                              child: Text('VBW模式：',
+                                                  style: TextStyle(
+                                                      color: material
+                                                          .Colors.white))),
+                                          Expanded(
+                                            child:
+                                                ValueListenableBuilder<String>(
+                                              valueListenable: vbwMode,
+                                              builder:
+                                                  (context, value, child) =>
+                                                      ComboBox<String>(
+                                                value: value,
+                                                isExpanded: true,
+                                                items: [
+                                                  '手动',
+                                                  'VBW=RBW',
+                                                  'VBW=0.1*RBW',
+                                                  'VBW=0.01*RBW',
+                                                  'VBW=10*RBW'
+                                                ]
+                                                    .map((o) =>
+                                                        ComboBoxItem<String>(
+                                                            value: o,
+                                                            child: Text(o)))
+                                                    .toList(),
+                                                onChanged: isDirectIfFft
+                                                    ? null
+                                                    : (nv) => nv != null
+                                                        ? vbwMode.value = nv
+                                                        : null,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      ValueListenableBuilder<String>(
+                                        valueListenable: vbwMode,
+                                        builder: (context, mode, child) {
+                                          final bool isEnabled =
+                                              !isDirectIfFft && mode == '手动';
+                                          return _buildInputRow(
+                                            label: 'VBW：',
+                                            controller: vbwController,
+                                            unitNotifier: vbwUnit,
+                                            units: freqUnits,
+                                            enabled: isEnabled,
+                                            onSubmitted: isEnabled
+                                                ? _submitBandwidthConfig
+                                                : null,
+                                          );
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Expander(
+                                  header: const Text('检波'),
+                                  content: Column(
+                                    children: [
+                                      Row(
+                                        children: [
+                                          const SizedBox(
+                                              width: 100,
+                                              child: Text('检波方式：',
+                                                  style: TextStyle(
+                                                      color: material
+                                                          .Colors.white))),
+                                          Expanded(
+                                            child:
+                                                ValueListenableBuilder<String>(
+                                              valueListenable: detectMode,
+                                              builder:
+                                                  (context, value, child) =>
+                                                      ComboBox<String>(
+                                                value: value,
+                                                isExpanded: true,
+                                                items: [
+                                                  '取样',
+                                                  '平均',
+                                                  '正峰值',
+                                                  '负峰值',
+                                                  '最大功率',
+                                                  '均方根值'
+                                                ]
+                                                    .map((o) =>
+                                                        ComboBoxItem<String>(
+                                                            value: o,
+                                                            child: Text(o)))
+                                                    .toList(),
+                                                onChanged: (nv) => nv != null
+                                                    ? detectMode.value = nv
+                                                    : null,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Expander(
+                                  header: const Text('游标'),
+                                  content: Column(
+                                    children: [
+                                      ValueListenableBuilder<bool>(
+                                        valueListenable: autoPeakEnabled,
+                                        builder: (context, value, child) => Row(
+                                          children: [
+                                            const SizedBox(
+                                                width: 100,
+                                                child: Text('峰值搜索：',
+                                                    style: TextStyle(
+                                                        color: material
+                                                            .Colors.white))),
+                                            ToggleSwitch(
+                                              checked: value,
+                                              onChanged: (v) => setState(() =>
+                                                  autoPeakEnabled.value = v),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          const SizedBox(
+                                              width: 100,
+                                              child: Text('当前游标：',
+                                                  style: TextStyle(
+                                                      color: material
+                                                          .Colors.white))),
+                                          Expanded(
+                                            child: ComboBox<int?>(
+                                              value: _currentMarker?.id,
+                                              isExpanded: true,
+                                              items: _markers
+                                                  .map((m) =>
+                                                      ComboBoxItem<int?>(
+                                                          value: m.id,
+                                                          child: Text(
+                                                              '游标 ${m.id}')))
+                                                  .toList(),
+                                              placeholder: const Text('无'),
+                                              onChanged: (id) {
+                                                if (id == null) {
+                                                  _selectMarker(null);
+                                                } else {
+                                                  _selectMarker(
+                                                      _markers.firstWhere(
+                                                          (m) => m.id == id));
+                                                }
+                                              },
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          if (_currentMarker != null) ...[
+                                            Row(
+                                              mainAxisAlignment:
+                                                  MainAxisAlignment.end,
+                                              children: [
+                                                ToggleSwitch(
+                                                  checked:
+                                                      _currentMarker!.enabled,
+                                                  onChanged: (v) => setState(
+                                                      () => _currentMarker!
+                                                          .enabled = v),
+                                                ),
+                                              ],
+                                            ),
+                                            const SizedBox(height: 8),
+                                          ],
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      ValueListenableBuilder<bool>(
+                                        valueListenable: autoPeakEnabled,
+                                        builder: (context, autoEnabled, child) {
+                                          final bool manualEnabled =
+                                              !autoEnabled;
+                                          return Row(
+                                            children: [
+                                              const SizedBox(
+                                                  width: 100,
+                                                  child: Text('游标操作：',
+                                                      style: TextStyle(
+                                                          color: material
+                                                              .Colors.white))),
+                                              Expanded(
+                                                child: ComboBox<String>(
+                                                  placeholder:
+                                                      const Text('选择操作'),
+                                                  isExpanded: true,
+                                                  items: [
+                                                    '向左寻峰',
+                                                    '向右寻峰',
+                                                    '起始点',
+                                                    '结束点',
+                                                    '中间点'
+                                                  ]
+                                                      .map((o) =>
+                                                          ComboBoxItem<String>(
+                                                              value: o,
+                                                              child: Text(o)))
+                                                      .toList(),
+                                                  onChanged: manualEnabled
+                                                      ? (action) {
+                                                          if (action == null ||
+                                                              _currentMarker ==
+                                                                  null) {
+                                                            return;
+                                                          }
+                                                          double newFreq =
+                                                              _currentMarker!
+                                                                  .freqHz;
+                                                          switch (action) {
+                                                            case '起始点':
+                                                              newFreq =
+                                                                  _chartStartHz;
+                                                              break;
+                                                            case '结束点':
+                                                              newFreq =
+                                                                  _chartStopHz;
+                                                              break;
+                                                            case '向左寻峰':
+                                                              newFreq = _findLeftPeak(
+                                                                  _currentMarker!
+                                                                      .freqHz);
+                                                              break;
+                                                            case '向右寻峰':
+                                                              newFreq = _findRightPeak(
+                                                                  _currentMarker!
+                                                                      .freqHz);
+                                                              break;
+                                                            case '中间点':
+                                                              newFreq =
+                                                                  (_chartStartHz +
+                                                                          _chartStopHz) /
+                                                                      2.0;
+                                                              break;
+                                                          }
+                                                          _currentMarker!
+                                                              .freqHz = newFreq;
+                                                          _markerFreqController
+                                                                  .text =
+                                                              _formatFreqInput(
+                                                                  newFreq,
+                                                                  _markerFreqUnit
+                                                                      .value);
+                                                          setState(() {});
+                                                        }
+                                                      : null,
+                                                ),
+                                              ),
+                                            ],
+                                          );
+                                        },
+                                      ),
+                                      const SizedBox(height: 8),
+                                      ValueListenableBuilder<bool>(
+                                        valueListenable: autoPeakEnabled,
+                                        builder: (context, autoEnabled, child) {
+                                          final bool manualEnabled =
+                                              !autoEnabled;
+                                          return _buildInputRow(
+                                            label: '游标频点：',
+                                            controller: _markerFreqController,
+                                            unitNotifier: _markerFreqUnit,
+                                            units: freqUnits,
+                                            enabled: manualEnabled,
+                                            onSubmitted: manualEnabled
+                                                ? () {
+                                                    final double? parsed =
+                                                        _parseFreq(
+                                                            _markerFreqController
+                                                                .text,
+                                                            _markerFreqUnit
+                                                                .value);
+                                                    if (parsed != null &&
+                                                        _currentMarker !=
+                                                            null) {
+                                                      _currentMarker!.freqHz =
+                                                          parsed;
+                                                      setState(() {});
+                                                    }
+                                                  }
+                                                : null,
+                                          );
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Expander(
+                                  header: const Text('校准'),
+                                  content: _buildAmplitudeCalibrationPanel(),
+                                ),
+                                const Expander(
+                                    header: Text('系统'), content: Placeholder()),
+                                Expander(
+                                  header: const Text('图形'),
+                                  content: Column(
+                                    children: [
+                                      Row(
+                                        children: [
+                                          const SizedBox(
+                                              width: 100,
+                                              child: Text('点数：',
+                                                  style: TextStyle(
+                                                      color: material
+                                                          .Colors.white))),
+                                          Expanded(
+                                            child: TextBox(
+                                              controller: pointCountController,
+                                              enabled: !isDirectIfFft,
+                                              onSubmitted: (value) {
+                                                pointCountController.text =
+                                                    (_getCurrentPointCount())
+                                                        .toString();
+                                                _sendSweepConfig();
+                                              },
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          const SizedBox(
+                                              width: 100,
+                                              child: Text('刻度/格：',
+                                                  style: TextStyle(
+                                                      color: material
+                                                          .Colors.white))),
+                                          Expanded(
+                                            child: TextBox(
+                                              controller:
+                                                  scalePerGridController,
+                                              onChanged: (value) =>
+                                                  setState(() {}),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          const Text('dB',
+                                              style: TextStyle(
+                                                  color:
+                                                      material.Colors.white)),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          const SizedBox(
+                                              width: 100,
+                                              child: Text('曲线平滑:',
+                                                  style: TextStyle(
+                                                      color: material
+                                                          .Colors.white))),
+                                          ToggleSwitch(
+                                            checked: _traceSmoothingEnabled,
+                                            onChanged: (value) => setState(() =>
+                                                _traceSmoothingEnabled = value),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          const SizedBox(
+                                              width: 100,
+                                              child: Text('相位噪声:',
+                                                  style: TextStyle(
+                                                      color: material
+                                                          .Colors.white))),
+                                          ToggleSwitch(
+                                            checked: _phaseNoiseDisplayEnabled,
+                                            onChanged: (value) => setState(() =>
+                                                _phaseNoiseDisplayEnabled =
+                                                    value),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          const SizedBox(
+                                              width: 100,
+                                              child: Text('判断阈值:',
+                                                  style: TextStyle(
+                                                      color: material
+                                                          .Colors.white))),
+                                          Expanded(
+                                            child: TextBox(
+                                              controller:
+                                                  _phaseNoiseDisplayThresholdController,
+                                              onChanged: (value) =>
+                                                  setState(() {}),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          const Text('dBm',
+                                              style: TextStyle(
+                                                  color:
+                                                      material.Colors.white)),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          const SizedBox(
+                                              width: 100,
+                                              child: Text('修正值:',
+                                                  style: TextStyle(
+                                                      color: material
+                                                          .Colors.white))),
+                                          Expanded(
+                                            child: TextBox(
+                                              controller:
+                                                  _phaseNoiseDisplayOffsetController,
+                                              onChanged: (value) =>
+                                                  setState(() {}),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          const Text('dB',
+                                              style: TextStyle(
+                                                  color:
+                                                      material.Colors.white)),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          const SizedBox(
+                                              width: 100,
+                                              child: Text('固定频点补偿:',
+                                                  style: TextStyle(
+                                                      color: material
+                                                          .Colors.white))),
+                                          ToggleSwitch(
+                                            checked:
+                                                _fixedFrequencyCompensationEnabled,
+                                            onChanged:
+                                                _setFixedFrequencyCompensationEnabled,
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 4),
+                                      const Text(
+                                        '79.5 / 80 / 80.5 MHz，1.13 / 1.17 GHz：取前方最多第 5 点',
                                         style: TextStyle(
-                                            color: material.Colors.white))),
-                                ToggleSwitch(
-                                  checked: value,
-                                  onChanged: (v) =>
-                                      setState(() => autoPeakEnabled.value = v),
+                                            color: material.Colors.white54,
+                                            fontSize: 11),
+                                      ),
+                                    ],
+                                  ),
                                 ),
                               ],
                             ),
                           ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('当前游标：',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              Expanded(
-                                child: ComboBox<int?>(
-                                  value: _currentMarker?.id,
-                                  isExpanded: true,
-                                  items: _markers
-                                      .map((m) => ComboBoxItem<int?>(
-                                          value: m.id,
-                                          child: Text('游标 ${m.id}')))
-                                      .toList(),
-                                  placeholder: const Text('无'),
-                                  onChanged: (id) {
-                                    if (id == null) {
-                                      _selectMarker(null);
-                                    } else {
-                                      _selectMarker(_markers
-                                          .firstWhere((m) => m.id == id));
-                                    }
-                                  },
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              if (_currentMarker != null) ...[
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.end,
-                                  children: [
-                                    ToggleSwitch(
-                                      checked: _currentMarker!.enabled,
-                                      onChanged: (v) => setState(
-                                          () => _currentMarker!.enabled = v),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 8),
-                              ],
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          ValueListenableBuilder<bool>(
-                            valueListenable: autoPeakEnabled,
-                            builder: (context, autoEnabled, child) {
-                              final bool manualEnabled = !autoEnabled;
-                              return Row(
-                                children: [
-                                  const SizedBox(
-                                      width: 100,
-                                      child: Text('游标操作：',
-                                          style: TextStyle(
-                                              color: material.Colors.white))),
-                                  Expanded(
-                                    child: ComboBox<String>(
-                                      placeholder: const Text('选择操作'),
-                                      isExpanded: true,
-                                      items: [
-                                        '向左寻峰',
-                                        '向右寻峰',
-                                        '起始点',
-                                        '结束点',
-                                        '中间点'
-                                      ]
-                                          .map((o) => ComboBoxItem<String>(
-                                              value: o, child: Text(o)))
-                                          .toList(),
-                                      onChanged: manualEnabled
-                                          ? (action) {
-                                              if (action == null ||
-                                                  _currentMarker == null) {
-                                                return;
-                                              }
-                                              double newFreq =
-                                                  _currentMarker!.freqHz;
-                                              switch (action) {
-                                                case '起始点':
-                                                  newFreq = _chartStartHz;
-                                                  break;
-                                                case '结束点':
-                                                  newFreq = _chartStopHz;
-                                                  break;
-                                                case '向左寻峰':
-                                                  newFreq = _findLeftPeak(
-                                                      _currentMarker!.freqHz);
-                                                  break;
-                                                case '向右寻峰':
-                                                  newFreq = _findRightPeak(
-                                                      _currentMarker!.freqHz);
-                                                  break;
-                                                case '中间点':
-                                                  newFreq = (_chartStartHz +
-                                                          _chartStopHz) /
-                                                      2.0;
-                                                  break;
-                                              }
-                                              _currentMarker!.freqHz = newFreq;
-                                              _markerFreqController.text =
-                                                  _formatFreqInput(newFreq,
-                                                      _markerFreqUnit.value);
-                                              setState(() {});
-                                            }
-                                          : null,
-                                    ),
-                                  ),
-                                ],
-                              );
-                            },
-                          ),
-                          const SizedBox(height: 8),
-                          ValueListenableBuilder<bool>(
-                            valueListenable: autoPeakEnabled,
-                            builder: (context, autoEnabled, child) {
-                              final bool manualEnabled = !autoEnabled;
-                              return _buildInputRow(
-                                label: '游标频点：',
-                                controller: _markerFreqController,
-                                unitNotifier: _markerFreqUnit,
-                                units: freqUnits,
-                                enabled: manualEnabled,
-                                onSubmitted: manualEnabled
-                                    ? () {
-                                        final double? parsed = _parseFreq(
-                                            _markerFreqController.text,
-                                            _markerFreqUnit.value);
-                                        if (parsed != null &&
-                                            _currentMarker != null) {
-                                          _currentMarker!.freqHz = parsed;
-                                          setState(() {});
-                                        }
-                                      }
-                                    : null,
-                              );
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                    Expander(
-                      header: const Text('校准'),
-                      content: _buildAmplitudeCalibrationPanel(),
-                    ),
-                    const Expander(header: Text('系统'), content: Placeholder()),
-                    Expander(
-                      header: const Text('图形'),
-                      content: Column(
-                        children: [
-                          Row(
-                            children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('点数：',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              Expanded(
-                                child: TextBox(
-                                  controller: pointCountController,
-                                  enabled: !isDirectIfFft,
-                                  onSubmitted: (value) {
-                                    pointCountController.text =
-                                        (_getCurrentPointCount()).toString();
-                                    _sendSweepConfig();
-                                  },
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('刻度/格：',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              Expanded(
-                                child: TextBox(
-                                  controller: scalePerGridController,
-                                  onChanged: (value) => setState(() {}),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              const Text('dB',
-                                  style:
-                                      TextStyle(color: material.Colors.white)),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('曲线平滑:',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              ToggleSwitch(
-                                checked: _traceSmoothingEnabled,
-                                onChanged: (value) => setState(
-                                    () => _traceSmoothingEnabled = value),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('相位噪声:',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              ToggleSwitch(
-                                checked: _phaseNoiseDisplayEnabled,
-                                onChanged: (value) => setState(
-                                    () => _phaseNoiseDisplayEnabled = value),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('判断阈值:',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              Expanded(
-                                child: TextBox(
-                                  controller:
-                                      _phaseNoiseDisplayThresholdController,
-                                  onChanged: (value) => setState(() {}),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              const Text('dBm',
-                                  style:
-                                      TextStyle(color: material.Colors.white)),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('修正值:',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              Expanded(
-                                child: TextBox(
-                                  controller:
-                                      _phaseNoiseDisplayOffsetController,
-                                  onChanged: (value) => setState(() {}),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              const Text('dB',
-                                  style:
-                                      TextStyle(color: material.Colors.white)),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('80M补偿:',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              ToggleSwitch(
-                                checked: _eightyMHzDisplayEnabled,
-                                onChanged: (value) => setState(
-                                    () => _eightyMHzDisplayEnabled = value),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              const SizedBox(
-                                  width: 100,
-                                  child: Text('80M补偿值:',
-                                      style: TextStyle(
-                                          color: material.Colors.white))),
-                              Expanded(
-                                child: TextBox(
-                                  controller: _eightyMHzDisplayOffsetController,
-                                  onChanged: (value) => setState(() {}),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              const Text('dB',
-                                  style:
-                                      TextStyle(color: material.Colors.white)),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
-              ),
+                if (_aiAssistantVisible)
+                  ResizablePanelDivider(
+                    onDragDelta: _resizeAiPanel,
+                    tooltip: '拖动调整 AI 面板宽度',
+                  ),
+                Visibility(
+                  visible: _aiAssistantVisible,
+                  maintainState: true,
+                  maintainAnimation: true,
+                  maintainSize: false,
+                  child: SizedBox(
+                    width: _aiPanelWidth,
+                    child: AiAssistantPanel(
+                      key: _aiAssistantKey,
+                      onClose: _closeAiAssistant,
+                      onListeningChanged: _handleAiListeningChanged,
+                      instrumentAgent: _instrumentAgentGateway,
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ],
-        ],
-      ),
-      bottomBar: _buildBottomBar(),
+            bottomBar: _buildBottomBar(),
+          ),
+        ),
+        if (Platform.isWindows)
+          const Positioned(
+            top: 0,
+            right: 0,
+            width: WindowsTitleBar.controlsWidth,
+            height: 64,
+            child: WindowsWindowControls(),
+          ),
+      ],
     );
   }
 
@@ -4984,7 +7163,7 @@ class _MyHomePageState extends State<MyHomePage> {
         ),
         const SizedBox(width: 8),
         SizedBox(
-          width: 80,
+          width: 88,
           child: ValueListenableBuilder<String>(
             valueListenable: unitNotifier,
             builder: (context, value, child) => ComboBox<String>(

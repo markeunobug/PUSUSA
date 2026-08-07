@@ -189,6 +189,25 @@ void main() {
     manager.controller.close();
   });
 
+  test('phase-noise protocol rejects start offset below 1 kHz', () {
+    final manager = FakeSerialPortManager()..isConnected = true;
+    final protocol = SerialProtocol(manager);
+
+    expect(
+      () => protocol.setPhaseNoiseConfig(
+        const PhaseNoiseConfig(
+          startOffsetHz: 999.0,
+          stopOffsetHz: 1000000.0,
+        ),
+      ),
+      throwsArgumentError,
+    );
+    expect(manager.writes, isEmpty);
+
+    protocol.dispose();
+    manager.controller.close();
+  });
+
   test('phase-noise config payload encodes default carrier acquisition fields',
       () {
     final manager = FakeSerialPortManager()..isConnected = true;
