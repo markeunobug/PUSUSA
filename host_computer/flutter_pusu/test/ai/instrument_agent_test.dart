@@ -6,14 +6,17 @@ void main() {
     bool connected = true,
     bool responsive = true,
     String mode = 'spectrum',
+    double rbwHz = 1e6,
+    double startHz = 50e6,
+    double stopHz = 1.5e9,
   }) {
     return InstrumentAgentSnapshot(
       connected: connected,
       deviceResponsive: responsive,
       measurementMode: mode,
-      startHz: 50e6,
-      stopHz: 1.5e9,
-      rbwHz: 1e6,
+      startHz: startHz,
+      stopHz: stopHz,
+      rbwHz: rbwHz,
       vbwMode: 'VBW=RBW',
       vbwHz: 1e6,
       detector: '平均',
@@ -29,6 +32,10 @@ void main() {
   InstrumentAgentGateway gateway(
     InstrumentAgentSnapshot state, {
     SetFrequencyAction? setFrequency,
+    SetBandwidthAction? setBandwidth,
+    SimpleInstrumentAction? startSingleSweep,
+    ConfigureSpectrumFrontendAction? configureSpectrumFrontend,
+    ApplySpectrumPresetAction? applySpectrumPreset,
     ConfigureRealtimeSpectrumAction? configureRealtimeSpectrum,
     RealtimeSpectrumWaterfallHistoryAction? getRealtimeWaterfallHistory,
     SaveRealtimeMeasurementAction? saveRealtimeMeasurement,
@@ -36,6 +43,9 @@ void main() {
     StartPhaseNoiseMeasurementAction? startPhaseNoiseMeasurement,
     ConfigurePhaseNoiseAction? configurePhaseNoise,
     AnalyzePhaseNoiseAction? analyzePhaseNoise,
+    PhaseNoiseSnapshotAction? getPhaseNoiseSnapshot,
+    SavePhaseNoiseMeasurementAction? savePhaseNoiseMeasurement,
+    SimpleInstrumentAction? getSweepProfile,
   }) {
     const success = InstrumentActionOutcome(
       success: true,
@@ -44,10 +54,13 @@ void main() {
     return InstrumentAgentGateway(
       snapshotProvider: () => state,
       setFrequency: setFrequency ?? ((_, __) async => success),
-      setBandwidth: (_, __, ___) async => success,
+      setBandwidth: setBandwidth ?? ((_, __, ___) async => success),
       setDetector: (_) async => success,
       setMeasurementMode: (_) async => success,
-      startSingleSweep: () async => success,
+      configureSpectrumFrontend:
+          configureSpectrumFrontend ?? ((_) async => success),
+      applySpectrumPreset: applySpectrumPreset ?? ((_) async => success),
+      startSingleSweep: startSingleSweep ?? (() async => success),
       startContinuousSweep: () async => success,
       stopMeasurement: () async => success,
       startPhaseNoiseMeasurement:
@@ -56,6 +69,8 @@ void main() {
       getPhaseNoiseState: () async => success,
       configurePhaseNoise: configurePhaseNoise ?? ((_) async => success),
       analyzePhaseNoise: analyzePhaseNoise ?? ((_, __, ___) async => success),
+      getPhaseNoiseSnapshot:
+          getPhaseNoiseSnapshot ?? ((_, __) async => success),
       startRealtimeSpectrum: (_) async => success,
       stopRealtimeSpectrum: () async => success,
       getSpectrumSnapshot: (_) async => success,
@@ -72,6 +87,9 @@ void main() {
       saveMeasurement: (_, __) async => success,
       saveRealtimeMeasurement: saveRealtimeMeasurement ??
           ((_, __, ___, ____, _____) async => success),
+      savePhaseNoiseMeasurement:
+          savePhaseNoiseMeasurement ?? ((_, __, ___) async => success),
+      getSweepProfile: getSweepProfile ?? (() async => success),
       captureScreenshot: captureScreenshot ?? (() async => success),
       getTestSession: () async => success,
       startTestSession: (_, __) async => success,
@@ -181,6 +199,52 @@ void main() {
     expect(result.data['device_ack'], isTrue);
   });
 
+  test('full-span carrier scan forces 1 MHz RBW before acquisition', () async {
+    final calls = <String>[];
+    final agent = gateway(
+      snapshot(rbwHz: 300e3),
+      setBandwidth: (rbw, vbw, _) async {
+        calls.add('bandwidth:$rbw:$vbw');
+        return const InstrumentActionOutcome(success: true, message: 'ACK');
+      },
+      startSingleSweep: () async {
+        calls.add('sweep');
+        return const InstrumentActionOutcome(success: true, message: '完成');
+      },
+    );
+
+    final result = await agent.execute(const InstrumentToolCall(
+      id: 'full-span-sweep',
+      name: 'start_single_sweep',
+      arguments: <String, dynamic>{},
+    ));
+
+    expect(result.success, isTrue);
+    expect(calls, <String>['bandwidth:1000000.0:follow_rbw', 'sweep']);
+    expect(result.data['carrier_scan_policy'], 'full_span_rbw_1mhz');
+    expect(result.data['rbw_hz'], 1e6);
+  });
+
+  test('narrow single sweep preserves the current RBW', () async {
+    var bandwidthChanged = false;
+    final agent = gateway(
+      snapshot(rbwHz: 300e3, startHz: 700e6, stopHz: 800e6),
+      setBandwidth: (_, __, ___) async {
+        bandwidthChanged = true;
+        return const InstrumentActionOutcome(success: true, message: 'ACK');
+      },
+    );
+
+    final result = await agent.execute(const InstrumentToolCall(
+      id: 'narrow-sweep',
+      name: 'start_single_sweep',
+      arguments: <String, dynamic>{},
+    ));
+
+    expect(result.success, isTrue);
+    expect(bandwidthChanged, isFalse);
+  });
+
   test('tool registry exposes instrument and spectrum tools', () {
     final names = gateway(snapshot())
         .toolDefinitions
@@ -194,14 +258,18 @@ void main() {
         'set_frequency',
         'set_bandwidth',
         'set_detector',
+        'configure_spectrum_frontend',
+        'apply_spectrum_preset',
         'start_single_sweep',
         'start_continuous_sweep',
+        'get_sweep_profile',
         'stop_measurement',
         'start_phase_noise_measurement',
         'stop_phase_noise_measurement',
         'get_phase_noise_state',
         'configure_phase_noise',
         'analyze_phase_noise',
+        'get_phase_noise_snapshot',
         'start_realtime_spectrum',
         'stop_realtime_spectrum',
         'get_realtime_spectrum_state',
@@ -247,7 +315,141 @@ void main() {
     expect(realtimeNames, isNot(contains('save_measurement')));
     expect(phaseNoiseNames, isNot(contains('save_measurement')));
     expect(phaseNoiseNames, isNot(contains('save_realtime_measurement')));
+    expect(phaseNoiseNames, contains('save_phase_noise_measurement'));
+    expect(spectrumNames, isNot(contains('save_phase_noise_measurement')));
+    expect(realtimeNames, isNot(contains('save_phase_noise_measurement')));
     expect(phaseNoiseNames, contains('capture_screenshot'));
+  });
+
+  test('direct-IF mode can call frontend tool to enter mixer chain', () async {
+    Map<String, dynamic>? received;
+    final agent = gateway(
+      snapshot(mode: 'spectrum_direct_if'),
+      configureSpectrumFrontend: (arguments) async {
+        received = arguments;
+        return const InstrumentActionOutcome(success: true, message: 'ACK');
+      },
+    );
+
+    final result = await agent.execute(const InstrumentToolCall(
+      id: 'frontend-1',
+      name: 'configure_spectrum_frontend',
+      arguments: <String, dynamic>{
+        'path_mode': 'mixer_chain',
+        'lna_mode': 'enable',
+        'attenuation_db': 10.25,
+      },
+    ));
+
+    expect(result.success, isTrue);
+    expect(received?['path_mode'], 'mixer_chain');
+    expect(received?['attenuation_db'], 10.25);
+  });
+
+  test('frontend tool rejects unsupported DSA step before callback', () async {
+    var invoked = false;
+    final agent = gateway(
+      snapshot(mode: 'spectrum_direct_if'),
+      configureSpectrumFrontend: (_) async {
+        invoked = true;
+        return const InstrumentActionOutcome(success: true, message: 'ACK');
+      },
+    );
+
+    final result = await agent.execute(const InstrumentToolCall(
+      id: 'frontend-invalid',
+      name: 'configure_spectrum_frontend',
+      arguments: <String, dynamic>{'attenuation_db': 10.1},
+    ));
+
+    expect(result.success, isFalse);
+    expect(result.message, contains('0.25 dB'));
+    expect(invoked, isFalse);
+  });
+
+  test('spectrum preset is callable from direct-IF mode', () async {
+    String? receivedPreset;
+    final agent = gateway(
+      snapshot(mode: 'spectrum_direct_if'),
+      applySpectrumPreset: (preset) async {
+        receivedPreset = preset;
+        return const InstrumentActionOutcome(success: true, message: 'ACK');
+      },
+    );
+
+    final result = await agent.execute(const InstrumentToolCall(
+      id: 'preset-1',
+      name: 'apply_spectrum_preset',
+      arguments: <String, dynamic>{'preset': 'fast_full_span'},
+    ));
+
+    expect(result.success, isTrue);
+    expect(receivedPreset, 'fast_full_span');
+  });
+
+  test('phase-noise snapshot and save forward trace arguments', () async {
+    String? snapshotTrace;
+    int? snapshotPoints;
+    String? savedTrace;
+    final agent = gateway(
+      snapshot(mode: 'phase_noise'),
+      getPhaseNoiseSnapshot: (trace, maximumPoints) async {
+        snapshotTrace = trace;
+        snapshotPoints = maximumPoints;
+        return const InstrumentActionOutcome(success: true, message: 'ok');
+      },
+      savePhaseNoiseMeasurement: (label, note, trace) async {
+        savedTrace = trace;
+        return const InstrumentActionOutcome(success: true, message: 'ok');
+      },
+    );
+
+    final snapshotResult = await agent.execute(const InstrumentToolCall(
+      id: 'pn-snapshot',
+      name: 'get_phase_noise_snapshot',
+      arguments: <String, dynamic>{
+        'trace': 'average',
+        'maximum_points': 300,
+      },
+    ));
+    final saveResult = await agent.execute(const InstrumentToolCall(
+      id: 'pn-save',
+      name: 'save_phase_noise_measurement',
+      arguments: <String, dynamic>{'label': 'PN 1 GHz', 'trace': 'raw'},
+    ));
+
+    expect(snapshotResult.success, isTrue);
+    expect(snapshotTrace, 'average');
+    expect(snapshotPoints, 300);
+    expect(saveResult.success, isTrue);
+    expect(savedTrace, 'raw');
+  });
+
+  test('sweep profile is read-only and requires standard spectrum mode',
+      () async {
+    var invoked = false;
+    final spectrumAgent = gateway(
+      snapshot(),
+      getSweepProfile: () async {
+        invoked = true;
+        return const InstrumentActionOutcome(success: true, message: 'ok');
+      },
+    );
+    final phaseAgent = gateway(snapshot(mode: 'phase_noise'));
+    const call = InstrumentToolCall(
+      id: 'profile-1',
+      name: 'get_sweep_profile',
+      arguments: <String, dynamic>{},
+    );
+
+    final spectrumResult = await spectrumAgent.execute(call);
+    final phaseResult = await phaseAgent.execute(call);
+
+    expect(spectrumAgent.isReadOnly(call.name), isTrue);
+    expect(spectrumResult.success, isTrue);
+    expect(invoked, isTrue);
+    expect(phaseResult.success, isFalse);
+    expect(phaseResult.message, contains('标准频谱模式'));
   });
 
   test('realtime save forwards dBFS trace and waterfall options', () async {

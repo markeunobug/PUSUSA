@@ -257,7 +257,8 @@ class AgentTestSessionStore {
         final decoded = jsonDecode(await entity.readAsString());
         if (decoded is! Map ||
             (decoded['spectrum_points'] is! List &&
-                decoded['realtime_spectrum_points'] is! List)) {
+                decoded['realtime_spectrum_points'] is! List &&
+                decoded['phase_noise_points'] is! List)) {
           continue;
         }
         final record = Map<String, dynamic>.from(decoded)
@@ -275,8 +276,9 @@ class AgentTestSessionStore {
   static Map<String, dynamic> _measurementSummary(
     Map<String, dynamic> record,
   ) {
-    final points =
-        record['spectrum_points'] ?? record['realtime_spectrum_points'];
+    final points = record['spectrum_points'] ??
+        record['realtime_spectrum_points'] ??
+        record['phase_noise_points'];
     return <String, dynamic>{
       'id': record['id'],
       'label': record['label'],

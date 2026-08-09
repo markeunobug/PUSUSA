@@ -144,6 +144,11 @@ typedef SetDetectorAction = Future<InstrumentActionOutcome> Function(
 typedef SetMeasurementModeAction = Future<InstrumentActionOutcome> Function(
   String mode,
 );
+typedef ConfigureSpectrumFrontendAction = Future<InstrumentActionOutcome>
+    Function(Map<String, dynamic> arguments);
+typedef ApplySpectrumPresetAction = Future<InstrumentActionOutcome> Function(
+  String preset,
+);
 typedef StartPhaseNoiseMeasurementAction = Future<InstrumentActionOutcome>
     Function(bool continuous, bool waitForCarrier);
 typedef ConfigurePhaseNoiseAction = Future<InstrumentActionOutcome> Function(
@@ -153,6 +158,10 @@ typedef AnalyzePhaseNoiseAction = Future<InstrumentActionOutcome> Function(
   String trace,
   double offsetHz,
   int waitTimeoutMs,
+);
+typedef PhaseNoiseSnapshotAction = Future<InstrumentActionOutcome> Function(
+  String trace,
+  int maximumPoints,
 );
 typedef StartRealtimeSpectrumAction = Future<InstrumentActionOutcome> Function(
   double centerHz,
@@ -195,6 +204,8 @@ typedef SaveRealtimeMeasurementAction = Future<InstrumentActionOutcome>
   bool includeWaterfall,
   int waterfallRows,
 );
+typedef SavePhaseNoiseMeasurementAction = Future<InstrumentActionOutcome>
+    Function(String label, String note, String trace);
 typedef CaptureScreenshotAction = Future<InstrumentActionOutcome> Function();
 typedef GetTestSessionAction = Future<InstrumentActionOutcome> Function();
 typedef StartTestSessionAction = Future<InstrumentActionOutcome> Function(
@@ -236,6 +247,8 @@ class InstrumentAgentGateway {
     required SetBandwidthAction setBandwidth,
     required SetDetectorAction setDetector,
     required SetMeasurementModeAction setMeasurementMode,
+    required ConfigureSpectrumFrontendAction configureSpectrumFrontend,
+    required ApplySpectrumPresetAction applySpectrumPreset,
     required SimpleInstrumentAction startSingleSweep,
     required SimpleInstrumentAction startContinuousSweep,
     required SimpleInstrumentAction stopMeasurement,
@@ -244,6 +257,7 @@ class InstrumentAgentGateway {
     required SimpleInstrumentAction getPhaseNoiseState,
     required ConfigurePhaseNoiseAction configurePhaseNoise,
     required AnalyzePhaseNoiseAction analyzePhaseNoise,
+    required PhaseNoiseSnapshotAction getPhaseNoiseSnapshot,
     required StartRealtimeSpectrumAction startRealtimeSpectrum,
     required SimpleInstrumentAction stopRealtimeSpectrum,
     required SpectrumSnapshotAction getSpectrumSnapshot,
@@ -257,6 +271,8 @@ class InstrumentAgentGateway {
     required AnalyzeRealtimeSpectrumAction placeRealtimePeakMarkers,
     required SaveMeasurementAction saveMeasurement,
     required SaveRealtimeMeasurementAction saveRealtimeMeasurement,
+    required SavePhaseNoiseMeasurementAction savePhaseNoiseMeasurement,
+    required SimpleInstrumentAction getSweepProfile,
     required CaptureScreenshotAction captureScreenshot,
     required GetTestSessionAction getTestSession,
     required StartTestSessionAction startTestSession,
@@ -274,6 +290,8 @@ class InstrumentAgentGateway {
         _setBandwidth = setBandwidth,
         _setDetector = setDetector,
         _setMeasurementMode = setMeasurementMode,
+        _configureSpectrumFrontend = configureSpectrumFrontend,
+        _applySpectrumPreset = applySpectrumPreset,
         _startSingleSweep = startSingleSweep,
         _startContinuousSweep = startContinuousSweep,
         _stopMeasurement = stopMeasurement,
@@ -282,6 +300,7 @@ class InstrumentAgentGateway {
         _getPhaseNoiseState = getPhaseNoiseState,
         _configurePhaseNoise = configurePhaseNoise,
         _analyzePhaseNoise = analyzePhaseNoise,
+        _getPhaseNoiseSnapshot = getPhaseNoiseSnapshot,
         _startRealtimeSpectrum = startRealtimeSpectrum,
         _stopRealtimeSpectrum = stopRealtimeSpectrum,
         _getSpectrumSnapshot = getSpectrumSnapshot,
@@ -295,6 +314,8 @@ class InstrumentAgentGateway {
         _placeRealtimePeakMarkers = placeRealtimePeakMarkers,
         _saveMeasurement = saveMeasurement,
         _saveRealtimeMeasurement = saveRealtimeMeasurement,
+        _savePhaseNoiseMeasurement = savePhaseNoiseMeasurement,
+        _getSweepProfile = getSweepProfile,
         _captureScreenshot = captureScreenshot,
         _getTestSession = getTestSession,
         _startTestSession = startTestSession,
@@ -331,6 +352,8 @@ class InstrumentAgentGateway {
   final SetBandwidthAction _setBandwidth;
   final SetDetectorAction _setDetector;
   final SetMeasurementModeAction _setMeasurementMode;
+  final ConfigureSpectrumFrontendAction _configureSpectrumFrontend;
+  final ApplySpectrumPresetAction _applySpectrumPreset;
   final SimpleInstrumentAction _startSingleSweep;
   final SimpleInstrumentAction _startContinuousSweep;
   final SimpleInstrumentAction _stopMeasurement;
@@ -339,6 +362,7 @@ class InstrumentAgentGateway {
   final SimpleInstrumentAction _getPhaseNoiseState;
   final ConfigurePhaseNoiseAction _configurePhaseNoise;
   final AnalyzePhaseNoiseAction _analyzePhaseNoise;
+  final PhaseNoiseSnapshotAction _getPhaseNoiseSnapshot;
   final StartRealtimeSpectrumAction _startRealtimeSpectrum;
   final SimpleInstrumentAction _stopRealtimeSpectrum;
   final SpectrumSnapshotAction _getSpectrumSnapshot;
@@ -352,6 +376,8 @@ class InstrumentAgentGateway {
   final AnalyzeRealtimeSpectrumAction _placeRealtimePeakMarkers;
   final SaveMeasurementAction _saveMeasurement;
   final SaveRealtimeMeasurementAction _saveRealtimeMeasurement;
+  final SavePhaseNoiseMeasurementAction _savePhaseNoiseMeasurement;
+  final SimpleInstrumentAction _getSweepProfile;
   final CaptureScreenshotAction _captureScreenshot;
   final GetTestSessionAction _getTestSession;
   final StartTestSessionAction _startTestSession;
@@ -368,6 +394,42 @@ class InstrumentAgentGateway {
   bool _commandInFlight = false;
 
   InstrumentAgentSnapshot get snapshot => _snapshotProvider();
+
+  /// Full-span carrier discovery is intentionally a coarse scan.  Frequency
+  /// configuration is independent from RBW, so guard this boundary here
+  /// instead of relying on the model to remember a separate set_bandwidth call.
+  Future<InstrumentActionOutcome>
+      _startSingleSweepWithCarrierScanPolicy() async {
+    final state = snapshot;
+    final fullSpan = state.measurementMode == 'spectrum' &&
+        (state.startHz - state.minimumFrequencyHz).abs() < 1.0 &&
+        (state.stopHz - state.maximumFrequencyHz).abs() < 1.0;
+    if (fullSpan && (state.rbwHz - 1e6).abs() >= 1.0) {
+      final bandwidth = await _setBandwidth(1e6, 'follow_rbw', null);
+      if (!bandwidth.success) {
+        return InstrumentActionOutcome(
+          success: false,
+          message: '全频段载波搜索需要先将 RBW 切换为 1 MHz，但配置失败：${bandwidth.message}',
+          data: <String, dynamic>{
+            'carrier_scan_policy': 'full_span_rbw_1mhz',
+            'rbw_required_hz': 1e6,
+            'bandwidth_configured': false,
+          },
+        );
+      }
+    }
+    final outcome = await _startSingleSweep();
+    if (!fullSpan || !outcome.success) return outcome;
+    return InstrumentActionOutcome(
+      success: true,
+      message: '${outcome.message}（全频段载波搜索 RBW=1 MHz）',
+      data: <String, dynamic>{
+        ...outcome.data,
+        'carrier_scan_policy': 'full_span_rbw_1mhz',
+        'rbw_hz': 1e6,
+      },
+    );
+  }
 
   List<Map<String, dynamic>> get toolDefinitions {
     final definitions = <Map<String, dynamic>>[
@@ -446,15 +508,70 @@ class InstrumentAgentGateway {
         required: const <String>['detector'],
       ),
       _functionTool(
+        name: 'configure_spectrum_frontend',
+        description: '配置标准扫频前端。可把 spectrum_direct_if 安全切换为 mixer_chain，'
+            '并设置 LNA、DSA 衰减、VGA 和参考电平。RF 前端及参考电平只有收到设备 ACK 后才更新界面；'
+            'VGA 协议没有 ACK，结果中会单独标明仅已发送。',
+        properties: <String, dynamic>{
+          'path_mode': <String, dynamic>{
+            'type': 'string',
+            'enum': <String>['direct_if', 'mixer_chain', 'auto'],
+          },
+          'lna_mode': <String, dynamic>{
+            'type': 'string',
+            'enum': <String>['bypass', 'enable', 'auto'],
+          },
+          'attenuation_db': <String, dynamic>{
+            'type': 'number',
+            'minimum': 0,
+            'maximum': 31.75,
+            'description': 'DSA 衰减，单位 dB，步进 0.25 dB',
+          },
+          'vga_db': <String, dynamic>{
+            'type': 'number',
+            'enum': <double>[-11, -10, -6, -3, 0, 3, 6, 10, 20, 30, 34],
+          },
+          'reference_dbm': <String, dynamic>{
+            'type': 'number',
+            'minimum': -140,
+            'maximum': 30,
+          },
+        },
+      ),
+      _functionTool(
+        name: 'apply_spectrum_preset',
+        description: '原子应用标准扫频预设。预设包含频率范围、RBW/VBW、检波、参考电平、'
+            '显示点数和扫频速度；若当前为 direct-IF，会先切换到 mixer_chain。',
+        properties: <String, dynamic>{
+          'preset': <String, dynamic>{
+            'type': 'string',
+            'enum': <String>[
+              'default_full_span',
+              'fast_full_span',
+              'high_resolution',
+              'zero_span_observation',
+            ],
+          },
+        },
+        required: const <String>['preset'],
+      ),
+      _functionTool(
         name: 'start_single_sweep',
         description: '仅在 spectrum 标准频谱模式中，应用当前配置并执行一次单次扫频。'
             '工具返回成功时整次扫描已经完成，随后可以立即调用 analyze_spectrum 或 get_spectrum_snapshot。'
-            '不是实时频谱。',
+            '不是实时频谱。当当前扫频范围覆盖仪器完整频段时，工具会在启动前自动将 RBW 切换为 1 MHz，'
+            '用于快速、稳定地发现目标载波。',
         properties: const <String, dynamic>{},
       ),
       _functionTool(
         name: 'start_continuous_sweep',
         description: '仅在 spectrum 标准频谱模式中，周期执行传统扫频。不是 realtime_spectrum。',
+        properties: const <String, dynamic>{},
+      ),
+      _functionTool(
+        name: 'get_sweep_profile',
+        description: '读取最近一次标准扫频的设备性能 Profile，并刷新 LO、锁定、DMA、累加、'
+            'DDC、CIC、测量和 UART 分段耗时。用于分析扫频慢或无响应原因。',
         properties: const <String, dynamic>{},
       ),
       _functionTool(
@@ -558,6 +675,24 @@ class InstrumentAgentGateway {
           },
         },
         required: const <String>['offset_hz'],
+      ),
+      _functionTool(
+        name: 'get_phase_noise_snapshot',
+        description: '读取 phase_noise 当前 raw 或 average 完整曲线的保峰降采样快照，'
+            '返回频偏、dBc/Hz、当前点 RBW 和测量进度，不发起新测量。',
+        properties: <String, dynamic>{
+          'trace': <String, dynamic>{
+            'type': 'string',
+            'enum': <String>['auto', 'raw', 'average'],
+            'description': '默认 auto，优先 average',
+          },
+          'maximum_points': <String, dynamic>{
+            'type': 'integer',
+            'minimum': 16,
+            'maximum': 512,
+            'description': '最多返回点数，默认 256',
+          },
+        },
       ),
       _functionTool(
         name: 'start_realtime_spectrum',
@@ -814,6 +949,21 @@ class InstrumentAgentGateway {
         required: const <String>['label'],
       ),
       _functionTool(
+        name: 'save_phase_noise_measurement',
+        description: '仅保存 phase_noise 相位噪声数据。按 dBc/Hz 保存 raw 或 average 完整曲线、'
+            '载波信息、配置和进度为 JSON 与 CSV。',
+        properties: <String, dynamic>{
+          'label': <String, dynamic>{'type': 'string'},
+          'note': <String, dynamic>{'type': 'string'},
+          'trace': <String, dynamic>{
+            'type': 'string',
+            'enum': <String>['auto', 'raw', 'average'],
+            'description': '默认 auto，优先 average',
+          },
+        },
+        required: const <String>['label'],
+      ),
+      _functionTool(
         name: 'capture_screenshot',
         description: '截取当前测量页面并保存为 PNG。支持 spectrum、phase_noise 和 '
             'realtime_spectrum 三种模式，使用软件截图目录并自动添加时间戳。',
@@ -944,6 +1094,9 @@ class InstrumentAgentGateway {
       if (name == 'save_realtime_measurement') {
         return mode == 'realtime_spectrum';
       }
+      if (name == 'save_phase_noise_measurement') {
+        return mode == 'phase_noise';
+      }
       return true;
     }).toList(growable: false);
   }
@@ -952,6 +1105,8 @@ class InstrumentAgentGateway {
         'get_instrument_state',
         'get_phase_noise_state',
         'analyze_phase_noise',
+        'get_phase_noise_snapshot',
+        'get_sweep_profile',
         'get_spectrum_snapshot',
         'analyze_spectrum',
         'get_realtime_spectrum_state',
@@ -979,10 +1134,16 @@ class InstrumentAgentGateway {
             'VBW $vbwMode';
       case 'set_detector':
         return '设置检波方式为 ${call.arguments['detector'] ?? '--'}';
+      case 'configure_spectrum_frontend':
+        return '配置标准扫频 RF 前端和幅度参数';
+      case 'apply_spectrum_preset':
+        return '应用标准扫频预设 ${call.arguments['preset'] ?? '--'}';
       case 'start_single_sweep':
         return '启动单次扫描';
       case 'start_continuous_sweep':
         return '启动连续扫描';
+      case 'get_sweep_profile':
+        return '读取标准扫频分段耗时 Profile';
       case 'stop_measurement':
         return '停止当前测量';
       case 'start_phase_noise_measurement':
@@ -995,6 +1156,8 @@ class InstrumentAgentGateway {
         return '配置相位噪声载波、频偏范围和平均参数';
       case 'analyze_phase_noise':
         return '读取 ${_formatHz(_number(call.arguments['offset_hz']))} 频偏处的相位噪声';
+      case 'get_phase_noise_snapshot':
+        return '读取相位噪声 ${call.arguments['trace'] ?? 'auto'} 完整曲线快照';
       case 'start_realtime_spectrum':
         return '启动实时频谱，中心频率 '
             '${_formatHz(_number(call.arguments['center_hz']))}';
@@ -1014,6 +1177,8 @@ class InstrumentAgentGateway {
         return '在实时频谱图上标记 ${call.arguments['trace'] ?? 'latest'} 曲线峰值';
       case 'save_realtime_measurement':
         return '保存实时频谱 ${call.arguments['trace'] ?? 'average'} dBFS 测量记录';
+      case 'save_phase_noise_measurement':
+        return '保存相位噪声 ${call.arguments['trace'] ?? 'auto'} dBc/Hz 测量记录';
       case 'capture_screenshot':
         return '截取当前${snapshot.measurementMode}测量页面';
       case 'get_spectrum_snapshot':
@@ -1092,8 +1257,14 @@ class InstrumentAgentGateway {
           await _setDetector(call.arguments['detector'].toString()),
         'set_measurement_mode' =>
           await _setMeasurementMode(call.arguments['mode'].toString()),
-        'start_single_sweep' => await _startSingleSweep(),
+        'configure_spectrum_frontend' =>
+          await _configureSpectrumFrontend(call.arguments),
+        'apply_spectrum_preset' => await _applySpectrumPreset(
+            call.arguments['preset'].toString(),
+          ),
+        'start_single_sweep' => await _startSingleSweepWithCarrierScanPolicy(),
         'start_continuous_sweep' => await _startContinuousSweep(),
+        'get_sweep_profile' => await _getSweepProfile(),
         'stop_measurement' => await _stopMeasurement(),
         'start_phase_noise_measurement' => await _startPhaseNoiseMeasurement(
             call.arguments['continuous'] != false,
@@ -1106,6 +1277,10 @@ class InstrumentAgentGateway {
             call.arguments['trace']?.toString() ?? 'auto',
             _number(call.arguments['offset_hz'])!,
             _integer(call.arguments['wait_timeout_ms'], 0),
+          ),
+        'get_phase_noise_snapshot' => await _getPhaseNoiseSnapshot(
+            call.arguments['trace']?.toString() ?? 'auto',
+            _integer(call.arguments['maximum_points'], 256),
           ),
         'start_realtime_spectrum' => await _startRealtimeSpectrum(
             _number(call.arguments['center_hz'])!,
@@ -1129,6 +1304,11 @@ class InstrumentAgentGateway {
             call.arguments['trace']?.toString() ?? 'average',
             call.arguments['include_waterfall'] == true,
             _integer(call.arguments['waterfall_rows'], 20),
+          ),
+        'save_phase_noise_measurement' => await _savePhaseNoiseMeasurement(
+            call.arguments['label']?.toString().trim() ?? '',
+            call.arguments['note']?.toString().trim() ?? '',
+            call.arguments['trace']?.toString() ?? 'auto',
           ),
         'capture_screenshot' => await _captureScreenshot(),
         'analyze_realtime_spectrum' => await _analyzeRealtimeSpectrum(
@@ -1230,6 +1410,8 @@ class InstrumentAgentGateway {
           'set_frequency',
           'set_bandwidth',
           'set_detector',
+          'configure_spectrum_frontend',
+          'apply_spectrum_preset',
           'start_single_sweep',
           'start_continuous_sweep',
           'stop_measurement',
@@ -1237,6 +1419,7 @@ class InstrumentAgentGateway {
           'stop_phase_noise_measurement',
           'start_realtime_spectrum',
           'stop_realtime_spectrum',
+          'get_sweep_profile',
         }.contains(call.name) ||
         configuresRealtimeHardware ||
         configuresRunningPhaseNoise;
@@ -1259,6 +1442,11 @@ class InstrumentAgentGateway {
       'start_single_sweep',
       'start_continuous_sweep',
       'stop_measurement',
+      'get_sweep_profile',
+    }.contains(call.name);
+    final requiresSpectrumFamily = <String>{
+      'configure_spectrum_frontend',
+      'apply_spectrum_preset',
     }.contains(call.name);
     final requiresPhaseNoiseMode = <String>{
       'start_phase_noise_measurement',
@@ -1266,6 +1454,8 @@ class InstrumentAgentGateway {
       'get_phase_noise_state',
       'configure_phase_noise',
       'analyze_phase_noise',
+      'get_phase_noise_snapshot',
+      'save_phase_noise_measurement',
     }.contains(call.name);
     final requiresRealtimeMode = <String>{
       'start_realtime_spectrum',
@@ -1282,6 +1472,14 @@ class InstrumentAgentGateway {
       return InstrumentActionOutcome(
         success: false,
         message: '当前处于 ${state.measurementMode}，该工具只属于 spectrum 标准频谱模式',
+      );
+    }
+    if (requiresSpectrumFamily &&
+        state.measurementMode != 'spectrum' &&
+        state.measurementMode != 'spectrum_direct_if') {
+      return InstrumentActionOutcome(
+        success: false,
+        message: '当前处于 ${state.measurementMode}，请先切换到 spectrum 模式',
       );
     }
     if (requiresPhaseNoiseMode && state.measurementMode != 'phase_noise') {
@@ -1383,8 +1581,97 @@ class InstrumentAgentGateway {
           );
         }
         return null;
+      case 'configure_spectrum_frontend':
+        const allowedKeys = <String>{
+          'path_mode',
+          'lna_mode',
+          'attenuation_db',
+          'vga_db',
+          'reference_dbm',
+        };
+        if (!allowedKeys.any(call.arguments.containsKey)) {
+          return const InstrumentActionOutcome(
+            success: false,
+            message: '至少需要提供一项标准扫频前端参数',
+          );
+        }
+        final pathMode = call.arguments['path_mode']?.toString();
+        if (pathMode != null &&
+            !const <String>{'direct_if', 'mixer_chain', 'auto'}
+                .contains(pathMode)) {
+          return const InstrumentActionOutcome(
+            success: false,
+            message: 'path_mode 必须是 direct_if、mixer_chain 或 auto',
+          );
+        }
+        final lnaMode = call.arguments['lna_mode']?.toString();
+        if (lnaMode != null &&
+            !const <String>{'bypass', 'enable', 'auto'}.contains(lnaMode)) {
+          return const InstrumentActionOutcome(
+            success: false,
+            message: 'lna_mode 必须是 bypass、enable 或 auto',
+          );
+        }
+        final attenuationDb = _number(call.arguments['attenuation_db']);
+        if (call.arguments.containsKey('attenuation_db') &&
+            (attenuationDb == null ||
+                attenuationDb < 0 ||
+                attenuationDb > 31.75 ||
+                ((attenuationDb * 4).round() - attenuationDb * 4).abs() >
+                    1e-9)) {
+          return const InstrumentActionOutcome(
+            success: false,
+            message: '标准扫频 DSA 必须在 0–31.75 dB 之间且步进为 0.25 dB',
+          );
+        }
+        const vgaValues = <double>[
+          -11,
+          -10,
+          -6,
+          -3,
+          0,
+          3,
+          6,
+          10,
+          20,
+          30,
+          34,
+        ];
+        final vgaDb = _number(call.arguments['vga_db']);
+        if (call.arguments.containsKey('vga_db') &&
+            (vgaDb == null || !vgaValues.contains(vgaDb))) {
+          return const InstrumentActionOutcome(
+            success: false,
+            message: '标准扫频 VGA 不在设备支持列表中',
+          );
+        }
+        final referenceDbm = _number(call.arguments['reference_dbm']);
+        if (call.arguments.containsKey('reference_dbm') &&
+            (referenceDbm == null ||
+                referenceDbm < -140 ||
+                referenceDbm > 30)) {
+          return const InstrumentActionOutcome(
+            success: false,
+            message: 'reference_dbm 必须在 -140–30 dBm 之间',
+          );
+        }
+        return null;
+      case 'apply_spectrum_preset':
+        if (!const <String>{
+          'default_full_span',
+          'fast_full_span',
+          'high_resolution',
+          'zero_span_observation',
+        }.contains(call.arguments['preset'])) {
+          return const InstrumentActionOutcome(
+            success: false,
+            message: '不支持的标准扫频预设',
+          );
+        }
+        return null;
       case 'start_single_sweep':
       case 'start_continuous_sweep':
+      case 'get_sweep_profile':
       case 'stop_measurement':
       case 'stop_phase_noise_measurement':
       case 'stop_realtime_spectrum':
@@ -1507,6 +1794,18 @@ class InstrumentAgentGateway {
           return const InstrumentActionOutcome(
             success: false,
             message: 'wait_timeout_ms 必须是 0–30000 的整数',
+          );
+        }
+        return null;
+      case 'get_phase_noise_snapshot':
+        final trace = call.arguments['trace']?.toString() ?? 'auto';
+        final maximumPoints = _integer(call.arguments['maximum_points'], 256);
+        if (!const <String>{'auto', 'raw', 'average'}.contains(trace) ||
+            maximumPoints < 16 ||
+            maximumPoints > 512) {
+          return const InstrumentActionOutcome(
+            success: false,
+            message: '相位噪声 trace 或 maximum_points 无效（允许 16–512）',
           );
         }
         return null;
@@ -1675,6 +1974,16 @@ class InstrumentAgentGateway {
           return const InstrumentActionOutcome(
             success: false,
             message: '实时频谱保存参数无效：label、trace 或瀑布行数不正确',
+          );
+        }
+        return null;
+      case 'save_phase_noise_measurement':
+        final trace = call.arguments['trace']?.toString() ?? 'auto';
+        if ((call.arguments['label']?.toString().trim() ?? '').isEmpty ||
+            !const <String>{'auto', 'raw', 'average'}.contains(trace)) {
+          return const InstrumentActionOutcome(
+            success: false,
+            message: '相位噪声保存参数无效：必须提供 label，trace 为 auto/raw/average',
           );
         }
         return null;

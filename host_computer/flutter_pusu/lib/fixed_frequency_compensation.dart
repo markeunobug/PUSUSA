@@ -8,6 +8,21 @@ const List<double> fixedFrequencyCompensationTargetsHz = <double>[
   1.17e9,
 ];
 
+const List<double> fixedFrequencyCompensation300kAdditionalTargetsHz = <double>[
+  79.85e6,
+  80.15e6,
+];
+
+List<double> fixedFrequencyCompensationTargetsForRbw(double rbwHz) {
+  if ((rbwHz - 300e3).abs() <= 1.0) {
+    return <double>[
+      ...fixedFrequencyCompensationTargetsHz,
+      ...fixedFrequencyCompensation300kAdditionalTargetsHz,
+    ];
+  }
+  return fixedFrequencyCompensationTargetsHz;
+}
+
 const int fixedFrequencyCompensationLookbackPoints = 5;
 
 /// Builds the replacement values after a complete sweep is available.
@@ -51,7 +66,7 @@ Map<double, double> buildFixedFrequencyCompensationValues(
   return replacements;
 }
 
-/// Applies completed-sweep replacement values to the current chart data.
+/// Applies replacement values to the current spectrum data.
 ///
 /// A target without a cached replacement is omitted. This keeps a leading
 /// target hidden while its first complete sweep is still being assembled.

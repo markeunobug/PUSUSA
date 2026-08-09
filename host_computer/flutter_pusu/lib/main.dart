@@ -145,6 +145,8 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
+  static const double _defaultPhaseNoiseCarrierHz =
+      PhaseNoiseConfig.defaultCarrierHz;
   static const int _defaultSpectrumPointCount = 128;
   static const int _maxInternalSweepPointCount = 10000;
   static const bool _enforceInternalSweepPointLimit = bool.fromEnvironment(
@@ -334,9 +336,9 @@ class _MyHomePageState extends State<MyHomePage> {
   PhaseNoiseDensityPreset _phaseNoiseDensityPreset =
       PhaseNoiseDensityPreset.normal;
   final TextEditingController _phaseNoiseCarrierController =
-      TextEditingController(text: '775');
+      TextEditingController(text: '1');
   final ValueNotifier<String> _phaseNoiseCarrierUnit =
-      ValueNotifier<String>('MHz');
+      ValueNotifier<String>('GHz');
   final TextEditingController _phaseNoiseCarrierSearchSpanController =
       TextEditingController(text: '100');
   final ValueNotifier<String> _phaseNoiseCarrierSearchSpanUnit =
@@ -466,6 +468,8 @@ class _MyHomePageState extends State<MyHomePage> {
   double _confirmedStartHz = _fullSpanStartHz;
   double _confirmedStopHz = _fullSpanStopHz;
   String _profileStatusText = 'Profile: --';
+  SweepProfileReport? _lastSweepProfileReport;
+  Completer<SweepProfileReport>? _sweepProfileCompleter;
 
   @override
   void initState() {
@@ -480,6 +484,8 @@ class _MyHomePageState extends State<MyHomePage> {
       setBandwidth: _agentSetBandwidth,
       setDetector: _agentSetDetector,
       setMeasurementMode: _agentSetMeasurementMode,
+      configureSpectrumFrontend: _agentConfigureSpectrumFrontend,
+      applySpectrumPreset: _agentApplySpectrumPreset,
       startSingleSweep: _agentStartSingleSweep,
       startContinuousSweep: _agentStartContinuousSweep,
       stopMeasurement: _agentStopMeasurement,
@@ -488,6 +494,7 @@ class _MyHomePageState extends State<MyHomePage> {
       getPhaseNoiseState: _agentGetPhaseNoiseState,
       configurePhaseNoise: _agentConfigurePhaseNoise,
       analyzePhaseNoise: _agentAnalyzePhaseNoise,
+      getPhaseNoiseSnapshot: _agentGetPhaseNoiseSnapshot,
       startRealtimeSpectrum: _agentStartRealtimeSpectrum,
       stopRealtimeSpectrum: _agentStopRealtimeSpectrum,
       getSpectrumSnapshot: _agentGetSpectrumSnapshot,
@@ -501,6 +508,8 @@ class _MyHomePageState extends State<MyHomePage> {
       placeRealtimePeakMarkers: _agentPlaceRealtimePeakMarkers,
       saveMeasurement: _agentSaveMeasurement,
       saveRealtimeMeasurement: _agentSaveRealtimeMeasurement,
+      savePhaseNoiseMeasurement: _agentSavePhaseNoiseMeasurement,
+      getSweepProfile: _agentGetSweepProfile,
       captureScreenshot: _agentCaptureScreenshot,
       getTestSession: _agentGetTestSession,
       startTestSession: _agentStartTestSession,
@@ -820,8 +829,12 @@ class _MyHomePageState extends State<MyHomePage> {
     bool sweepComplete = false,
   }) {
     if (!_fixedFrequencyCompensationEnabled) return data;
+    final targetsHz = fixedFrequencyCompensationTargetsForRbw(
+      _getSelectedRbwHz(),
+    );
     final replacements = buildFixedFrequencyCompensationValues(
       data,
+      targetsHz: targetsHz,
       allowFollowingFallback: sweepComplete,
     );
     if (sweepComplete) {
@@ -834,6 +847,7 @@ class _MyHomePageState extends State<MyHomePage> {
     return applyFixedFrequencyCompensation(
       data,
       replacements,
+      targetsHz: targetsHz,
     );
   }
 
@@ -1555,8 +1569,13 @@ class _MyHomePageState extends State<MyHomePage> {
     if (!mounted) return;
 
     setState(() {
+      _lastSweepProfileReport = report;
       _profileStatusText = _formatSweepProfileStatus(report);
     });
+    final completer = _sweepProfileCompleter;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(report);
+    }
   }
 
   void _handlePhaseNoiseDataFrame(PhaseNoiseDataFrame frame) {
@@ -1931,6 +1950,24 @@ class _MyHomePageState extends State<MyHomePage> {
       return '${ms.toStringAsFixed(2)} ms';
     }
     return '${ms.toStringAsFixed(1)} ms';
+  }
+
+  String _bottomProfileStatusText() {
+    final measText = _phaseNoiseDisplayEnabled ? 'meas 1ms' : 'meas 0ms';
+    final segments = _profileStatusText
+        .split('|')
+        .map((segment) => segment.trim())
+        .where((segment) => segment.isNotEmpty)
+        .toList();
+    final measIndex =
+        segments.indexWhere((segment) => segment.startsWith('meas '));
+
+    if (measIndex >= 0) {
+      segments[measIndex] = measText;
+    } else {
+      segments.add(measText);
+    }
+    return segments.join(' | ');
   }
 
   void _clearSpectrumDisplay() {
@@ -2850,6 +2887,18 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
+  String _rfPathModeAgentName(RfPathMode mode) => switch (mode) {
+        RfPathMode.directIf => 'direct_if',
+        RfPathMode.mixerChain => 'mixer_chain',
+        RfPathMode.auto => 'auto',
+      };
+
+  String _rfLnaModeAgentName(RfLnaMode mode) => switch (mode) {
+        RfLnaMode.bypass => 'bypass',
+        RfLnaMode.enable => 'enable',
+        RfLnaMode.auto => 'auto',
+      };
+
   void _syncRfAttenText(RfFrontendConfig config) {
     _rfAttenController.text = config.attenDb.toStringAsFixed(2);
   }
@@ -3607,11 +3656,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   double _resolvePhaseNoiseNominalCarrierHz({double? manualCarrierHz}) {
-    if (_phaseNoiseCarrierMode == PhaseNoiseCarrierMode.manual) {
-      return manualCarrierHz ?? 0.0;
-    }
-    final centerHz = _getCurrentCenterFreq();
-    return centerHz > 0 ? centerHz : 0.0;
+    return manualCarrierHz ?? _defaultPhaseNoiseCarrierHz;
   }
 
   List<PhaseNoisePoint> _buildInstrumentLikePhaseNoisePoints(
@@ -4074,7 +4119,7 @@ class _MyHomePageState extends State<MyHomePage> {
     final nominal = _phaseNoiseCarrierMode == PhaseNoiseCarrierMode.manual
         ? _parseFreq(
             _phaseNoiseCarrierController.text, _phaseNoiseCarrierUnit.value)
-        : (_phaseNoiseNominalCarrierHz ?? _getCurrentCenterFreq());
+        : (_phaseNoiseNominalCarrierHz ?? _defaultPhaseNoiseCarrierHz);
     final measured =
         carrier?.measuredHz ?? _phaseNoiseMeasuredCarrierHz ?? nominal;
     final carrierLevel = carrier?.levelDbm ?? _phaseNoiseCarrierLevelDbm;
@@ -4468,6 +4513,16 @@ class _MyHomePageState extends State<MyHomePage> {
           'amplitude_unit': 'dBm',
           'supports_single_sweep': true,
           'supports_continuous_sweep': true,
+          'rf_frontend': <String, dynamic>{
+            'path_mode': _rfPathModeAgentName(_rfFrontendConfig.pathMode),
+            'lna_mode': _rfLnaModeAgentName(_rfFrontendConfig.lnaMode),
+            'attenuation_db': _rfFrontendConfig.attenDb,
+            'vga_db': double.tryParse(vgaGainValue.value.split(' ').first) ?? 0,
+          },
+          'sweep_speed_hz': sweepSpeed.value,
+          'scale_db_per_div':
+              double.tryParse(scalePerGridController.text) ?? 10,
+          'profile_status': _profileStatusText,
         },
       MeasurementMode.phaseNoise => <String, dynamic>{
           'definition': '围绕载波按频偏显示相位噪声密度，不是普通频谱',
@@ -4555,10 +4610,15 @@ class _MyHomePageState extends State<MyHomePage> {
       );
     }
     if (target == _measurementMode) {
+      final effectiveMode = _buildInstrumentAgentSnapshot().measurementMode;
       return InstrumentActionOutcome(
         success: true,
-        message: '当前已经处于 $mode 模式',
-        data: <String, dynamic>{'measurement_mode': mode, 'changed': false},
+        message: '当前已经处于 $effectiveMode 模式',
+        data: <String, dynamic>{
+          'measurement_mode': effectiveMode,
+          'requested_mode': mode,
+          'changed': false,
+        },
       );
     }
 
@@ -4896,6 +4956,127 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
+  ({String name, List<PhaseNoisePoint> points})? _phaseNoiseTraceForAgent(
+      String trace) {
+    final candidates = switch (trace) {
+      'raw' => <({String name, List<PhaseNoisePoint> points})>[
+          (name: 'raw', points: _phaseNoiseTrace.rawPoints),
+        ],
+      'average' => <({String name, List<PhaseNoisePoint> points})>[
+          (name: 'average', points: _phaseNoiseTrace.averagePoints),
+        ],
+      _ => <({String name, List<PhaseNoisePoint> points})>[
+          (name: 'average', points: _phaseNoiseTrace.averagePoints),
+          (name: 'raw', points: _phaseNoiseTrace.rawPoints),
+        ],
+    };
+    for (final candidate in candidates) {
+      final points = candidate.points
+          .where(
+            (point) =>
+                point.valid &&
+                point.offsetHz > 0 &&
+                point.offsetHz.isFinite &&
+                point.dbcHz.isFinite,
+          )
+          .toList()
+        ..sort((a, b) => a.offsetHz.compareTo(b.offsetHz));
+      if (points.isNotEmpty) return (name: candidate.name, points: points);
+    }
+    return null;
+  }
+
+  List<PhaseNoisePoint> _downsamplePhaseNoiseForAgent(
+    List<PhaseNoisePoint> points,
+    int maximumPoints,
+  ) {
+    if (points.length <= maximumPoints) return List.of(points);
+    final sampled = <PhaseNoisePoint>[];
+    final bucketSize = points.length / maximumPoints;
+    for (var bucket = 0; bucket < maximumPoints; bucket++) {
+      final start = (bucket * bucketSize).floor();
+      final stop = math.min(
+        points.length,
+        ((bucket + 1) * bucketSize).ceil(),
+      );
+      if (start >= stop) continue;
+      var worst = points[start];
+      for (var index = start + 1; index < stop; index++) {
+        if (points[index].dbcHz > worst.dbcHz) worst = points[index];
+      }
+      sampled.add(worst);
+    }
+    sampled.sort((a, b) => a.offsetHz.compareTo(b.offsetHz));
+    return sampled;
+  }
+
+  Map<String, dynamic> _phaseNoisePointForAgent(PhaseNoisePoint point) =>
+      <String, dynamic>{
+        'offset_hz': point.offsetHz,
+        'phase_noise_dbc_per_hz': point.dbcHz,
+        'noise_power_dbm':
+            point.noisePowerDbm.isFinite ? point.noisePowerDbm : null,
+        'rbw_hz': point.rbwHz.isFinite ? point.rbwHz : null,
+      };
+
+  Map<String, dynamic> _phaseNoiseTraceSummary(
+    String trace,
+    List<PhaseNoisePoint> points,
+  ) {
+    final minimum = points.reduce(
+      (best, point) => point.dbcHz < best.dbcHz ? point : best,
+    );
+    final maximum = points.reduce(
+      (best, point) => point.dbcHz > best.dbcHz ? point : best,
+    );
+    return <String, dynamic>{
+      'measurement_mode': 'phase_noise',
+      'amplitude_unit': 'dBc/Hz',
+      'trace': trace,
+      'point_count': points.length,
+      'start_offset_hz': points.first.offsetHz,
+      'stop_offset_hz': points.last.offsetHz,
+      'minimum_dbc_per_hz': minimum.dbcHz,
+      'minimum_offset_hz': minimum.offsetHz,
+      'maximum_dbc_per_hz': maximum.dbcHz,
+      'maximum_offset_hz': maximum.offsetHz,
+      'complete': _phaseNoiseComplete,
+      'completed_averages': _phaseNoiseCompletedAverages,
+      'carrier_hz': _phaseNoiseMeasuredCarrierHz,
+      'carrier_level_dbm': _phaseNoiseCarrierLevelDbm,
+    };
+  }
+
+  Future<InstrumentActionOutcome> _agentGetPhaseNoiseSnapshot(
+    String trace,
+    int maximumPoints,
+  ) async {
+    final selected = _phaseNoiseTraceForAgent(trace);
+    if (selected == null) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: _phaseNoiseRunning ? '相位噪声测量仍在进行，当前曲线尚无有效数据' : '当前没有相位噪声曲线数据',
+        data: <String, dynamic>{
+          ..._phaseNoiseAgentState(),
+          'requested_trace': trace,
+          'measurement_pending': _phaseNoiseRunning && !_phaseNoiseComplete,
+        },
+      );
+    }
+    final sampled =
+        _downsamplePhaseNoiseForAgent(selected.points, maximumPoints);
+    return InstrumentActionOutcome(
+      success: true,
+      message: '已读取相位噪声 ${selected.name} 曲线，共 ${selected.points.length} 点',
+      data: <String, dynamic>{
+        ..._phaseNoiseTraceSummary(selected.name, selected.points),
+        'returned_point_count': sampled.length,
+        'downsampled': sampled.length < selected.points.length,
+        'points': sampled.map(_phaseNoisePointForAgent).toList(),
+      },
+    );
+  }
+
   Future<InstrumentActionOutcome> _agentStopPhaseNoiseMeasurement() async {
     final acknowledged = await _protocol.stopPhaseNoiseConfirmed();
     if (mounted) {
@@ -5228,6 +5409,289 @@ class _MyHomePageState extends State<MyHomePage> {
         'device_ack': true,
       },
     );
+  }
+
+  Future<InstrumentActionOutcome> _agentConfigureSpectrumFrontend(
+    Map<String, dynamic> arguments,
+  ) async {
+    final requestedPath = switch (arguments['path_mode']?.toString()) {
+      'direct_if' => RfPathMode.directIf,
+      'mixer_chain' => RfPathMode.mixerChain,
+      'auto' => RfPathMode.auto,
+      _ => null,
+    };
+    final requestedLna = switch (arguments['lna_mode']?.toString()) {
+      'bypass' => RfLnaMode.bypass,
+      'enable' => RfLnaMode.enable,
+      'auto' => RfLnaMode.auto,
+      _ => null,
+    };
+    final attenuationDb = (arguments['attenuation_db'] as num?)?.toDouble();
+    final vgaDb = (arguments['vga_db'] as num?)?.toDouble();
+    final referenceDbm = (arguments['reference_dbm'] as num?)?.toDouble();
+    var requestedFrontend = _rfFrontendConfig.copyWith(
+      pathMode: requestedPath,
+      lnaMode: requestedLna,
+      attenCode: attenuationDb == null
+          ? null
+          : (attenuationDb / 0.25).round().clamp(0, 127).toInt(),
+    );
+    requestedFrontend = requestedFrontend.copyWith(
+      attenCode: requestedFrontend.attenCode.clamp(0, 127).toInt(),
+    );
+    final frontendRequested =
+        requestedPath != null || requestedLna != null || attenuationDb != null;
+    final shouldStop = _spectrumRequestInFlight || _isContinuousSweepRunning;
+    final pathChanged =
+        requestedPath != null && requestedPath != _rfFrontendConfig.pathMode;
+    final requiresAcquisitionBoundary = shouldStop || pathChanged;
+    if ((frontendRequested || vgaDb != null || referenceDbm != null) &&
+        requiresAcquisitionBoundary &&
+        !await _stopContinuousSweep()) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '当前扫描未确认停止，未修改 RF 前端',
+      );
+    }
+
+    var frontendAcknowledged = !frontendRequested;
+    var referenceAcknowledged = referenceDbm == null;
+    var vgaSent = false;
+    if (frontendRequested) {
+      frontendAcknowledged =
+          await _protocol.setRfFrontendConfirmed(requestedFrontend);
+      if (!frontendAcknowledged) {
+        return const InstrumentActionOutcome(
+          success: false,
+          message: 'RF 前端配置未收到设备 ACK，界面参数未修改',
+          data: <String, dynamic>{'rf_frontend_acknowledged': false},
+        );
+      }
+      if (!mounted) {
+        return const InstrumentActionOutcome(
+          success: false,
+          message: '页面已经关闭，无法同步 RF 前端状态',
+        );
+      }
+      _suppressPresetDeviceUpdates = true;
+      try {
+        setState(() {
+          _rfFrontendConfig = requestedFrontend;
+          _syncRfAttenText(requestedFrontend);
+        });
+      } finally {
+        _suppressPresetDeviceUpdates = false;
+      }
+      _clearSpectrumDisplay();
+      _protocol.getRfFrontendStatus();
+    }
+
+    if (referenceDbm != null) {
+      referenceAcknowledged = await _protocol.setAmplitudeConfigConfirmed(
+        AmplitudeConfig(
+          refLevelDbm: referenceDbm,
+          attenuatorMode: 0,
+          preampMode: 0,
+        ),
+      );
+      if (!referenceAcknowledged) {
+        return InstrumentActionOutcome(
+          success: false,
+          message: 'RF 前端已确认，但参考电平未收到 ACK',
+          data: <String, dynamic>{
+            'rf_frontend_acknowledged': frontendAcknowledged,
+            'reference_acknowledged': false,
+            'partial_apply': frontendRequested,
+          },
+        );
+      }
+      if (mounted) {
+        setState(() {
+          refLevelController.text = _formatRefLevel(referenceDbm);
+        });
+      }
+    }
+
+    if (vgaDb != null) {
+      final label = _vgaLabelForDb(vgaDb)!;
+      _protocol.setVgaGainCode(_mapVgaGainStringToCode(label));
+      _suppressPresetDeviceUpdates = true;
+      try {
+        vgaGainValue.value = label;
+      } finally {
+        _suppressPresetDeviceUpdates = false;
+      }
+      vgaSent = true;
+    }
+
+    return InstrumentActionOutcome(
+      success: true,
+      message: vgaSent ? 'RF 前端配置已确认；VGA 命令已发送（协议无 ACK）' : 'RF 前端配置已获设备确认',
+      data: <String, dynamic>{
+        'measurement_mode': _buildInstrumentAgentSnapshot().measurementMode,
+        'path_mode': _rfPathModeAgentName(requestedFrontend.pathMode),
+        'lna_mode': _rfLnaModeAgentName(requestedFrontend.lnaMode),
+        'attenuation_db': requestedFrontend.attenDb,
+        'vga_db':
+            vgaDb ?? double.tryParse(vgaGainValue.value.split(' ').first) ?? 0,
+        'reference_dbm':
+            referenceDbm ?? double.tryParse(refLevelController.text) ?? 0,
+        'rf_frontend_acknowledged': frontendAcknowledged,
+        'reference_acknowledged': referenceAcknowledged,
+        'vga_sent_without_ack': vgaSent,
+        'previous_measurement_stopped': shouldStop,
+        'path_switch_boundary_applied': pathChanged,
+      },
+    );
+  }
+
+  Future<InstrumentActionOutcome> _agentApplySpectrumPreset(
+    String presetId,
+  ) async {
+    final preset = switch (presetId) {
+      'default_full_span' => _measurementPresets[0],
+      'fast_full_span' => _measurementPresets[1],
+      'high_resolution' => _measurementPresets[2],
+      'zero_span_observation' => _measurementPresets[3],
+      _ => null,
+    };
+    if (preset == null) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '不支持的标准扫频预设',
+      );
+    }
+    if (_rfFrontendConfig.pathMode == RfPathMode.directIf) {
+      final frontend = await _agentConfigureSpectrumFrontend(
+        const <String, dynamic>{'path_mode': 'mixer_chain'},
+      );
+      if (!frontend.success) {
+        return InstrumentActionOutcome(
+          success: false,
+          message: '应用预设前切换混频链失败：${frontend.message}',
+          data: frontend.data,
+        );
+      }
+    }
+    await _applyPreset(preset);
+    if (!_lastMeasurementConfigApplied) {
+      return InstrumentActionOutcome(
+        success: false,
+        message: '${preset.name}参数未全部收到设备 ACK',
+        data: <String, dynamic>{
+          'preset': presetId,
+          'display_name': preset.name,
+          'config_acknowledged': false,
+        },
+      );
+    }
+    return InstrumentActionOutcome(
+      success: true,
+      message: '已完整应用${preset.name}预设',
+      data: <String, dynamic>{
+        'preset': presetId,
+        'display_name': preset.name,
+        'start_hz': preset.startHz,
+        'stop_hz': preset.stopHz,
+        'rbw_hz': _getRbwHzForMode(preset.rbwMode),
+        'vbw_mode': preset.vbwMode,
+        'detector': preset.detectMode,
+        'reference_dbm': preset.refLevelDbm,
+        'scale_db_per_div': preset.scalePerGridDb,
+        'point_count': preset.pointCount,
+        'sweep_speed_hz': preset.sweepSpeedHz,
+        'path_mode': _rfPathModeAgentName(_rfFrontendConfig.pathMode),
+        'config_acknowledged': true,
+      },
+    );
+  }
+
+  String _sweepProfileSectionName(int id) => switch (id) {
+        0 => 'point_total',
+        1 => 'set_lo',
+        2 => 'lock',
+        3 => 'dma_prepare',
+        4 => 'dma_wait',
+        5 => 'dma_finish',
+        6 => 'accumulate',
+        7 => 'measure',
+        8 => 'uart',
+        9 => 'ddc',
+        10 => 'cic',
+        _ => 'section_$id',
+      };
+
+  Map<String, dynamic> _sweepProfileForAgent(
+    SweepProfileReport report, {
+    required bool refreshed,
+  }) =>
+      <String, dynamic>{
+        'measurement_mode': 'spectrum',
+        'refreshed': refreshed,
+        'version': report.version,
+        'enabled': report.enabled,
+        'rbw_mode': report.rbwMode,
+        'counts_per_second': report.countsPerSecond,
+        'sweep_count': report.sweepCount,
+        'point_count': report.pointCount,
+        'dma_rearm_count': report.dmaRearmCount,
+        'status_text': _formatSweepProfileStatus(report),
+        'sections': report.sections
+            .map(
+              (section) => <String, dynamic>{
+                'id': section.id,
+                'name': _sweepProfileSectionName(section.id),
+                'count': section.count,
+                'total_ticks': section.totalTicks,
+                'minimum_ticks': section.minTicks,
+                'maximum_ticks': section.maxTicks,
+                'average_ticks': section.averageTicks,
+                'average_ms': report.ticksToMs(section.averageTicks),
+                'per_sweep_point_ms': report.pointCount <= 0
+                    ? null
+                    : report.ticksToMs(
+                        section.totalTicks / report.pointCount,
+                      ),
+              },
+            )
+            .toList(),
+      };
+
+  Future<InstrumentActionOutcome> _agentGetSweepProfile() async {
+    if (_sweepProfileCompleter != null) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '已有 Profile 读取请求正在等待设备返回',
+      );
+    }
+    final completer = Completer<SweepProfileReport>();
+    _sweepProfileCompleter = completer;
+    try {
+      _protocol.getSweepProfile();
+      final report = await completer.future.timeout(const Duration(seconds: 3));
+      return InstrumentActionOutcome(
+        success: true,
+        message: report.enabled ? '已刷新标准扫频 Profile' : '设备 Profile 当前未启用',
+        data: _sweepProfileForAgent(report, refreshed: true),
+      );
+    } on TimeoutException {
+      final previous = _lastSweepProfileReport;
+      if (previous != null) {
+        return InstrumentActionOutcome(
+          success: true,
+          message: '设备未返回新的 Profile，已提供最近一次缓存结果',
+          data: _sweepProfileForAgent(previous, refreshed: false),
+        );
+      }
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '等待设备返回扫频 Profile 超时，且没有可用缓存',
+      );
+    } finally {
+      if (identical(_sweepProfileCompleter, completer)) {
+        _sweepProfileCompleter = null;
+      }
+    }
   }
 
   Future<InstrumentActionOutcome> _agentStartSingleSweep() async {
@@ -5651,6 +6115,96 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
+  Future<InstrumentActionOutcome> _agentSavePhaseNoiseMeasurement(
+    String label,
+    String note,
+    String trace,
+  ) async {
+    final selected = _phaseNoiseTraceForAgent(trace);
+    if (selected == null) {
+      return const InstrumentActionOutcome(
+        success: false,
+        message: '当前没有可保存的相位噪声曲线数据',
+      );
+    }
+    final now = DateTime.now();
+    final analysis = _phaseNoiseTraceSummary(selected.name, selected.points);
+    await _agentSessionRestoreFuture;
+    final directory = _agentTestSessionStore.activeSessionDirectory ??
+        _agentSessionsDirectory();
+    await directory.create(recursive: true);
+
+    final safeLabel = _sanitizeAgentFileLabel(label);
+    final baseName = '${_formatFileTimestamp(now)}_'
+        '${now.millisecond.toString().padLeft(3, '0')}_pn_$safeLabel';
+    final jsonFile =
+        File('${directory.path}${Platform.pathSeparator}$baseName.json');
+    final csvFile =
+        File('${directory.path}${Platform.pathSeparator}$baseName.csv');
+    final record = <String, dynamic>{
+      'file_version': 1,
+      'saved_at': now.toIso8601String(),
+      'label': label,
+      'note': note,
+      'measurement_mode': 'phase_noise',
+      'amplitude_unit': 'dBc/Hz',
+      'trace': selected.name,
+      'instrument_state': _buildInstrumentAgentSnapshot().toJson(),
+      'phase_noise_state': _phaseNoiseAgentState(),
+      'analysis': analysis,
+      'phase_noise_points':
+          selected.points.map(_phaseNoisePointForAgent).toList(),
+    };
+    const encoder = JsonEncoder.withIndent('  ');
+    await jsonFile.writeAsString(encoder.convert(record), flush: true);
+
+    final csv = StringBuffer(
+      '\ufeffoffset_hz,phase_noise_dbc_per_hz,noise_power_dbm,rbw_hz\r\n',
+    );
+    for (final point in selected.points) {
+      csv
+        ..write(point.offsetHz.toStringAsFixed(6))
+        ..write(',')
+        ..write(point.dbcHz.toStringAsFixed(6))
+        ..write(',')
+        ..write(point.noisePowerDbm.isFinite
+            ? point.noisePowerDbm.toStringAsFixed(6)
+            : '')
+        ..write(',')
+        ..write(point.rbwHz.isFinite ? point.rbwHz.toStringAsFixed(6) : '')
+        ..write('\r\n');
+    }
+    await csvFile.writeAsString(csv.toString(), flush: true);
+
+    final activeSession = _agentTestSessionStore.activeSession;
+    if (activeSession != null) {
+      await _agentTestSessionStore.registerMeasurement(
+        label: label,
+        savedAt: now,
+        jsonPath: jsonFile.path,
+        csvPath: csvFile.path,
+        analysis: analysis,
+        measurementMode: 'phase_noise',
+        amplitudeUnit: 'dBc/Hz',
+      );
+    }
+    return InstrumentActionOutcome(
+      success: true,
+      message: '相位噪声测试记录已保存为 JSON 和 CSV',
+      data: <String, dynamic>{
+        'measurement_mode': 'phase_noise',
+        'amplitude_unit': 'dBc/Hz',
+        'trace': selected.name,
+        'point_count': selected.points.length,
+        'complete': _phaseNoiseComplete,
+        'json_path': jsonFile.path,
+        'csv_path': csvFile.path,
+        'analysis': analysis,
+        'session_id': activeSession?.id,
+      },
+    );
+  }
+
   Future<InstrumentActionOutcome> _agentCaptureScreenshot() async {
     try {
       final directoryPath = _screenshotDirController.text.trim().isEmpty
@@ -5796,7 +6350,7 @@ class _MyHomePageState extends State<MyHomePage> {
     return InstrumentActionOutcome(
       success: true,
       message: measurements.isEmpty
-          ? '还没有保存过频谱测量'
+          ? '还没有保存过测量记录'
           : '已读取最近 ${measurements.length} 条测量记录',
       data: <String, dynamic>{'measurements': measurements},
     );
@@ -6289,7 +6843,7 @@ class _MyHomePageState extends State<MyHomePage> {
                         },
                       ),
                     ),
-                    label: const Text('串口'),
+                    label: const Text('端口'),
                     onPressed: () => _serialFlyoutController.showFlyout(
                       builder: (context) =>
                           SerialPortSelector(manager: _serialManager),
@@ -7037,7 +7591,8 @@ class _MyHomePageState extends State<MyHomePage> {
                                       ),
                                       const SizedBox(height: 4),
                                       const Text(
-                                        '79.5 / 80 / 80.5 MHz，1.13 / 1.17 GHz：取前方最多第 5 点',
+                                        '79.5 / 80 / 80.5 MHz，1.13 / 1.17 GHz\n'
+                                        'RBW 300 kHz：增加 79.85 / 80.15 MHz',
                                         style: TextStyle(
                                             color: material.Colors.white54,
                                             fontSize: 11),
@@ -7116,7 +7671,7 @@ class _MyHomePageState extends State<MyHomePage> {
           Expanded(
             flex: 4,
             child: Text(
-              _profileStatusText,
+              _bottomProfileStatusText(),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               textAlign: TextAlign.right,
@@ -7211,11 +7766,25 @@ class _MyHomePageState extends State<MyHomePage> {
         const SizedBox(height: 8),
         Row(
           children: [
-            const SizedBox(
+            SizedBox(
               width: 100,
-              child: Text(
-                '衰减：',
-                style: TextStyle(color: material.Colors.white),
+              child: Semantics(
+                button: true,
+                toggled: _phaseNoiseDisplayEnabled,
+                label: '衰减修正',
+                child: MouseRegion(
+                  cursor: material.SystemMouseCursors.click,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => setState(() {
+                      _phaseNoiseDisplayEnabled = !_phaseNoiseDisplayEnabled;
+                    }),
+                    child: const Text(
+                      '衰减：',
+                      style: TextStyle(color: material.Colors.white),
+                    ),
+                  ),
+                ),
               ),
             ),
             Expanded(

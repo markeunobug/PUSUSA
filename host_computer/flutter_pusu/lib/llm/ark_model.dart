@@ -30,8 +30,8 @@ enum ArkModel {
     description: '旗舰混合推理，优先回答精度',
   ),
   deepSeekV4Flash(
-    displayName: 'DeepSeek-V4-flash',
-    modelId: 'deepseek-v4-flash-260425',
+    displayName: 'DeepSeek-V4-flash（正式版）',
+    modelId: 'deepseek-v4-flash-ga-260731',
     description: '混合推理，优先速度和成本',
   );
 

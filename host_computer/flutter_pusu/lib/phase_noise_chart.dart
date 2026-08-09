@@ -138,6 +138,11 @@ class PhaseNoiseChart extends material.StatefulWidget {
 class _PhaseNoiseChartState extends material.State<PhaseNoiseChart> {
   static const double _leftAxisReservedSize = 72;
   static const double _bottomAxisReservedSize = 34;
+  static const double _axisNameSize = 16;
+  static const double _leftPlotReservedSize =
+      _leftAxisReservedSize + _axisNameSize;
+  static const double _bottomPlotReservedSize =
+      _bottomAxisReservedSize + _axisNameSize;
 
   double? _markerOffsetHz;
 
@@ -342,10 +347,10 @@ class _PhaseNoiseChartState extends material.State<PhaseNoiseChart> {
 
   material.Rect _plotRect(material.Size size) {
     return material.Rect.fromLTRB(
-      _leftAxisReservedSize,
+      _leftPlotReservedSize,
       0,
       size.width,
-      size.height - _bottomAxisReservedSize,
+      size.height - _bottomPlotReservedSize,
     );
   }
 
@@ -458,7 +463,7 @@ class _PhaseNoiseChartState extends material.State<PhaseNoiseChart> {
                         fontSize: 11,
                       ),
                     ),
-                    axisNameSize: 16,
+                    axisNameSize: _axisNameSize,
                   ),
                   bottomTitles: AxisTitles(
                     sideTitles: SideTitles(
@@ -489,7 +494,7 @@ class _PhaseNoiseChartState extends material.State<PhaseNoiseChart> {
                         fontSize: 11,
                       ),
                     ),
-                    axisNameSize: 16,
+                    axisNameSize: _axisNameSize,
                   ),
                 ),
                 lineTouchData: LineTouchData(
@@ -559,8 +564,8 @@ class _PhaseNoiseChartState extends material.State<PhaseNoiseChart> {
                   maxLogOffset: maxLog,
                   minDbcHz: yAxisRange.minDbcHz,
                   maxDbcHz: yAxisRange.maxDbcHz,
-                  leftReservedSize: _leftAxisReservedSize,
-                  bottomReservedSize: _bottomAxisReservedSize,
+                  leftReservedSize: _leftPlotReservedSize,
+                  bottomReservedSize: _bottomPlotReservedSize,
                   logOffset: _logOffset,
                 ),
               ),
@@ -743,24 +748,39 @@ class _PhaseNoiseMarkerPainter extends material.CustomPainter {
 
     const labelStyle = material.TextStyle(
       color: material.Colors.white,
-      fontSize: 14,
+      fontSize: 15,
       fontWeight: material.FontWeight.bold,
       height: 1,
     );
-    final textPainter = material.TextPainter(
-      text: const material.TextSpan(text: 'M1\nv', style: labelStyle),
-      textAlign: material.TextAlign.center,
-      textDirection: material.TextDirection.ltr,
-    )..layout();
+    const labelEdgePadding = 4.0;
+    const labelMarkerGap = 6.0;
 
-    final dx = (x - textPainter.width / 2).clamp(
-      0.0,
-      (size.width - textPainter.width).clamp(0.0, size.width),
-    );
-    final dy = (y - textPainter.height - 6).clamp(
-      0.0,
-      (size.height - textPainter.height).clamp(0.0, size.height),
-    );
+    material.TextPainter buildLabelPainter(String text) {
+      return material.TextPainter(
+        text: material.TextSpan(text: text, style: labelStyle),
+        textAlign: material.TextAlign.center,
+        textDirection: material.TextDirection.ltr,
+      )..layout();
+    }
+
+    final abovePainter = buildLabelPainter('M1\n\u25BC');
+    final paintAbove = y - abovePainter.height - labelMarkerGap >= plotRect.top;
+    final textPainter =
+        paintAbove ? abovePainter : buildLabelPainter('\u25B2\nM1');
+
+    final minDx = plotRect.left + labelEdgePadding;
+    final maxDx = plotRect.right - labelEdgePadding - textPainter.width;
+    final preferredDx = x - textPainter.width / 2;
+    final dx =
+        maxDx < minDx ? minDx : preferredDx.clamp(minDx, maxDx).toDouble();
+
+    final minDy = plotRect.top + labelEdgePadding;
+    final maxDy = plotRect.bottom - labelEdgePadding - textPainter.height;
+    final preferredDy = paintAbove
+        ? y - textPainter.height - labelMarkerGap
+        : y + labelMarkerGap;
+    final dy =
+        maxDy < minDy ? minDy : preferredDy.clamp(minDy, maxDy).toDouble();
     textPainter.paint(canvas, material.Offset(dx, dy));
   }
 

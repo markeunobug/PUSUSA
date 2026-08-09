@@ -109,6 +109,34 @@ void main() {
     expect(loaded['realtime_spectrum_points'], hasLength(1));
   });
 
+  test('measurement index includes phase-noise dBc per Hz records', () async {
+    final recordFile = File(
+      '${temporaryDirectory.path}${Platform.pathSeparator}measurement_pn.json',
+    );
+    await recordFile.writeAsString(jsonEncode(<String, dynamic>{
+      'saved_at': '2026-08-08T12:30:00.000',
+      'label': '相位噪声 A',
+      'measurement_mode': 'phase_noise',
+      'amplitude_unit': 'dBc/Hz',
+      'analysis': <String, dynamic>{'minimum_dbc_per_hz': -140},
+      'phase_noise_points': <Map<String, dynamic>>[
+        <String, dynamic>{
+          'offset_hz': 1e3,
+          'phase_noise_dbc_per_hz': -115,
+          'rbw_hz': 1e3,
+        },
+      ],
+    }));
+
+    final summaries = await store.listMeasurements();
+    final loaded = await store.loadMeasurement('measurement_pn');
+
+    expect(summaries.single['measurement_mode'], 'phase_noise');
+    expect(summaries.single['amplitude_unit'], 'dBc/Hz');
+    expect(summaries.single['point_count'], 1);
+    expect(loaded['phase_noise_points'], hasLength(1));
+  });
+
   test('HTML report is generated for a persisted session', () async {
     final session = await store.start(name: '报告测试', objective: '验证报告');
     await store.addNote('备注 <需要转义>');

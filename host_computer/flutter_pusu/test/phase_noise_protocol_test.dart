@@ -225,6 +225,7 @@ void main() {
     );
 
     expect(payload, hasLength(36));
+    expect(payloadBytes.getFloat64(4, Endian.little), 1e9);
     expect(payloadBytes.getUint16(28, Endian.little), 60);
     expect(payloadBytes.getUint16(30, Endian.little), 10);
     expect(payloadBytes.getUint16(32, Endian.little), 100);

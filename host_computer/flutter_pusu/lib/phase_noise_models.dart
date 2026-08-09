@@ -73,6 +73,7 @@ class PhaseNoiseWarning {
 
 class PhaseNoiseConfig {
   static const double minimumOffsetHz = 1000.0;
+  static const double defaultCarrierHz = 1e9;
 
   final PhaseNoiseCarrierMode carrierMode;
   final double? manualCarrierHz;
@@ -91,7 +92,7 @@ class PhaseNoiseConfig {
   const PhaseNoiseConfig({
     this.carrierMode = PhaseNoiseCarrierMode.auto,
     this.manualCarrierHz,
-    this.nominalCarrierHz,
+    this.nominalCarrierHz = defaultCarrierHz,
     this.startOffsetHz = 1000.0,
     this.stopOffsetHz = 1000000.0,
     this.rbwHz = 1000.0,

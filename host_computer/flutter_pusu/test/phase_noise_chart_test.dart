@@ -180,7 +180,12 @@ void main() {
     final ratio =
         math.log(targetOffsetHz / 1000.0) / math.log(10000.0 / 1000.0);
     final innerChartWidth = chartSize.width - 32.0;
-    final tapX = 16.0 + 72.0 + ratio * (innerChartWidth - 72.0);
+    const leftAxisReservedSize = 72.0;
+    const axisNameSize = 16.0;
+    const leftPlotReservedSize = leftAxisReservedSize + axisNameSize;
+    final tapX = 16.0 +
+        leftPlotReservedSize +
+        ratio * (innerChartWidth - leftPlotReservedSize);
     await tester.tapAt(
       chartTopLeft + material.Offset(tapX, chartSize.height * 0.58),
     );

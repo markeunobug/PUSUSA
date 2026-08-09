@@ -3,6 +3,15 @@ import 'package:flutter_pusu/fixed_frequency_compensation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('adds 79.85 and 80.15 MHz only for 300 kHz RBW', () {
+    final targets300k = fixedFrequencyCompensationTargetsForRbw(300e3);
+    final targets100k = fixedFrequencyCompensationTargetsForRbw(100e3);
+
+    expect(targets300k, containsAll(<double>[79.85e6, 80.15e6]));
+    expect(targets100k, isNot(contains(79.85e6)));
+    expect(targets100k, isNot(contains(80.15e6)));
+  });
+
   test('uses the fifth preceding point when it exists', () {
     final data = _spots(60e6, 10e6, 120);
     final replacements = buildFixedFrequencyCompensationValues(data);
@@ -126,6 +135,23 @@ void main() {
     expect(afterValues[79.5e6]! - beforeValues[79.5e6]!, 12.0);
     expect(afterValues[80e6]! - beforeValues[80e6]!, 12.0);
     expect(afterValues[80.5e6]! - beforeValues[80.5e6]!, 12.0);
+  });
+
+  test('compensates 79.85 and 80.15 MHz at 300 kHz RBW', () {
+    final data = _spots(79.1e6, 0.05e6, 30);
+    final targets = fixedFrequencyCompensationTargetsForRbw(300e3);
+    final replacements = buildFixedFrequencyCompensationValues(
+      data,
+      targetsHz: targets,
+    );
+    final actualSpectrum = applyFixedFrequencyCompensation(
+      data,
+      replacements,
+      targetsHz: targets,
+    );
+
+    expect(actualSpectrum.firstWhere((spot) => spot.x == 79.85e6).y, 10.0);
+    expect(actualSpectrum.firstWhere((spot) => spot.x == 80.15e6).y, 16.0);
   });
 }
 

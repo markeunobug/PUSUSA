@@ -25,7 +25,7 @@ void main() {
         'doubao-seed-character-260628',
         'glm-5-2-260617',
         'deepseek-v4-pro-260425',
-        'deepseek-v4-flash-260425',
+        'deepseek-v4-flash-ga-260731',
       ]),
     );
   });

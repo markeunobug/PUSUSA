@@ -40,6 +40,10 @@ void main() {
       AgentRequestPolicy.requestsDataAnalysis('读取最近5秒的瀑布历史数据'),
       isTrue,
     );
+    expect(
+      AgentRequestPolicy.requestsDataAnalysis('分析一下为什么扫频耗时这么长'),
+      isTrue,
+    );
   });
 
   test('full-band signal discovery workflow enables acquisition and analysis',
@@ -92,6 +96,14 @@ void main() {
           'function': <String, dynamic>{
             'name': 'start_phase_noise_measurement',
           },
+        },
+        <String, dynamic>{
+          'function': <String, dynamic>{
+            'name': 'get_phase_noise_snapshot',
+          },
+        },
+        <String, dynamic>{
+          'function': <String, dynamic>{'name': 'get_sweep_profile'},
         },
       ],
       allowDataAnalysis: false,
