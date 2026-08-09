@@ -95,6 +95,19 @@
 #define LMX2572_FRACTIONAL_OPT_ENABLE       1
 #define LMX2572_FRACTIONAL_DENOMINATOR      0xFFFFFFFFULL
 
+/*
+ * LO1 PFD profiles are qualified independently from their reference-path
+ * arithmetic. P100 is the current-machine TICS Pro configuration. P75 CPG=5
+ * is an engineering candidate derived from the P100 2.5 mA baseline and must
+ * remain a lab-only profile until loop stability and hardware A/B tests pass.
+ */
+#define LMX2572_P75_PROFILE_QUALIFIED        1U
+#define LMX2572_P75_CPG_CODE                 5U
+#define LMX2572_P75_MASH_ORDER               3U
+#define LMX2572_PROFILE_LOCK_TIMEOUT_LOOPS   500000U
+/* 0=P100, 1=P75. Keep P100 as the normal default configuration. */
+#define LO_CONTROL_DEFAULT_PFD_PROFILE       0U
+
 #if defined(XPAR_AXI_GPIO_2_DEVICE_ID)
 #define RF_FRONTEND_GPIO_AVAILABLE 1
 #define RF_FRONTEND_GPIO_DEVICE_ID XPAR_AXI_GPIO_2_DEVICE_ID

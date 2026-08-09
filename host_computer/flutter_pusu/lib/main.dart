@@ -3422,7 +3422,8 @@ class _MyHomePageState extends State<MyHomePage> {
       }
       if (!mounted) return;
       _updateMeasurementModeUi(mode);
-      if (mode == MeasurementMode.spectrum && realtimeFrontend != null) {
+      if (mode != MeasurementMode.realtimeSpectrum &&
+          realtimeFrontend != null) {
         _syncSweepFrontendFromRealtime(realtimeFrontend);
       }
     } finally {
@@ -4235,6 +4236,7 @@ class _MyHomePageState extends State<MyHomePage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Expander(
+              initiallyExpanded: true,
               header: const Text('载波'),
               content: Column(
                 children: [
@@ -4302,6 +4304,14 @@ class _MyHomePageState extends State<MyHomePage> {
                     ],
                   ),
                 ],
+              ),
+            ),
+            Expander(
+              initiallyExpanded: true,
+              header: const Text('射频前端'),
+              content: _buildRfFrontendPanel(
+                showPath: false,
+                attenuationLabelTogglesPhaseNoiseDisplay: false,
               ),
             ),
             Expander(
@@ -7740,7 +7750,10 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  Widget _buildRfFrontendPanel() {
+  Widget _buildRfFrontendPanel({
+    bool showPath = true,
+    bool attenuationLabelTogglesPhaseNoiseDisplay = true,
+  }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -7753,39 +7766,47 @@ class _MyHomePageState extends State<MyHomePage> {
             _rfFrontendConfig.copyWith(lnaMode: mode),
           ),
         ),
-        const SizedBox(height: 8),
-        _buildRfModeRow<RfPathMode>(
-          label: '路径：',
-          value: _rfFrontendConfig.pathMode,
-          values: const [RfPathMode.directIf, RfPathMode.mixerChain],
-          labelBuilder: _rfPathModeLabel,
-          onChanged: (mode) => _updateRfFrontendConfig(
-            _rfFrontendConfig.copyWith(pathMode: mode),
+        if (showPath) ...[
+          const SizedBox(height: 8),
+          _buildRfModeRow<RfPathMode>(
+            label: '路径：',
+            value: _rfFrontendConfig.pathMode,
+            values: const [RfPathMode.directIf, RfPathMode.mixerChain],
+            labelBuilder: _rfPathModeLabel,
+            onChanged: (mode) => _updateRfFrontendConfig(
+              _rfFrontendConfig.copyWith(pathMode: mode),
+            ),
           ),
-        ),
+        ],
         const SizedBox(height: 8),
         Row(
           children: [
             SizedBox(
               width: 100,
-              child: Semantics(
-                button: true,
-                toggled: _phaseNoiseDisplayEnabled,
-                label: '衰减修正',
-                child: MouseRegion(
-                  cursor: material.SystemMouseCursors.click,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: () => setState(() {
-                      _phaseNoiseDisplayEnabled = !_phaseNoiseDisplayEnabled;
-                    }),
-                    child: const Text(
+              child: attenuationLabelTogglesPhaseNoiseDisplay
+                  ? Semantics(
+                      button: true,
+                      toggled: _phaseNoiseDisplayEnabled,
+                      label: '衰减修正',
+                      child: MouseRegion(
+                        cursor: material.SystemMouseCursors.click,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => setState(() {
+                            _phaseNoiseDisplayEnabled =
+                                !_phaseNoiseDisplayEnabled;
+                          }),
+                          child: const Text(
+                            '衰减：',
+                            style: TextStyle(color: material.Colors.white),
+                          ),
+                        ),
+                      ),
+                    )
+                  : const Text(
                       '衰减：',
                       style: TextStyle(color: material.Colors.white),
                     ),
-                  ),
-                ),
-              ),
             ),
             Expanded(
               child: TextBox(

@@ -1,12 +1,19 @@
 #include "lmx2572.h"
 
-#include <math.h>
 #include <string.h>
 
 #include "sleep.h"
-#include "xgpio.h"
 #include "app_config.h"
+#include "lmx2572_bus.h"
+#include "lmx2572_frequency.h"
+#include "lmx2572_pfd_profile.h"
+#include "lmx2572_registers.h"
 
+/*
+ * Authoritative current-machine P100 TICS Pro export. The array is ordered
+ * R125..R0. Runtime frequency, output and MUX settings intentionally update a
+ * subset of this image after it is copied into each device shadow.
+ */
 static const uint16_t lmx2572_reg_default[126] = {
     0x2288, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x0000, 0x0000, 0x7802, 0x0000, 0x0000, 0x0000, 0x0000,
@@ -26,89 +33,18 @@ static const uint16_t lmx2572_reg_default[126] = {
     0x20C8, 0x0A43, 0x0782, 0x0500, 0x0808, 0x2318
 };
 
-static XGpio lmx2572_gpio;
-static uint32_t lmx2572_gpio_state;
-static int lmx2572_gpio_ready;
 static LMX2572_Device lmx2572_dev0;
 static LMX2572_Device lmx2572_dev1;
 static LMX2572_Device lmx2572_dev2;
-
-static void lmx2572_gpio_commit(void)
-{
-    XGpio_DiscreteWrite(&lmx2572_gpio, LMX2572_GPIO_OUT_CHANNEL, lmx2572_gpio_state);
-}
-
-static void lmx2572_gpio_write_mask(uint32_t mask, int level)
-{
-    if (level != 0) {
-        lmx2572_gpio_state |= mask;
-    } else {
-        lmx2572_gpio_state &= ~mask;
-    }
-
-    lmx2572_gpio_commit();
-}
-
-static void lmx2572_short_delay(void)
-{
-    volatile uint32_t i;
-
-    for (i = 0U; i < LMX2572_GPIO_DELAY_LOOPS; i++) {
-    }
-}
 
 static void lmx2572_delay_ms(uint32_t delay_ms)
 {
     usleep(delay_ms * 1000U);
 }
 
-static void LMX2572_CE_Write(LMX2572_Device *dev, int level)
-{
-    lmx2572_gpio_write_mask(dev->ce_mask, level);
-}
-
-static void LMX2572_CSB_Write(LMX2572_Device *dev, int level)
-{
-    lmx2572_gpio_write_mask(dev->csb_mask, level);
-}
-
-static void LMX2572_SCLK_Write(LMX2572_Device *dev, int level)
-{
-    lmx2572_gpio_write_mask(dev->sck_mask, level);
-}
-
-static void LMX2572_SDIO_Write(LMX2572_Device *dev, int level)
-{
-    lmx2572_gpio_write_mask(dev->sdi_mask, level);
-}
-
-static int LMX2572_MUX_Read(LMX2572_Device *dev)
-{
-    uint32_t mux_state = XGpio_DiscreteRead(&lmx2572_gpio, LMX2572_GPIO_MUX_CHANNEL);
-
-    return ((mux_state & dev->mux_mask) != 0U) ? 1 : 0;
-}
-
 int LMX2572_GpioInit(void)
 {
-    int status;
-
-    if (lmx2572_gpio_ready != 0) {
-        return XST_SUCCESS;
-    }
-
-    status = XGpio_Initialize(&lmx2572_gpio, LMX2572_GPIO_DEVICE_ID);
-    if (status != XST_SUCCESS) {
-        return status;
-    }
-
-    XGpio_SetDataDirection(&lmx2572_gpio, LMX2572_GPIO_OUT_CHANNEL, 0x00U);
-    XGpio_SetDataDirection(&lmx2572_gpio, LMX2572_GPIO_MUX_CHANNEL, 0xFFFFFFFFU);
-
-    lmx2572_gpio_state = 0U;
-    lmx2572_gpio_commit();
-    lmx2572_gpio_ready = 1;
-    return XST_SUCCESS;
+    return lmx2572_bus_gpio_init();
 }
 
 void LMX2572_Device_Init(LMX2572_Device *dev,
@@ -118,6 +54,10 @@ void LMX2572_Device_Init(LMX2572_Device *dev,
                          uint32_t sdi_mask,
                          uint32_t mux_mask)
 {
+    if (dev == 0) {
+        return;
+    }
+
     dev->ce_mask = ce_mask;
     dev->csb_mask = csb_mask;
     dev->sck_mask = sck_mask;
@@ -125,125 +65,171 @@ void LMX2572_Device_Init(LMX2572_Device *dev,
     dev->mux_mask = mux_mask;
     dev->fpd_hz = 0.0;
     memcpy(dev->reg_config, lmx2572_reg_default, sizeof(dev->reg_config));
+    dev->fpd_num_hz = 0U;
+    dev->fpd_den = 1U;
+    dev->last_requested_frequency_hz = 0U;
+    dev->last_fvco_hz = 0U;
+    dev->last_pll_n = 0U;
+    dev->last_pll_num = 0U;
+    dev->last_pll_den = 0U;
+    dev->last_chdiv = 0U;
+    dev->last_pfd_dly_sel = 0U;
+    dev->mash_order = (uint8_t)(lmx2572_shadow_get(dev->reg_config,
+                                                   LMX2572_R44) &
+                                LMX2572_R44_MASH_ORDER_MASK);
+    dev->pfd_profile_id = 0xFFU;
+    dev->last_status = (int)LMX2572_STATUS_OK;
 
-    LMX2572_CE_Write(dev, 0);
-    LMX2572_SCLK_Write(dev, 0);
-    LMX2572_SDIO_Write(dev, 0);
-    LMX2572_CSB_Write(dev, 1);
+    lmx2572_bus_set_device_idle(dev);
 }
 
 void LMX2572_WriteRegister(LMX2572_Device *dev, uint8_t reg_addr, uint16_t data)
 {
-    uint32_t tx_data = ((uint32_t)reg_addr << 16) | (uint32_t)data;
-    int i;
-
-    LMX2572_SCLK_Write(dev, 0);
-    lmx2572_short_delay();
-    LMX2572_SDIO_Write(dev, 0);
-
-    LMX2572_CSB_Write(dev, 0);
-    lmx2572_short_delay();
-
-    for (i = 0; i < 24; i++) {
-        LMX2572_SDIO_Write(dev, ((tx_data & ((uint32_t)1 << (23 - i))) != 0U) ? 1 : 0);
-        lmx2572_short_delay();
-
-        LMX2572_SCLK_Write(dev, 1);
-        lmx2572_short_delay();
-
-        LMX2572_SCLK_Write(dev, 0);
-        lmx2572_short_delay();
-    }
-
-    LMX2572_CSB_Write(dev, 1);
-    lmx2572_short_delay();
-
-    if (reg_addr < 126U) {
-        if (reg_addr == 0U) {
-            if ((data & 0x0002U) != 0U) {
-                dev->reg_config[125] = data & 0xFFFDU;
-            } else {
-                dev->reg_config[125] = data;
-            }
-        } else {
-            dev->reg_config[125U - reg_addr] = data;
+    if ((dev == 0) || (reg_addr >= LMX2572_REGISTER_COUNT)) {
+        if (dev != 0) {
+            dev->last_status = (int)LMX2572_STATUS_INVALID_ARGUMENT;
         }
+        return;
     }
+
+    lmx2572_bus_write_register(dev, reg_addr, data);
+
+    if (reg_addr == LMX2572_R0) {
+        if ((data & LMX2572_R0_RESET_MASK) != 0U) {
+            lmx2572_shadow_set(dev->reg_config,
+                               LMX2572_R0,
+                               data & (uint16_t)~LMX2572_R0_RESET_MASK);
+        } else {
+            lmx2572_shadow_set(dev->reg_config, LMX2572_R0, data);
+        }
+    } else {
+        lmx2572_shadow_set(dev->reg_config, reg_addr, data);
+    }
+
+    if (reg_addr == LMX2572_R44) {
+        dev->mash_order = (uint8_t)(data & LMX2572_R44_MASH_ORDER_MASK);
+    }
+    dev->last_status = (int)LMX2572_STATUS_OK;
 }
 
 uint16_t LMX2572_ReadRegister(LMX2572_Device *dev, uint8_t reg_addr)
 {
-    uint16_t rx_data = 0U;
-    uint32_t tx_data = (1UL << 23) | ((uint32_t)reg_addr << 16);
-    int i;
+    uint16_t rx_data;
 
-    LMX2572_CSB_Write(dev, 0);
-
-    for (i = 0; i < 8; i++) {
-        LMX2572_SCLK_Write(dev, 0);
-        lmx2572_short_delay();
-        LMX2572_SDIO_Write(dev, ((tx_data & ((uint32_t)1 << (23 - i))) != 0U) ? 1 : 0);
-        lmx2572_short_delay();
-        LMX2572_SCLK_Write(dev, 1);
-        lmx2572_short_delay();
+    if ((dev == 0) || (reg_addr >= LMX2572_REGISTER_COUNT)) {
+        if (dev != 0) {
+            dev->last_status = (int)LMX2572_STATUS_INVALID_ARGUMENT;
+        }
+        return 0U;
+    }
+    if ((lmx2572_shadow_get(dev->reg_config, LMX2572_R0) &
+         LMX2572_R0_MUXOUT_LD_SEL_MASK) != 0U) {
+        dev->last_status = (int)LMX2572_STATUS_MUX_MODE_CONFLICT;
+        return 0U;
     }
 
-    for (i = 0; i < 16; i++) {
-        LMX2572_SCLK_Write(dev, 0);
-        lmx2572_short_delay();
-        rx_data |= (uint16_t)((uint16_t)LMX2572_MUX_Read(dev) << (15 - i));
-        LMX2572_SCLK_Write(dev, 1);
-        lmx2572_short_delay();
-    }
-
-    LMX2572_CSB_Write(dev, 1);
+    rx_data = lmx2572_bus_read_register(dev, reg_addr);
+    dev->last_status = (int)LMX2572_STATUS_OK;
     return rx_data;
 }
 
 void LMX2572_Reset(LMX2572_Device *dev)
 {
-    LMX2572_WriteRegister(dev, 0x00U, dev->reg_config[125] | 0x0002U);
+    if (dev == 0) {
+        return;
+    }
+    LMX2572_WriteRegister(
+        dev,
+        LMX2572_R0,
+        lmx2572_shadow_get(dev->reg_config, LMX2572_R0) |
+            LMX2572_R0_RESET_MASK);
     lmx2572_delay_ms(10U);
 }
 
 void LMX2572_SetEnabled(LMX2572_Device *dev, bool enabled)
 {
-    LMX2572_CE_Write(dev, enabled ? 1 : 0);
+    if (dev == 0) {
+        return;
+    }
+    lmx2572_bus_set_enabled(dev, enabled);
+    dev->last_status = (int)LMX2572_STATUS_OK;
 }
 
 void LMX2572_Init(LMX2572_Device *dev)
 {
-    LMX2572_CE_Write(dev, 1);
-    lmx2572_delay_ms(10U);
-    LMX2572_Reset(dev);
-    lmx2572_delay_ms(10U);
-
-    LMX2572_WriteRegister(dev, 0, 0x231c);
-    LMX2572_WriteRegister(dev, 29, 0x0000);
-    LMX2572_WriteRegister(dev, 30, 0x18A6);
-    LMX2572_WriteRegister(dev, 34, 0x0010);
-    LMX2572_WriteRegister(dev, 36, 0x0029);
-    LMX2572_WriteRegister(dev, 37, 0x0205);
-    LMX2572_WriteRegister(dev, 38, 0x0000);
-    LMX2572_WriteRegister(dev, 39, 0x03E8);
-    LMX2572_WriteRegister(dev, 52, 0x0421);
-    LMX2572_WriteRegister(dev, 57, 0x0020);
-    LMX2572_WriteRegister(dev, 71, 0x0081);
-    LMX2572_WriteRegister(dev, 78, 0x0001);
+    if (dev == 0) {
+        return;
+    }
+    LMX2572_Init_Block(dev);
 }
 
 void LMX2572_Init_Block(LMX2572_Device *dev)
 {
-    int reg_idx;
+    unsigned int image_idx;
 
-    LMX2572_CE_Write(dev, 1);
+    if (dev == 0) {
+        return;
+    }
+    lmx2572_bus_set_enabled(dev, true);
     lmx2572_delay_ms(50U);
     LMX2572_Reset(dev);
     lmx2572_delay_ms(50U);
 
-    for (reg_idx = 0; reg_idx < 126; reg_idx++) {
-        LMX2572_WriteRegister(dev, (uint8_t)reg_idx, dev->reg_config[125 - reg_idx]);
+    /* TICS Pro exports the image R125..R0; write R0 last so FCAL starts only
+     * after the complete configuration is present in the device. */
+    for (image_idx = 0U; image_idx < LMX2572_REGISTER_COUNT; image_idx++) {
+        uint8_t reg = (uint8_t)((LMX2572_REGISTER_COUNT - 1U) - image_idx);
+        LMX2572_WriteRegister(dev, reg, dev->reg_config[image_idx]);
     }
+}
+
+static uint64_t lmx2572_gcd_u64(uint64_t a, uint64_t b)
+{
+    while (b != 0U) {
+        uint64_t remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    return a;
+}
+
+static int lmx2572_ratio_in_range(uint64_t num,
+                                  uint64_t den,
+                                  uint64_t min_hz,
+                                  uint64_t max_hz)
+{
+    if (den == 0U) {
+        return 0;
+    }
+    return (num >= min_hz * den) && (num <= max_hz * den);
+}
+
+static uint8_t lmx2572_fcal_hpfd_adj(uint64_t fpd_num, uint64_t fpd_den)
+{
+    if ((fpd_num * 2U) <= (75000000ULL * fpd_den)) {
+        return 0U;
+    }
+    if (fpd_num <= (75000000ULL * fpd_den)) {
+        return 1U;
+    }
+    if (fpd_num <= (100000000ULL * fpd_den)) {
+        return 2U;
+    }
+    return 3U;
+}
+
+static uint8_t lmx2572_fcal_lpfd_adj(uint64_t fpd_num, uint64_t fpd_den)
+{
+    if (fpd_num >= (10000000ULL * fpd_den)) {
+        return 0U;
+    }
+    if (fpd_num >= (5000000ULL * fpd_den)) {
+        return 1U;
+    }
+    if ((fpd_num * 2U) >= (5000000ULL * fpd_den)) {
+        return 2U;
+    }
+    return 3U;
 }
 
 uint32_t LMX2572_SetReferenceFrequency(LMX2572_Device *dev,
@@ -253,267 +239,265 @@ uint32_t LMX2572_SetReferenceFrequency(LMX2572_Device *dev,
                                        uint8_t multiplier,
                                        uint8_t r)
 {
-    uint32_t ref_freq_khz;
-    uint32_t f_osc2x_khz;
-    uint32_t f_mult_in_khz;
-    uint32_t f_mult_out_khz;
+    uint64_t osc_num;
+    uint64_t pre_num;
+    uint64_t pre_den;
+    uint64_t mult_num;
+    uint64_t mult_den;
+    uint64_t fpd_num;
+    uint64_t fpd_den;
+    uint64_t common;
     uint8_t mult_hi;
     uint16_t reg_data;
 
-    if ((pre_r < 1U) || (pre_r > 255U)) {
-        pre_r = 1U;
+    if (dev == 0) {
+        return 0U;
     }
-    if ((r < 1U) || (r > 255U)) {
-        r = 1U;
-    }
-    if ((doubler != 0U) && (doubler != 1U)) {
-        doubler = 0U;
-    }
-    if (doubler == 1U) {
-        if (multiplier != 1U) {
-            multiplier = 1U;
-        }
-    } else {
-        if ((multiplier != 1U) && ((multiplier < 3U) || (multiplier > 7U))) {
-            multiplier = 1U;
-        }
+    if ((ref_freq_hz < 5000000U) || (ref_freq_hz > 250000000U) ||
+        (pre_r == 0U) || (r == 0U) ||
+        ((doubler != 0U) && (doubler != 1U)) ||
+        ((multiplier != 1U) &&
+         ((multiplier < 3U) || (multiplier > 7U))) ||
+        ((doubler != 0U) && (multiplier != 1U)) ||
+        ((doubler != 0U) && (ref_freq_hz > 125000000U))) {
+        dev->last_status = (int)LMX2572_STATUS_INVALID_ARGUMENT;
+        return 0U;
     }
 
-    ref_freq_khz = ref_freq_hz / 1000U;
-    f_osc2x_khz = ref_freq_khz * (doubler ? 2U : 1U);
-    f_mult_in_khz = f_osc2x_khz / pre_r;
-    f_mult_out_khz = f_mult_in_khz * multiplier;
-
-    if (multiplier != 1U) {
-        if ((f_mult_in_khz < 10000U) || (f_mult_in_khz > 40000U)) {
-            return 0U;
-        }
-        if ((f_mult_out_khz < 60000U) || (f_mult_out_khz > 150000U)) {
-            return 0U;
-        }
+    osc_num = (uint64_t)ref_freq_hz * ((doubler != 0U) ? 2U : 1U);
+    if (!lmx2572_ratio_in_range(osc_num, 1U, 5000000U, 200000000U)) {
+        dev->last_status = (int)LMX2572_STATUS_REFERENCE_OUT_OF_RANGE;
+        return 0U;
     }
 
-    mult_hi = (f_mult_out_khz > 100000U) ? 1U : 0U;
+    pre_num = osc_num;
+    pre_den = pre_r;
+    if (!lmx2572_ratio_in_range(pre_num, pre_den, 250000U, 200000000U)) {
+        dev->last_status = (int)LMX2572_STATUS_REFERENCE_OUT_OF_RANGE;
+        return 0U;
+    }
+    if ((multiplier != 1U) &&
+        !lmx2572_ratio_in_range(pre_num, pre_den, 10000000U, 40000000U)) {
+        dev->last_status = (int)LMX2572_STATUS_REFERENCE_OUT_OF_RANGE;
+        return 0U;
+    }
 
-    reg_data = 0x0004U;
-    reg_data &= (uint16_t)~((1U << 14) | (1U << 12));
-    reg_data |= (uint16_t)((mult_hi << 14) | (doubler << 12));
-    LMX2572_WriteRegister(dev, 0x09U, reg_data);
+    mult_num = pre_num * multiplier;
+    mult_den = pre_den;
+    if ((multiplier != 1U) &&
+        !lmx2572_ratio_in_range(mult_num, mult_den, 60000000U, 150000000U)) {
+        dev->last_status = (int)LMX2572_STATUS_REFERENCE_OUT_OF_RANGE;
+        return 0U;
+    }
+    if (!lmx2572_ratio_in_range(mult_num, mult_den, 5000000U, 200000000U)) {
+        dev->last_status = (int)LMX2572_STATUS_REFERENCE_OUT_OF_RANGE;
+        return 0U;
+    }
 
-    reg_data = 0x10F8U;
-    reg_data &= (uint16_t)~0x0F80U;
-    reg_data |= (uint16_t)((multiplier & 0x1FU) << 7);
-    LMX2572_WriteRegister(dev, 0x0AU, reg_data);
+    fpd_num = mult_num;
+    fpd_den = mult_den * r;
+    if (!lmx2572_ratio_in_range(fpd_num, fpd_den, 250000U, 200000000U)) {
+        dev->last_status = (int)LMX2572_STATUS_REFERENCE_OUT_OF_RANGE;
+        return 0U;
+    }
+    common = lmx2572_gcd_u64(fpd_num, fpd_den);
+    fpd_num /= common;
+    fpd_den /= common;
+    mult_hi = (mult_num > 100000000ULL * mult_den) ? 1U : 0U;
 
-    reg_data = 0x5001U;
-    reg_data &= (uint16_t)~0x0FFFU;
-    reg_data |= (uint16_t)(pre_r & 0x0FFFU);
-    LMX2572_WriteRegister(dev, 0x0CU, reg_data);
+    reg_data = lmx2572_shadow_get(dev->reg_config, LMX2572_R9);
+    reg_data = lmx2572_field_replace(reg_data,
+                                     LMX2572_R9_MULT_HI_MASK,
+                                     14U,
+                                     mult_hi);
+    reg_data = lmx2572_field_replace(reg_data,
+                                     LMX2572_R9_OSC_2X_MASK,
+                                     12U,
+                                     doubler);
+    LMX2572_WriteRegister(dev, LMX2572_R9, reg_data);
 
-    reg_data = 0xB018U;
-    reg_data &= (uint16_t)~0x0FF0U;
-    reg_data |= (uint16_t)((r & 0xFFU) << 4);
-    LMX2572_WriteRegister(dev, 0x0BU, reg_data);
+    reg_data = lmx2572_shadow_get(dev->reg_config, LMX2572_R10);
+    reg_data = lmx2572_field_replace(reg_data,
+                                     LMX2572_R10_MULT_MASK,
+                                     LMX2572_R10_MULT_SHIFT,
+                                     multiplier);
+    LMX2572_WriteRegister(dev, LMX2572_R10, reg_data);
 
-    dev->fpd_hz = 1000.0 * (double)f_mult_out_khz / (double)r;
-    return (uint32_t)dev->fpd_hz;
+    reg_data = lmx2572_shadow_get(dev->reg_config, LMX2572_R12);
+    reg_data = lmx2572_field_replace(reg_data,
+                                     LMX2572_R12_PLL_R_PRE_MASK,
+                                     0U,
+                                     pre_r);
+    LMX2572_WriteRegister(dev, LMX2572_R12, reg_data);
+
+    reg_data = lmx2572_shadow_get(dev->reg_config, LMX2572_R11);
+    reg_data = lmx2572_field_replace(reg_data,
+                                     LMX2572_R11_PLL_R_MASK,
+                                     LMX2572_R11_PLL_R_SHIFT,
+                                     r);
+    LMX2572_WriteRegister(dev, LMX2572_R11, reg_data);
+
+    reg_data = lmx2572_shadow_get(dev->reg_config, LMX2572_R0);
+    reg_data = lmx2572_field_replace(
+        reg_data,
+        LMX2572_R0_FCAL_HPFD_ADJ_MASK,
+        LMX2572_R0_FCAL_HPFD_ADJ_SHIFT,
+        lmx2572_fcal_hpfd_adj(fpd_num, fpd_den));
+    reg_data = lmx2572_field_replace(
+        reg_data,
+        LMX2572_R0_FCAL_LPFD_ADJ_MASK,
+        LMX2572_R0_FCAL_LPFD_ADJ_SHIFT,
+        lmx2572_fcal_lpfd_adj(fpd_num, fpd_den));
+    lmx2572_shadow_set(dev->reg_config, LMX2572_R0, reg_data);
+
+    dev->fpd_num_hz = fpd_num;
+    dev->fpd_den = fpd_den;
+    dev->fpd_hz = (double)fpd_num / (double)fpd_den;
+    dev->last_status = (int)LMX2572_STATUS_OK;
+    return (uint32_t)(fpd_num / fpd_den);
 }
 
 int8_t LMX2572_SetFrequency(LMX2572_Device *dev, uint64_t frequency_hz)
 {
-    const uint16_t chdiv_list[] = {1, 2, 4, 8, 16, 32, 64, 128, 256};
-    uint16_t selected_chdiv = 0U;
-    uint32_t pll_n = 0U;
-    uint32_t pll_den = 0U;
-    uint32_t pll_num = 0U;
-    uint8_t pfd_dly_sel = 0U;
-    uint8_t chdiv_found = 0U;
+    LMX2572_FrequencyPlan plan;
+    LMX2572_Status status;
     uint16_t reg_data;
-    uint8_t i;
+    uint8_t chdiv_code;
 
-    if ((frequency_hz < 12500000UL) || (frequency_hz > 6400000000ULL)) {
+    if (dev == 0) {
         return 0;
     }
-    if (dev->fpd_hz == 0.0) {
+    if ((dev->fpd_num_hz == 0U) || (dev->fpd_den == 0U)) {
+        dev->last_status = (int)LMX2572_STATUS_INVALID_ARGUMENT;
         return 0;
     }
 
 #if LMX2572_FRACTIONAL_OPT_ENABLE
     {
-        uint64_t fpd_hz = (uint64_t)(dev->fpd_hz + 0.5);
-        uint8_t best_is_integer = 0U;
-
-        if (fpd_hz == 0U) {
-            return 0;
-        }
-
-        pll_den = (uint32_t)LMX2572_FRACTIONAL_DENOMINATOR;
-
-        /* Prefer a true integer-N candidate. For non-integer targets, retain
-         * the old first-legal-divider behavior until measured spur data
-         * justifies a stronger CHDIV cost function. */
-        for (i = 0U; i < 9U; i++) {
-            uint16_t chdiv = chdiv_list[i];
-            uint64_t candidate_vco_hz = frequency_hz * (uint64_t)chdiv;
-            uint64_t candidate_n;
-            uint64_t remainder_hz;
-            uint64_t candidate_num;
-            uint32_t min_pll_n;
-            uint8_t candidate_pfd_dly_sel;
-            uint8_t candidate_is_integer;
-
-            if ((candidate_vco_hz < 3200000000ULL) ||
-                (candidate_vco_hz > 6400000000ULL)) {
-                continue;
-            }
-
-            candidate_n = candidate_vco_hz / fpd_hz;
-            remainder_hz = candidate_vco_hz % fpd_hz;
-            candidate_num = ((remainder_hz * (uint64_t)pll_den) +
-                             (fpd_hz / 2U)) / fpd_hz;
-
-            if (candidate_num >= (uint64_t)pll_den) {
-                candidate_num = 0U;
-                candidate_n++;
-            }
-
-            if (candidate_vco_hz < 4000000000ULL) {
-                min_pll_n = 26U;
-                candidate_pfd_dly_sel = 1U;
-            } else {
-                min_pll_n = 30U;
-                candidate_pfd_dly_sel = 2U;
-            }
-
-            if (candidate_n < (uint64_t)min_pll_n) {
-                continue;
-            }
-
-            candidate_is_integer = (candidate_num == 0U) ? 1U : 0U;
-            if ((chdiv_found == 0U) ||
-                ((candidate_is_integer != 0U) && (best_is_integer == 0U))) {
-                selected_chdiv = chdiv;
-                pll_n = (uint32_t)candidate_n;
-                pll_num = (uint32_t)candidate_num;
-                pfd_dly_sel = candidate_pfd_dly_sel;
-                best_is_integer = candidate_is_integer;
-                chdiv_found = 1U;
-            }
-        }
-    }
+        const uint32_t fractional_denominator =
+            (uint32_t)LMX2572_FRACTIONAL_DENOMINATOR;
 #else
-    pll_den = 1000000UL;
-
-    for (i = 0U; i < 9U; i++) {
-        uint16_t chdiv = chdiv_list[i];
-        uint64_t f_vco_target;
-        double n_total;
-        double frac;
-        uint32_t min_pll_n;
-
-        f_vco_target = frequency_hz * (uint64_t)chdiv;
-        if ((f_vco_target < 3200000000ULL) || (f_vco_target > 6400000000ULL)) {
-            continue;
-        }
-
-        n_total = (double)f_vco_target / dev->fpd_hz;
-        pll_n = (uint32_t)floor(n_total);
-        frac = n_total - (double)pll_n;
-        pll_num = (uint32_t)(frac * (double)pll_den);
-
-        if (pll_num >= pll_den) {
-            pll_num -= pll_den;
-            pll_n += 1U;
-        }
-
-        if (f_vco_target < 4000000000ULL) {
-            min_pll_n = 26U;
-            pfd_dly_sel = 1U;
-        } else if (f_vco_target < 4900000000ULL) {
-            min_pll_n = 30U;
-            pfd_dly_sel = 2U;
-        } else {
-            min_pll_n = 30U;
-            pfd_dly_sel = 2U;
-        }
-
-        if (pll_n >= min_pll_n) {
-            selected_chdiv = chdiv;
-            chdiv_found = 1U;
-            break;
-        }
-    }
+    {
+        const uint32_t fractional_denominator = 1000000U;
 #endif
-
-    if (chdiv_found == 0U) {
+    status = lmx2572_frequency_plan(
+        frequency_hz,
+        dev->fpd_num_hz,
+        dev->fpd_den,
+        dev->mash_order,
+        fractional_denominator,
+        &plan);
+    }
+    if (status != LMX2572_STATUS_OK) {
+        dev->last_status = (int)status;
         return 0;
     }
 
-    reg_data = 0x0010U;
-    reg_data &= (uint16_t)~0x0007U;
-    reg_data |= (uint16_t)((pll_n >> 16) & 0x0007U);
-    LMX2572_WriteRegister(dev, 0x22U, reg_data);
+    reg_data = lmx2572_shadow_get(dev->reg_config, LMX2572_R34);
+    reg_data = lmx2572_field_replace(
+        reg_data,
+        LMX2572_R34_PLL_N_HIGH_MASK,
+        0U,
+        (uint16_t)(plan.pll_n >> 16));
+    LMX2572_WriteRegister(dev, LMX2572_R34, reg_data);
 
-    LMX2572_WriteRegister(dev, 0x24U, (uint16_t)(pll_n & 0xFFFFU));
-    LMX2572_WriteRegister(dev, 0x26U, (uint16_t)((pll_den >> 16) & 0xFFFFU));
-    LMX2572_WriteRegister(dev, 0x27U, (uint16_t)(pll_den & 0xFFFFU));
-    LMX2572_WriteRegister(dev, 0x2AU, (uint16_t)((pll_num >> 16) & 0xFFFFU));
-    LMX2572_WriteRegister(dev, 0x2BU, (uint16_t)(pll_num & 0xFFFFU));
+    LMX2572_WriteRegister(dev, LMX2572_R36,
+                          (uint16_t)(plan.pll_n & 0xFFFFU));
+    LMX2572_WriteRegister(dev, LMX2572_R38,
+                          (uint16_t)(plan.pll_den >> 16));
+    LMX2572_WriteRegister(dev, LMX2572_R39,
+                          (uint16_t)(plan.pll_den & 0xFFFFU));
+    LMX2572_WriteRegister(dev, LMX2572_R42,
+                          (uint16_t)(plan.pll_num >> 16));
+    LMX2572_WriteRegister(dev, LMX2572_R43,
+                          (uint16_t)(plan.pll_num & 0xFFFFU));
 
     {
-        uint16_t reg_r46 = dev->reg_config[125 - 46];
-        uint16_t reg_r45 = dev->reg_config[125 - 45];
+        uint16_t reg_r46 = lmx2572_shadow_get(dev->reg_config, LMX2572_R46);
+        uint16_t reg_r45 = lmx2572_shadow_get(dev->reg_config, LMX2572_R45);
 
-        if (selected_chdiv == 1U) {
-            reg_r45 &= (uint16_t)~(0x03U << 11);
-            reg_r45 |= (uint16_t)(0x01U << 11);
-            LMX2572_WriteRegister(dev, 0x2DU, reg_r45);
+        if (plan.chdiv == 1U) {
+            reg_r45 = lmx2572_field_replace(
+                reg_r45,
+                LMX2572_R45_OUTA_MUX_MASK,
+                LMX2572_R45_OUTA_MUX_SHIFT,
+                1U);
+            LMX2572_WriteRegister(dev, LMX2572_R45, reg_r45);
 
-            reg_r46 &= (uint16_t)~0x0003U;
-            reg_r46 |= 0x0001U;
-            LMX2572_WriteRegister(dev, 0x2EU, reg_r46);
+            reg_r46 = lmx2572_field_replace(
+                reg_r46,
+                LMX2572_R46_OUTB_MUX_MASK,
+                0U,
+                1U);
+            LMX2572_WriteRegister(dev, LMX2572_R46, reg_r46);
         } else {
-            uint8_t chdiv_code;
+            reg_r45 = lmx2572_field_replace(
+                reg_r45,
+                LMX2572_R45_OUTA_MUX_MASK,
+                LMX2572_R45_OUTA_MUX_SHIFT,
+                0U);
+            LMX2572_WriteRegister(dev, LMX2572_R45, reg_r45);
 
-            reg_r45 &= (uint16_t)~(0x03U << 11);
-            LMX2572_WriteRegister(dev, 0x2DU, reg_r45);
+            reg_r46 = lmx2572_field_replace(
+                reg_r46,
+                LMX2572_R46_OUTB_MUX_MASK,
+                0U,
+                0U);
+            LMX2572_WriteRegister(dev, LMX2572_R46, reg_r46);
 
-            reg_r46 &= (uint16_t)~0x0003U;
-            LMX2572_WriteRegister(dev, 0x2EU, reg_r46);
-
-            switch (selected_chdiv) {
-            case 2:   chdiv_code = 0U;  break;
-            case 4:   chdiv_code = 1U;  break;
-            case 8:   chdiv_code = 3U;  break;
-            case 16:  chdiv_code = 5U;  break;
-            case 32:  chdiv_code = 7U;  break;
-            case 64:  chdiv_code = 9U;  break;
-            case 128: chdiv_code = 12U; break;
-            case 256: chdiv_code = 14U; break;
-            default:  chdiv_code = 0U;  break;
+            if (lmx2572_chdiv_register_code(plan.chdiv, &chdiv_code) == 0U) {
+                dev->last_status = (int)LMX2572_STATUS_NO_VALID_DIVIDER;
+                return 0;
             }
 
+            /*
+             * Preserve the current-machine runtime value outside CHDIV. The
+             * 0xF800 base is part of the legacy P100 behavior baseline.
+             */
             reg_data = 0xF800U;
-            reg_data &= (uint16_t)~0x07C0U;
-            reg_data |= (uint16_t)((chdiv_code & 0x1FU) << 6);
-            LMX2572_WriteRegister(dev, 0x4BU, reg_data);
+            reg_data = lmx2572_field_replace(
+                reg_data,
+                LMX2572_R75_CHDIV_MASK,
+                LMX2572_R75_CHDIV_SHIFT,
+                chdiv_code);
+            LMX2572_WriteRegister(dev, LMX2572_R75, reg_data);
         }
     }
 
-    reg_data = 0x0205U;
-    reg_data &= (uint16_t)~0x3F00U;
-    reg_data |= (uint16_t)((pfd_dly_sel & 0x3FU) << 8);
-    LMX2572_WriteRegister(dev, 0x25U, reg_data);
+    reg_data = lmx2572_shadow_get(dev->reg_config, LMX2572_R37);
+    reg_data = lmx2572_field_replace(
+        reg_data,
+        LMX2572_R37_PFD_DLY_SEL_MASK,
+        LMX2572_R37_PFD_DLY_SEL_SHIFT,
+        plan.pfd_dly_sel);
+    LMX2572_WriteRegister(dev, LMX2572_R37, reg_data);
 
-    reg_data = dev->reg_config[125];
-    reg_data |= 0x0008U;
-    LMX2572_WriteRegister(dev, 0x00U, reg_data);
+    reg_data = lmx2572_shadow_get(dev->reg_config, LMX2572_R0);
+    reg_data |= LMX2572_R0_FCAL_EN_MASK;
+    LMX2572_WriteRegister(dev, LMX2572_R0, reg_data);
+
+    dev->last_requested_frequency_hz = frequency_hz;
+    dev->last_fvco_hz = plan.fvco_hz;
+    dev->last_pll_n = plan.pll_n;
+    dev->last_pll_num = plan.pll_num;
+    dev->last_pll_den = plan.pll_den;
+    dev->last_chdiv = plan.chdiv;
+    dev->last_pfd_dly_sel = plan.pfd_dly_sel;
+    dev->last_status = (int)LMX2572_STATUS_OK;
     return 1;
 }
 
 void LMX2572_SetOutputPower(LMX2572_Device *dev, uint8_t ch, int8_t power_dbm)
 {
     uint8_t power_code;
+
+    if (dev == 0) {
+        return;
+    }
+    if (ch > 1U) {
+        dev->last_status = (int)LMX2572_STATUS_INVALID_ARGUMENT;
+        return;
+    }
 
     if (power_dbm <= -8) {
         power_code = 0U;
@@ -524,45 +508,66 @@ void LMX2572_SetOutputPower(LMX2572_Device *dev, uint8_t ch, int8_t power_dbm)
     }
 
     if (ch == 0U) {
-        uint16_t r44 = dev->reg_config[125 - 44];
-        r44 &= (uint16_t)~0x3F00U;
-        r44 |= (uint16_t)((power_code & 0x3FU) << 8);
-        LMX2572_WriteRegister(dev, 0x2CU, r44);
+        uint16_t r44 = lmx2572_shadow_get(dev->reg_config, LMX2572_R44);
+        r44 = lmx2572_field_replace(r44,
+                                    LMX2572_R44_OUTA_PWR_MASK,
+                                    LMX2572_R44_OUTA_PWR_SHIFT,
+                                    power_code);
+        LMX2572_WriteRegister(dev, LMX2572_R44, r44);
     } else if (ch == 1U) {
-        uint16_t r45 = dev->reg_config[125 - 45];
-        r45 &= (uint16_t)~0x003FU;
-        r45 |= (uint16_t)(power_code & 0x3FU);
-        LMX2572_WriteRegister(dev, 0x2DU, r45);
+        uint16_t r45 = lmx2572_shadow_get(dev->reg_config, LMX2572_R45);
+        r45 = lmx2572_field_replace(r45,
+                                    LMX2572_R45_OUTB_PWR_MASK,
+                                    0U,
+                                    power_code);
+        LMX2572_WriteRegister(dev, LMX2572_R45, r45);
     }
+    dev->last_status = (int)LMX2572_STATUS_OK;
 }
 
 void LMX2572_SetOutputChannel(LMX2572_Device *dev, uint8_t channel_en)
 {
-    uint16_t reg_r44 = dev->reg_config[125 - 44];
+    uint16_t reg_r44;
 
-    reg_r44 |= (1U << 6) | (1U << 7);
+    if (dev == 0) {
+        return;
+    }
+    if (channel_en > 2U) {
+        dev->last_status = (int)LMX2572_STATUS_INVALID_ARGUMENT;
+        return;
+    }
+
+    reg_r44 = lmx2572_shadow_get(dev->reg_config, LMX2572_R44);
+
+    reg_r44 |= LMX2572_R44_OUTA_PD_MASK | LMX2572_R44_OUTB_PD_MASK;
 
     switch (channel_en) {
     case 0:
-        reg_r44 &= (uint16_t)~(1U << 6);
+        reg_r44 &= (uint16_t)~LMX2572_R44_OUTA_PD_MASK;
         break;
     case 1:
-        reg_r44 &= (uint16_t)~(1U << 7);
+        reg_r44 &= (uint16_t)~LMX2572_R44_OUTB_PD_MASK;
         break;
     case 2:
-        reg_r44 &= (uint16_t)~((1U << 6) | (1U << 7));
+        reg_r44 &= (uint16_t)~(LMX2572_R44_OUTA_PD_MASK |
+                               LMX2572_R44_OUTB_PD_MASK);
         break;
     default:
-        break;
+        return;
     }
 
-    LMX2572_WriteRegister(dev, 0x2CU, reg_r44);
+    LMX2572_WriteRegister(dev, LMX2572_R44, reg_r44);
+    dev->last_status = (int)LMX2572_STATUS_OK;
 }
 
 void LMX2572_SetOutputMux(LMX2572_Device *dev, uint8_t channel, uint8_t source)
 {
     uint16_t reg_val;
     uint8_t is_param_valid = 1U;
+
+    if (dev == 0) {
+        return;
+    }
 
     switch (channel) {
     case 0:
@@ -581,37 +586,71 @@ void LMX2572_SetOutputMux(LMX2572_Device *dev, uint8_t channel, uint8_t source)
     }
 
     if (is_param_valid == 0U) {
+        dev->last_status = (int)LMX2572_STATUS_INVALID_ARGUMENT;
         return;
     }
 
     if (channel == 0U) {
-        reg_val = dev->reg_config[125 - 45];
-        reg_val &= (uint16_t)~(0x03U << 11);
-        reg_val |= (uint16_t)(source << 11);
-        LMX2572_WriteRegister(dev, 0x2DU, reg_val);
+        reg_val = lmx2572_shadow_get(dev->reg_config, LMX2572_R45);
+        reg_val = lmx2572_field_replace(reg_val,
+                                        LMX2572_R45_OUTA_MUX_MASK,
+                                        LMX2572_R45_OUTA_MUX_SHIFT,
+                                        source);
+        LMX2572_WriteRegister(dev, LMX2572_R45, reg_val);
     } else {
-        reg_val = dev->reg_config[125 - 46];
-        reg_val &= (uint16_t)~0x0003U;
-        reg_val |= (uint16_t)source;
-        LMX2572_WriteRegister(dev, 0x2EU, reg_val);
+        reg_val = lmx2572_shadow_get(dev->reg_config, LMX2572_R46);
+        reg_val = lmx2572_field_replace(reg_val,
+                                        LMX2572_R46_OUTB_MUX_MASK,
+                                        0U,
+                                        source);
+        LMX2572_WriteRegister(dev, LMX2572_R46, reg_val);
     }
+    dev->last_status = (int)LMX2572_STATUS_OK;
 }
 
 bool LMX2572_IsLocked(LMX2572_Device *dev)
 {
-    return (LMX2572_MUX_Read(dev) != 0);
+    if (dev == 0) {
+        return false;
+    }
+    if ((lmx2572_shadow_get(dev->reg_config, LMX2572_R0) &
+         LMX2572_R0_MUXOUT_LD_SEL_MASK) == 0U) {
+        dev->last_status = (int)LMX2572_STATUS_MUX_MODE_CONFLICT;
+        return false;
+    }
+    dev->last_status = (int)LMX2572_STATUS_OK;
+    return (lmx2572_bus_read_mux(dev) != 0);
 }
 
 void LMX2572_SetMuxFunction(LMX2572_Device *dev, uint8_t mux)
 {
-    uint16_t r0 = dev->reg_config[125];
+    uint16_t r0;
 
-    r0 &= (uint16_t)~(1U << 2);
-    if (mux == 1U) {
-        r0 |= (1U << 2);
+    if (dev == 0) {
+        return;
+    }
+    if (mux > 1U) {
+        dev->last_status = (int)LMX2572_STATUS_INVALID_ARGUMENT;
+        return;
     }
 
-    LMX2572_WriteRegister(dev, 0U, r0);
+    r0 = lmx2572_shadow_get(dev->reg_config, LMX2572_R0);
+
+    r0 &= (uint16_t)~LMX2572_R0_MUXOUT_LD_SEL_MASK;
+    if (mux == 1U) {
+        r0 |= LMX2572_R0_MUXOUT_LD_SEL_MASK;
+    }
+
+    LMX2572_WriteRegister(dev, LMX2572_R0, r0);
+    dev->last_status = (int)LMX2572_STATUS_OK;
+}
+
+LMX2572_Status LMX2572_GetLastStatus(const LMX2572_Device *dev)
+{
+    if (dev == 0) {
+        return LMX2572_STATUS_NULL_DEVICE;
+    }
+    return (LMX2572_Status)dev->last_status;
 }
 
 int lmx2572_board_init(void)
@@ -681,6 +720,10 @@ int lmx2572_board_init(void)
         return XST_FAILURE;
     }
 
+    lmx2572_dev0.pfd_profile_id = (uint8_t)LMX2572_PFD_PROFILE_P100;
+    lmx2572_dev1.pfd_profile_id = (uint8_t)LMX2572_PFD_PROFILE_P100;
+    lmx2572_dev2.pfd_profile_id = (uint8_t)LMX2572_PFD_PROFILE_P100;
+
     LMX2572_SetOutputPower(&lmx2572_dev0, 0U, LMX2572_ADC_CLK_OUTPUT_POWER_DBM);
     LMX2572_SetOutputPower(&lmx2572_dev0, 1U, LMX2572_ADC_CLK_OUTPUT_POWER_DBM);
     LMX2572_SetOutputPower(&lmx2572_dev1, 0U, LMX2572_LO1_OUTPUT_POWER_DBM);
@@ -705,6 +748,23 @@ int lmx2572_board_set_frequency(uint8_t device_index, uint64_t frequency_hz)
         return XST_FAILURE;
     }
     return (LMX2572_SetFrequency(dev, frequency_hz) != 0) ? XST_SUCCESS : XST_FAILURE;
+}
+
+int lmx2572_board_apply_pfd_profile(uint8_t device_index,
+                                    uint8_t profile_id,
+                                    uint64_t frequency_hz)
+{
+    LMX2572_Device *dev = lmx2572_board_get_device(device_index);
+    const LMX2572_PfdProfile *profile =
+        lmx2572_pfd_profile_get(profile_id);
+
+    if ((dev == 0) || (profile == 0)) {
+        return XST_FAILURE;
+    }
+    return (lmx2572_pfd_profile_apply(dev, profile, frequency_hz) ==
+            LMX2572_STATUS_OK)
+        ? XST_SUCCESS
+        : XST_FAILURE;
 }
 
 bool lmx2572_board_is_locked(uint8_t device_index)
