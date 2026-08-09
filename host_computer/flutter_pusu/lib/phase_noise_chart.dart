@@ -448,19 +448,31 @@ class _PhaseNoiseChartState extends material.State<PhaseNoiseChart> {
                       showTitles: true,
                       reservedSize: _leftAxisReservedSize,
                       interval: 10,
-                      getTitlesWidget: (value, meta) => material.Text(
-                        '${value.toInt()}',
-                        style: const material.TextStyle(
-                          color: material.Colors.white,
-                          fontSize: 11,
+                      getTitlesWidget: (value, meta) => SideTitleWidget(
+                        meta: meta,
+                        space: 8,
+                        fitInside: SideTitleFitInsideData.fromTitleMeta(
+                          meta,
+                          distanceFromEdge: 4,
+                        ),
+                        child: material.Text(
+                          '${value.toInt()}',
+                          style: const material.TextStyle(
+                            color: material.Colors.white,
+                            fontSize: 11,
+                          ),
                         ),
                       ),
                     ),
-                    axisNameWidget: const material.Text(
-                      'dBc/Hz',
-                      style: material.TextStyle(
-                        color: material.Colors.white70,
-                        fontSize: 11,
+                    axisNameWidget: const material.RotatedBox(
+                      quarterTurns: 3,
+                      child: material.Text(
+                        'dBc/Hz',
+                        textAlign: material.TextAlign.center,
+                        style: material.TextStyle(
+                          color: material.Colors.white70,
+                          fontSize: 11,
+                        ),
                       ),
                     ),
                     axisNameSize: _axisNameSize,
@@ -475,10 +487,16 @@ class _PhaseNoiseChartState extends material.State<PhaseNoiseChart> {
                             .any((tick) => (tick - value).abs() < 1e-6)) {
                           return const material.SizedBox.shrink();
                         }
-                        return material.Padding(
-                          padding: const material.EdgeInsets.only(top: 6),
+                        return SideTitleWidget(
+                          meta: meta,
+                          space: 6,
+                          fitInside: SideTitleFitInsideData.fromTitleMeta(
+                            meta,
+                            distanceFromEdge: 6,
+                          ),
                           child: material.Text(
                             _formatAxisOffset(_offsetFromLog(value)),
+                            textAlign: material.TextAlign.center,
                             style: const material.TextStyle(
                               color: material.Colors.white,
                               fontSize: 11,

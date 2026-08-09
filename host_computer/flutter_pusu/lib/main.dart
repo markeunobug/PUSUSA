@@ -3156,6 +3156,62 @@ class _MyHomePageState extends State<MyHomePage> {
     return stopped;
   }
 
+  bool get _activeToolbarMeasurementRunning => switch (_measurementMode) {
+        MeasurementMode.spectrum =>
+          _spectrumRequestInFlight || _isContinuousSweepRunning,
+        MeasurementMode.phaseNoise => _phaseNoiseRunning,
+        MeasurementMode.realtimeSpectrum =>
+          _realtimeSpectrumPageKey.currentState?.isRunning ?? false,
+      };
+
+  bool get _activeToolbarMeasurementBusy =>
+      _modeSwitchInFlight ||
+      (_measurementMode == MeasurementMode.phaseNoise &&
+          _phaseNoiseCommandInFlight);
+
+  Future<void> _handleToolbarSingleMeasurement() async {
+    switch (_measurementMode) {
+      case MeasurementMode.spectrum:
+        if (_isContinuousSweepRunning) {
+          final stopped = await _stopContinuousSweep();
+          if (!stopped) return;
+        }
+        await _applyMeasurementConfigChange(forceContinuous: false);
+        return;
+      case MeasurementMode.phaseNoise:
+        await _startSinglePhaseNoiseMeasurement();
+        return;
+      case MeasurementMode.realtimeSpectrum:
+        return;
+    }
+  }
+
+  Future<void> _handleToolbarContinuousMeasurement() async {
+    switch (_measurementMode) {
+      case MeasurementMode.spectrum:
+        await _startContinuousSweep();
+        return;
+      case MeasurementMode.phaseNoise:
+        await _startContinuousPhaseNoiseMeasurement();
+        return;
+      case MeasurementMode.realtimeSpectrum:
+        return;
+    }
+  }
+
+  Future<void> _handleToolbarStopMeasurement() async {
+    switch (_measurementMode) {
+      case MeasurementMode.spectrum:
+        await _stopContinuousSweep();
+        return;
+      case MeasurementMode.phaseNoise:
+        await _stopPhaseNoiseMeasurement();
+        return;
+      case MeasurementMode.realtimeSpectrum:
+        return;
+    }
+  }
+
   Future<void> _applyFrequencyChange() {
     return _applyMeasurementConfigChange(clearDisplay: true);
   }
@@ -3492,36 +3548,7 @@ class _MyHomePageState extends State<MyHomePage> {
       case MeasurementMode.spectrum:
         return _stopContinuousSweep();
       case MeasurementMode.phaseNoise:
-        _stopPhaseNoiseDemoContinuous();
-        if (!_serialManager.isConnected) {
-          if (mounted) {
-            setState(() {
-              _phaseNoiseRunning = false;
-              _phaseNoiseCommandInFlight = false;
-              _phaseNoiseStateText = '已停止';
-            });
-          }
-          return true;
-        }
-        if (mounted) {
-          setState(() {
-            _phaseNoiseCommandInFlight = true;
-            _phaseNoiseStateText = '停止中';
-          });
-        }
-        final stopped = await _protocol.stopPhaseNoiseConfirmed();
-        if (mounted) {
-          setState(() {
-            _phaseNoiseCommandInFlight = false;
-            if (stopped) {
-              _phaseNoiseRunning = false;
-              _phaseNoiseStateText = '已停止';
-            } else {
-              _phaseNoiseStateText = '设备未确认停止';
-            }
-          });
-        }
-        return stopped;
+        return _stopPhaseNoiseSafely();
       case MeasurementMode.realtimeSpectrum:
         if (!_serialManager.isConnected) return true;
         return _realtimeSpectrumPageKey.currentState?.stopFromAgent() ??
@@ -4003,32 +4030,80 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Future<void> _stopPhaseNoiseMeasurement() async {
-    if (_phaseNoiseCommandInFlight) return;
-    _stopPhaseNoiseDemoContinuous();
-    setState(() {
-      _phaseNoiseCommandInFlight = true;
-      _phaseNoiseRunning = false;
-      _phaseNoiseStateText = _phaseNoiseUsingDemo ? '演示已停止' : '停止中';
-    });
+    await _stopPhaseNoiseSafely();
+  }
 
-    var stopped = !_serialManager.isConnected;
-    if (_serialManager.isConnected) {
-      stopped = await _protocol.stopPhaseNoiseConfirmed();
-      if (mounted) {
-        _protocol.getPhaseNoiseStatus();
+  Future<bool> _stopPhaseNoiseSafely() async {
+    if (_phaseNoiseCommandInFlight) return false;
+
+    final phaseNoiseWasRunning = _phaseNoiseRunning;
+    final demoWasRunning = _phaseNoiseUsingDemo && phaseNoiseWasRunning;
+    _stopPhaseNoiseDemoContinuous();
+
+    // Older builds routed the global phase-noise toolbar to the spectrum
+    // sweep handlers. Recover that mismatched state before changing modes.
+    if (_spectrumRequestInFlight || _isContinuousSweepRunning) {
+      final sweepStopped = await _stopContinuousSweep();
+      if (!sweepStopped) {
+        if (mounted) {
+          setState(() {
+            _phaseNoiseStateText = '频谱扫描未确认停止';
+          });
+        }
+        return false;
       }
     }
 
-    if (!mounted) return;
-    setState(() {
-      _phaseNoiseCommandInFlight = false;
-      _phaseNoiseRunning = false;
-      if (!stopped) {
-        _phaseNoiseStateText = '设备未确认停止';
-      } else if (!_phaseNoiseComplete) {
-        _phaseNoiseStateText = _phaseNoiseUsingDemo ? '演示已停止' : '已停止';
+    // Switching away from an idle phase-noise page does not require a device
+    // STOP ACK. Only a workload that was actually started must be confirmed.
+    if (!phaseNoiseWasRunning) {
+      if (mounted) {
+        setState(() {
+          _phaseNoiseCommandInFlight = false;
+          if (!_phaseNoiseComplete) {
+            _phaseNoiseStateText = '空闲';
+          }
+        });
       }
-    });
+      return true;
+    }
+
+    if (demoWasRunning || !_serialManager.isConnected) {
+      if (mounted) {
+        setState(() {
+          _phaseNoiseRunning = false;
+          _phaseNoiseCommandInFlight = false;
+          _phaseNoiseStateText = demoWasRunning ? '演示已停止' : '已停止';
+        });
+      }
+      return true;
+    }
+
+    if (mounted) {
+      setState(() {
+        _phaseNoiseCommandInFlight = true;
+        _phaseNoiseStateText = '停止中';
+      });
+    }
+    final stopped = await _protocol.stopPhaseNoiseConfirmed();
+    if (mounted) {
+      _protocol.getPhaseNoiseStatus();
+      setState(() {
+        _phaseNoiseCommandInFlight = false;
+        if (stopped) {
+          _phaseNoiseRunning = false;
+          if (!_phaseNoiseComplete) {
+            _phaseNoiseStateText = '已停止';
+          }
+        } else {
+          // Keep the running flag set so another mode switch cannot bypass
+          // the required STOP acknowledgement after a timeout.
+          _phaseNoiseRunning = true;
+          _phaseNoiseStateText = '设备未确认停止';
+        }
+      });
+    }
+    return stopped;
   }
 
   Future<void> _exportPhaseNoiseCsv() async {
@@ -6694,15 +6769,16 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   void _handleAiToolbarPressed() {
-    if (!_aiAssistantVisible) {
-      setState(() => _aiAssistantVisible = true);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        _aiAssistantKey.currentState?.showPanel();
-      });
+    if (_aiAssistantVisible) {
+      unawaited(_hideAiAssistant());
       return;
     }
-    _aiAssistantKey.currentState?.focusTextInput();
+
+    setState(() => _aiAssistantVisible = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _aiAssistantKey.currentState?.showPanel();
+    });
   }
 
   void _closeAiAssistant() {
@@ -6710,12 +6786,12 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Future<void> _hideAiAssistant() async {
-    await _aiAssistantKey.currentState?.prepareToHide();
     if (!mounted) return;
     setState(() {
       _aiAssistantVisible = false;
       _aiAssistantListening = false;
     });
+    await _aiAssistantKey.currentState?.prepareToHide();
   }
 
   void _handleAiListeningChanged(bool listening) {
@@ -6760,7 +6836,8 @@ class _MyHomePageState extends State<MyHomePage> {
                       child: const Icon(FluentIcons.settings),
                     ),
                     label: const Text('模式'),
-                    onPressed: _showModeFlyout,
+                    onPressed:
+                        _activeToolbarMeasurementBusy ? null : _showModeFlyout,
                   ),
 
                   CommandBarButton(
@@ -6777,32 +6854,30 @@ class _MyHomePageState extends State<MyHomePage> {
                     icon: const Icon(FluentIcons.play),
                     label: const Text('单次'),
                     onPressed:
-                        _measurementMode == MeasurementMode.realtimeSpectrum
+                        _measurementMode == MeasurementMode.realtimeSpectrum ||
+                                _activeToolbarMeasurementBusy
                             ? null
-                            : () async {
-                                if (_isContinuousSweepRunning) {
-                                  _stopContinuousSweep();
-                                }
-                                await _applyMeasurementConfigChange(
-                                    forceContinuous: false);
-                              },
+                            : _handleToolbarSingleMeasurement,
                   ),
                   CommandBarButton(
-                      icon: const Icon(FluentIcons.play_resume),
-                      label: const Text('连续'),
-                      onPressed:
-                          _measurementMode == MeasurementMode.realtimeSpectrum
-                              ? null
-                              : _startContinuousSweep),
+                    icon: const Icon(FluentIcons.play_resume),
+                    label: const Text('连续'),
+                    onPressed:
+                        _measurementMode == MeasurementMode.realtimeSpectrum ||
+                                _activeToolbarMeasurementBusy
+                            ? null
+                            : _handleToolbarContinuousMeasurement,
+                  ),
                   CommandBarButton(
-                    icon: Icon(_isContinuousSweepRunning
+                    icon: Icon(_activeToolbarMeasurementRunning
                         ? FluentIcons.stop
                         : FluentIcons.record2),
                     label: const Text('停止'),
                     onPressed:
-                        _measurementMode == MeasurementMode.realtimeSpectrum
+                        _measurementMode == MeasurementMode.realtimeSpectrum ||
+                                _activeToolbarMeasurementBusy
                             ? null
-                            : _stopContinuousSweep,
+                            : _handleToolbarStopMeasurement,
                   ),
                   CommandBarButton(
                     icon: const Icon(FluentIcons.camera),

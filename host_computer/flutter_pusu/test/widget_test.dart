@@ -73,7 +73,7 @@ void main() {
     await tester.pumpWidget(const material.SizedBox.shrink());
   });
 
-  testWidgets('AI assistant opens idle in Agent mode',
+  testWidgets('AI assistant toolbar button toggles the panel',
       (WidgetTester tester) async {
     await tester.binding.setSurfaceSize(const material.Size(1600, 1000));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -88,6 +88,12 @@ void main() {
     expect(find.text('AI 录音'), findsNothing);
     expect(find.textContaining('Agent · 自动执行工具计划'), findsOneWidget);
     expect(find.byIcon(material.Icons.mic_rounded), findsOneWidget);
+
+    await tester.tap(find.text('AI 助手'));
+    await tester.pump();
+
+    expect(find.textContaining('Agent · 自动执行工具计划'), findsNothing);
+    expect(find.byIcon(material.Icons.mic_rounded), findsNothing);
 
     await tester.pump(const Duration(milliseconds: 200));
     await tester.pumpWidget(const material.SizedBox.shrink());
